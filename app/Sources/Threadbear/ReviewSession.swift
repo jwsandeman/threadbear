@@ -10,6 +10,10 @@ struct ReviewService {
     var save: (Int, ReviewDraft) async throws -> DesignReview
     var respond: (Int, ReviewDraft) async throws -> DesignReview
     var cancel: (Int) async throws -> DesignReview
+    /// Whether pictures can go in the reply box (says why not itself), and
+    /// copying one in through the runner (`media.import`), as the composer does.
+    var picturesAllowed: () -> Bool = { true }
+    var importPicture: (URL) async -> ImageRef? = { _ in nil }
 }
 
 /// What the title bar's button and the zoom keys ask of the image on the stage.
@@ -130,6 +134,28 @@ final class ReviewSession {
         next.reply = text.isEmpty ? nil : text
         edit(next)
     }
+
+    /// The reply as the box holds it: a chip's mark where each picture's
+    /// [Picture N] marker is, and the pictures in that order.
+    var replyNote: AskNote {
+        let (text, images) = InlinePictures.draft(text: draft.reply ?? "", images: draft.images)
+        return AskNote(text: text, images: images)
+    }
+
+    /// What's in the reply box, words and chips: the words go as the
+    /// reply with [Picture N] markers, the pictures as the draft's images.
+    func setReply(_ note: AskNote) {
+        guard editable else { return }
+        let whole = Draft(text: note.text, images: note.images).normalized
+        var next = draft
+        let words = whole.words()
+        next.reply = words.isEmpty ? nil : words
+        next.images = whole.images
+        edit(next)
+    }
+
+    func picturesAllowed() -> Bool { service.picturesAllowed() }
+    func importPicture(_ url: URL) async -> ImageRef? { await service.importPicture(url) }
 
     func setNote(_ text: String, for id: String) {
         guard editable else { return }
@@ -405,7 +431,7 @@ final class ReviewSession {
         return ReviewDraft(pickedIds: draft.pickedIds, notes: draft.notes.compactMapValues {
             let note = $0.trimmingCharacters(in: .whitespacesAndNewlines)
             return note.isEmpty ? nil : note
-        }, reply: reply.isEmpty ? nil : reply, none: draft.none)
+        }, reply: reply.isEmpty ? nil : reply, images: draft.images, none: draft.none)
     }
 }
 

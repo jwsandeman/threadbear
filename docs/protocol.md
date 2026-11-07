@@ -675,7 +675,11 @@ a paragraph.
 // are two or more; pickedId is always the first pick, for older clients.
 // Clients send pickedIds (it wins over pickedId); a client that sends only
 // pickedId still works. none: none of them will do, never with picks.
-type ReviewDraft = { pickedId?: string, pickedIds?: string[], notes: Record<string, string>, reply?: string, none?: true }
+// images: pictures pasted, dropped or chosen in the reply box, each copied in
+// with media.import first, as a message's are; reply places them among its
+// words with [Picture N] markers (Pictures in a message). The answer
+// message carries them as its images.
+type ReviewDraft = { pickedId?: string, pickedIds?: string[], notes: Record<string, string>, reply?: string, images?: ImageRef[], none?: true }
 // media: a video (video/mp4, video/quicktime) or an HTML page (text/html)
 // the window plays or shows in place of image, which is then its still.
 type ReviewShot = { title?: string, image: ImageRef, media?: ImageRef }
@@ -735,7 +739,8 @@ shots each and 40 in all, each image at most 25 MB, video 200 MB and page
 IDs and titles, title/note at most 200/4000 characters, `url` http or https.
 Draft notes are at most 4000 characters per option and the reply 8000;
 unknown option IDs, picks of reference options and `none` with picks are
-invalid. A response needs a pick, `none`, a reply or a nonblank note.
+invalid; `images` is a list of `ImageRef`s (each with a `path`). A response
+needs a pick, `none`, a reply, a picture or a nonblank note.
 Saving an empty draft is allowed. The agent's message reads `Picked A.
 <title>.` or `Picked A + D. <title> + <title>.`, or `Picked none of them.`,
 then the reply as written, then any notes; the Mac and phone read that

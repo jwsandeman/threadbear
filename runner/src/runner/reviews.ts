@@ -79,7 +79,7 @@ export const reviewsPart = {
     this.checkReviewRevision(review, revision);
     const turnId = crypto.randomUUID();
     const next: DesignReview = {...review, draft, response: draft, status: 'answered', revision: review.revision + 1, updatedAt: this.isoNow(), replyTurnId: turnId};
-    const message: QueuedSend = {turnId, text: reviewReply(review, draft), images: [], reviewId, reviewResponse: draft};
+    const message: QueuedSend = {turnId, text: reviewReply(review, draft), images: draft.images ?? [], reviewId, reviewResponse: draft};
     // The answer and outbox live in one atomic thread.json write. Publish
     // the card only after it succeeds, then start the queued reply.
     this.persistReview(st, next, [...st.rec.queue, message], true);
@@ -176,7 +176,7 @@ export const reviewsPart = {
     st.rec.queue = st.rec.queue.filter(q => !q.reviewId || !sent.has(q.reviewId));
     for (const [id, review] of reviews) {
       if (review.status === 'answered' && review.replyTurnId && review.response && !sent.has(id) && !st.rec.queue.some(q => q.reviewId === id)) {
-        st.rec.queue.push({turnId: review.replyTurnId, text: reviewReply(review, review.response), images: [], reviewId: id, reviewResponse: review.response});
+        st.rec.queue.push({turnId: review.replyTurnId, text: reviewReply(review, review.response), images: review.response.images ?? [], reviewId: id, reviewResponse: review.response});
       }
       if (latest.get(id)?.revision !== review.revision) this.emit(st, {type: 'review.updated', review});
     }

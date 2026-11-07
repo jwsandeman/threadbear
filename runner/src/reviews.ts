@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { expandHome } from './config.ts';
 import { readImageInfo, readVideoInfo } from './media.ts';
-import type { DesignReview, ReviewDraft } from './protocol.ts';
+import type { DesignReview, ReviewDraft, ImageRef } from './protocol.ts';
 import { ErrorCode, RpcError } from './protocol.ts';
 
 // An option's pictures: `path` and then `shots`, or `shots` alone. One option
@@ -144,20 +144,36 @@ export function reviewDraft(review: DesignReview, raw: unknown, answer = false):
     if (note) notes[id] = note;
   }
   const reply = text(d.reply, 'reply', 8000);
-  if (answer && !picks.length && !none && !reply && !Object.keys(notes).length) bad('Pick an option or write a reply.');
+  const images = draftImages(d.images);
+  if (answer && !picks.length && !none && !reply && !images.length && !Object.keys(notes).length) bad('Pick an option or write a reply.');
   return {
     // pickedIds only for more than one, so a single pick saves as it always did.
     ...(picks.length ? { pickedId: picks[0] } : {}),
     ...(picks.length > 1 ? { pickedIds: picks } : {}),
     notes: { ...notes },
     ...(reply ? { reply } : {}),
+    ...(images.length ? { images } : {}),
     ...(none ? { none: true as const } : {}),
   };
+}
+
+// Pictures pasted in the reply box, as threads.send takes a message's:
+// each an ImageRef with a path (media.import's answer). Width and height
+// come along when the client sends them.
+function draftImages(raw: unknown): ImageRef[] {
+  if (raw === undefined) return [];
+  if (!Array.isArray(raw)) return bad('images must be an array.');
+  return raw.map((x) => {
+    if (!x || typeof x !== 'object' || typeof (x as ImageRef).path !== 'string') return bad('each image needs a path.');
+    const { path, mediaType, width, height } = x as ImageRef;
+    return { path, mediaType: typeof mediaType === 'string' ? mediaType : 'image/png', ...(typeof width === 'number' ? { width } : {}), ...(typeof height === 'number' ? { height } : {}) };
+  });
 }
 
 export function sameDraft(a: ReviewDraft | undefined, b: ReviewDraft): boolean {
   if (!a || a.pickedId !== b.pickedId || (a.pickedIds ?? []).join('\n') !== (b.pickedIds ?? []).join('\n')) return false;
   if ((a.reply ?? '') !== (b.reply ?? '') || !!a.none !== !!b.none) return false;
+  if ((a.images ?? []).map(i => i.path).join('\n') !== (b.images ?? []).map(i => i.path).join('\n')) return false;
   const ids = Object.keys(a.notes);
   return ids.length === Object.keys(b.notes).length && ids.every(id => a.notes[id] === b.notes[id]);
 }
