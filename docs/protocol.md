@@ -4717,7 +4717,15 @@ schedule on it, and mint phone tokens. Now there are two kinds of key, and
   with no runner id. Rows under a runner id that has or had a key of its own go
   to nobody, the owner included: even one window the main Mac hadn't read
   (a 5-hour one at 0%) would keep its pools off a login, and its own rows
-  would then pass it on to the other Macs as its word. The main Mac reads
+  would then pass it on to the other Macs as its word. Since 7 Nov 2026
+  each `accounts` row the owner key writes carries `byOwnerKey: true`
+  (`setAccounts`, `upsertAccounts`; a runner key's rows never do), and
+  such a row is the owner's word whatever the id's key history, unless
+  the id has a live key now (the owner can't write its rows then, so the
+  row is from before the key). So a Mac moved from a runner key back to
+  the owner key shares again once its runner rewrites its rows; a row
+  without the field counts as before, and the rows its old key wrote
+  never do. The main Mac reads
   its logins itself (Token Stats, its own turns). A runner key's readings
   are still stored, for the phone to show that Mac's logins: read no later
   than now, as its threads' activity is, and each window's reset no later

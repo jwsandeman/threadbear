@@ -765,6 +765,9 @@ export default defineSchema({
         notice: v.optional(v.string()),
       }),
     ),
+    // The owner key wrote this row (sharedUsage, 7 Nov 2026). A runner key's
+    // rows never carry it; a row from before it has none.
+    byOwnerKey: v.optional(v.boolean()),
   })
     .index('by_runnerId', ['runnerId'])
     // sync:upsertAccounts (API 37) finds the one account it changes.
