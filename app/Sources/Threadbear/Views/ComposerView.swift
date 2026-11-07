@@ -1463,8 +1463,13 @@ extension ComposerTextView {
         return found
     }
 
+    /// The box is plain text, so super's list has no picture types, and
+    /// AppKit greys out Paste (and so ⌘V) when the clipboard holds only a
+    /// screenshot: `paste(_:)` never ran, and nothing happened (Jason, 7 Nov).
+    /// The scripted paste in the tests calls `paste` straight, which hid it.
+    static let pictureTypes: [NSPasteboard.PasteboardType] = [.fileURL, .png, .tiff]
     override var readablePasteboardTypes: [NSPasteboard.PasteboardType] {
-        pictures == nil ? super.readablePasteboardTypes : [Self.clipType] + super.readablePasteboardTypes
+        pictures == nil ? Self.pictureTypes + super.readablePasteboardTypes : [Self.clipType] + Self.pictureTypes + super.readablePasteboardTypes
     }
 
     override func preferredPasteboardType(from availableTypes: [NSPasteboard.PasteboardType], restrictedToTypesFrom allowedTypes: [NSPasteboard.PasteboardType]?) -> NSPasteboard.PasteboardType? {

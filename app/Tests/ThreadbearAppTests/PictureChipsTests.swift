@@ -102,6 +102,39 @@ final class PictureChipsTests: XCTestCase {
         XCTAssertEqual(chips(textView).map(\.number), [1, 2, 3])
     }
 
+    /// A screenshot on the clipboard is only PNG and TIFF, no words. The
+    /// box is plain text, so AppKit's own list had no picture types and it
+    /// greyed Paste out: ⌘V did nothing at all (Jason, 7 Nov). The menu
+    /// item must validate, and a real paste must make a chip.
+    func testAnImageOnlyClipboardCanBePasted() async throws {
+        let (window, textView) = composer()
+        window.makeFirstResponder(textView)
+        textView.replaceText("look ")
+        textView.setSelectedRange(NSRange(location: 5, length: 0))
+        textView.pictures = .init(allowed: { true }, importOne: { url in ImageRef(path: "/inbox/" + url.lastPathComponent, mediaType: "image/png") })
+        let image = NSImage(size: NSSize(width: 2, height: 2), flipped: false) { rect in NSColor.red.setFill(); rect.fill(); return true }
+        let png = try XCTUnwrap(NSBitmapImageRep(data: try XCTUnwrap(image.tiffRepresentation))?.representation(using: .png, properties: [:]))
+        // `paste` reads the general pasteboard, so the test uses it and puts
+        // back whatever was on it (a run cleared Jason's screenshot, 7 Nov).
+        let pasteboard = NSPasteboard.general
+        let before = (pasteboard.pasteboardItems ?? []).map { item in
+            let copy = NSPasteboardItem()
+            for type in item.types { if let data = item.data(forType: type) { copy.setData(data, forType: type) } }
+            return copy
+        }
+        defer { pasteboard.clearContents(); if !before.isEmpty { pasteboard.writeObjects(before) } }
+        pasteboard.clearContents()
+        pasteboard.setData(png, forType: .png)
+
+        XCTAssertNotNil(pasteboard.availableType(from: textView.readablePasteboardTypes), "Paste stays enabled for a picture alone")
+        let item = NSMenuItem(title: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        XCTAssertTrue(textView.validateUserInterfaceItem(item))
+        textView.paste(nil)
+        try await until { textView.draftNow.images.count == 1 }
+        XCTAssertEqual(textView.draftNow.text, "look \(m) ")
+        XCTAssertTrue(textView.draftNow.images[0].path.hasPrefix("/inbox/pasted-"))
+    }
+
     /// One that couldn't be read goes again; none go where they aren't allowed.
     func testAPictureThatCouldNotBeReadGoes() async throws {
         let (_, textView) = composer()
