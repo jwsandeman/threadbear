@@ -492,17 +492,20 @@ test('linear-text helpers give what the regexes they replaced gave', async () =>
 // ------------------------------------- review pages (Daybreak, 7 Nov 2026)
 
 // CPU time, not the clock, so a loaded machine's waits don't count; the
-// best of up to five, as in `fast`.
+// best of up to five, as in `fast`. 300 ms, not 100: a megabyte of
+// `url('` takes 14 ms of CPU on a performance core and 90 to 120 ms on an
+// efficiency core, which is where `tb land` runs the check (background
+// priority); the regexes this guards against took seconds.
 function cheap<T>(what: string, fn: () => T): T {
   let best = Infinity;
   let out!: T;
-  for (let i = 0; i < 5 && best >= 100; i++) {
+  for (let i = 0; i < 5 && best >= 300; i++) {
     const cpu = process.cpuUsage();
     out = fn();
     const { user, system } = process.cpuUsage(cpu);
     best = Math.min(best, (user + system) / 1000);
   }
-  assert.ok(best < 100, `${what} took ${Math.round(best)} ms of CPU`);
+  assert.ok(best < 300, `${what} took ${Math.round(best)} ms of CPU`);
   return out;
 }
 
