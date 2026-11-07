@@ -1855,15 +1855,30 @@ async function writePools(ctx: { db: MutationCtx['db'] }, runnerId: string, pool
 // word too, never what that key's rows name (F3): `runnerLogins`, which
 // only the owner key writes. It gets no runner id (runnersList is the
 // owner's alone).
+//
+// Since 7 Nov 2026 each row says who wrote it (`byOwnerKey`, set by
+// setAccounts and upsertAccounts under the owner key, never under a runner
+// key). A row with it is the owner's word whatever the runner id's key
+// history, unless that id has a live key now: then the owner can't write
+// its rows (actAs), so the row is from before the key and the key's own
+// writes are what count. A row without it is as before: the owner's only
+// if the id never had a key. So a Mac moved from a runner key back to the
+// owner key (the 7 Nov handover) shares again once its runner rewrites its
+// rows, and the rows its old key wrote never do.
 export const sharedUsage = query({
   args: { key: v.string(), runnerId: v.optional(v.string()) },
   returns: v.array(v.object({ runnerId: v.optional(v.string()), provider: v.string(), email: v.string(), usage: v.any(), byOwnerKey: v.optional(v.boolean()) })),
   handler: async (ctx, { key, runnerId }) => {
     const caller = await runnerAuth(ctx, key, 'sharedUsage');
-    // Every runner id that has had a key of its own, live or revoked: its
-    // rows are (or were) that key's. Key rows are never deleted, only revoked.
+    // Every runner id that has had a key of its own, live or revoked, and
+    // those with one live now. Key rows are never deleted, only revoked.
     const keyed = new Set<string>();
-    for (const k of await ctx.db.query('runnerKeys').collect()) keyed.add(k.runnerId);
+    const live = new Set<string>();
+    for (const k of await ctx.db.query('runnerKeys').collect()) {
+      keyed.add(k.runnerId);
+      if (!k.revokedAt) live.add(k.runnerId);
+    }
+    const ownersWord = (row: { runnerId: string; byOwnerKey?: boolean }) => (row.byOwnerKey === true ? !live.has(row.runnerId) : !keyed.has(row.runnerId));
     const sharesOf = async (id: string) => new Set((await ctx.db.query('runnerLogins').withIndex('by_runnerId', (q) => q.eq('runnerId', id)).take(CAP.accounts)).map((l) => loginKey(l.provider, l.email)));
     const mine = caller.owner ? undefined : await sharesOf(caller.runnerId);
     // A runner key the owner hasn't said shares anything gets nothing, and
@@ -1885,7 +1900,7 @@ export const sharedUsage = query({
     const out = [];
     for (const row of rows) {
       if (!row.email || !row.usage) continue;
-      if (keyed.has(row.runnerId)) continue;
+      if (!ownersWord(row)) continue;
       if (mine && !mine.has(loginKey(row.provider, row.email))) continue;
       if (impossibleUsage(row.usage, now)) continue;
       out.push({ ...(caller.owner ? { runnerId: row.runnerId } : {}), provider: row.provider, email: row.email, usage: row.usage, byOwnerKey: true });
@@ -1893,6 +1908,13 @@ export const sharedUsage = query({
     return out;
   },
 });
+
+// A runner key's row never says the owner wrote it, whatever it sent (the
+// validator turns the field down; this is for anything that doesn't).
+function unmarked<T extends object>(a: T): T {
+  const { byOwnerKey: _theirs, ...rest } = a as T & { byOwnerKey?: unknown };
+  return rest as T;
+}
 
 // A runner key's accounts as they may be stored: each reading fitted
 // (fitUsage), too big ones left out, at most CAP.accounts.
@@ -1914,7 +1936,7 @@ export const setAccounts = mutation({
     await actAs(ctx, caller, runnerId);
     // A runner key's: fitted (fitAccount), ones too big left out, and at most CAP.accounts.
     const now = Date.now();
-    const fitting = caller.owner ? accounts : accounts.flatMap((a) => fitAccount(a, now) ?? []).slice(0, CAP.accounts);
+    const fitting = caller.owner ? accounts.map((a) => ({ ...a, byOwnerKey: true })) : accounts.flatMap((a) => fitAccount(unmarked(a), now) ?? []).slice(0, CAP.accounts);
     await replaceRows(ctx, 'accounts', runnerId, fitting);
     return null;
   },
@@ -1936,12 +1958,13 @@ export const upsertAccounts = mutation({
     let count = caller.owner ? 0 : (await ctx.db.query('accounts').withIndex('by_runnerId', (q) => q.eq('runnerId', runnerId)).take(CAP.accounts + 1)).length;
     const now = Date.now();
     for (const given of accounts) {
-      const a = caller.owner ? given : fitAccount(given, now);
+      const a = caller.owner ? given : fitAccount(unmarked(given), now);
       if (!a) continue;
       const existing = await one(a.id);
-      if (existing) await ctx.db.replace(existing._id, { ...a, runnerId });
+      const row = { ...a, runnerId, ...(caller.owner ? { byOwnerKey: true } : {}) };
+      if (existing) await ctx.db.replace(existing._id, row);
       else if (caller.owner || count < CAP.accounts) {
-        await ctx.db.insert('accounts', { ...a, runnerId });
+        await ctx.db.insert('accounts', row);
         count++;
       }
     }

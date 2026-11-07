@@ -126,6 +126,33 @@ test("a runner whose key was revoked: its rows still aren't the owner's, and its
   assert.deepEqual(await shared(s, OWNER, M5), []);
 });
 
+test("a runner moved back onto the owner key: the rows the owner key writes under its id are shared, its old key's rows never are", async () => {
+  const s = await setup();
+  const real = usage({ readAt: iso(Date.now() - 60_000), week: 60, resetsAt: iso(Date.now() + 3 * DAY) });
+  // Bruce's key wrote rows, then was revoked; the Mac came back on the owner key.
+  await call(s.ctx, sync.setAccounts, { key: BRUCE_KEY, runnerId: BRUCE, accounts: [account('claude-main', MINE, FAKE)] });
+  await call(s.ctx, sync.revokeRunnerKey, { key: OWNER, runnerId: BRUCE });
+  assert.deepEqual(await shared(s, OWNER, M5), [], "the old key's rows aren't the owner's word");
+  // The owner key rewrites its rows (a runner start's setAccounts).
+  await call(s.ctx, sync.setAccounts, { key: OWNER, runnerId: BRUCE, accounts: [account('claude-main', MINE, real)] });
+  assert.equal(s.rows('accounts').find((r) => r.runnerId === BRUCE)!.byOwnerKey, true);
+  assert.deepEqual(await shared(s, OWNER, M5), [{ runnerId: BRUCE, provider: 'claude', email: MINE, usage: real, byOwnerKey: true }]);
+  // And upserts, both ways round.
+  await call(s.ctx, sync.upsertAccounts, { key: OWNER, runnerId: BRUCE, accounts: [account('claude-2', OTHER, real)], removed: [] });
+  assert.deepEqual((await shared(s, OWNER, M5)).map((r) => r.email).sort(), [MINE, OTHER].sort());
+  // Pixel (a live key) listed for the login gets the owner's reading from Bruce's id too.
+  await call(s.ctx, sync.setRunnerLogins, { key: OWNER, runnerId: PIXEL, logins: [{ provider: 'claude', email: MINE }] });
+  assert.deepEqual(await shared(s, PIXEL_KEY, PIXEL), [{ provider: 'claude', email: MINE, usage: real, byOwnerKey: true }]);
+  // Rows the owner wrote before giving an id a key don't count while that key is live.
+  await call(s.ctx, sync.setAccounts, { key: OWNER, runnerId: 'laterkeyed01', accounts: [account('claude-main', MINE, real)] });
+  assert.equal((await shared(s, OWNER, M5)).some((r) => r.runnerId === 'laterkeyed01'), true);
+  await s.ctx.db.insert('runnerKeys', { runnerId: 'laterkeyed01', keyHash: await sha256('tbr_later'), name: 'later', createdAt: 3 });
+  assert.equal((await shared(s, OWNER, M5)).some((r) => r.runnerId === 'laterkeyed01'), false);
+  // A runner key never writes the mark, even if it tries.
+  await call(s.ctx, sync.upsertAccounts, { key: PIXEL_KEY, runnerId: PIXEL, accounts: [{ ...account('p', MINE, real), byOwnerKey: true } as any], removed: [] });
+  assert.notEqual(s.rows('accounts').find((r) => r.runnerId === PIXEL && r.id === 'p')!.byOwnerKey, true);
+});
+
 test('only the owner key lists logins, only for a runner with a live key, and a new key for the id starts with none', async () => {
   const s = await setup();
   await assert.rejects(call(s.ctx, sync.setRunnerLogins, { key: BRUCE_KEY, runnerId: BRUCE, logins: [{ provider: 'claude', email: MINE }] }), /forbidden|only the main Mac/);
