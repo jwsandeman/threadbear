@@ -69,6 +69,10 @@ struct NewThreadView: View {
                     DictationNotes(dictation: dictation)
                     if model.canSendPhotos, !photos.isEmpty || adding > 0 { PhotoStrip(words: words) }
                 }
+                // The words are taken as Start is tapped: anything typed or
+                // added while it goes would be lost (Mike, 7 Nov). The pickers
+                // below stay live, as start() reads them once the photos are up.
+                .disabled(starting != nil)
                 if model.canChooseRunner || !models.isEmpty {
                     Section {
                         if model.canChooseRunner {

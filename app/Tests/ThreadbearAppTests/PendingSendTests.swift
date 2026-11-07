@@ -56,6 +56,40 @@ final class PendingSendTests: XCTestCase {
         XCTAssertEqual(app.errorMessage, "Busy")
     }
 
+    // MARK: Lifting off the composer
+
+    func testOnlyAMessageGoingToTheRunnerNowRises() {
+        func row(_ pending: UserMessage.Pending?) -> TranscriptRow {
+            TranscriptRow(id: "u", seq: 1, content: .user(UserMessage(text: "Hi", pending: pending)))
+        }
+        XCTAssertTrue(SendLift.rises(row(.sending)))
+        XCTAssertFalse(SendLift.rises(row(.queued)), "one queued behind a turn waits with its clock")
+        XCTAssertFalse(SendLift.rises(row(nil)), "history doesn't rise")
+    }
+
+    /// Well under a fifth of a second, or it reads as latency, and it's on
+    /// the layer rather than stepped from the main thread.
+    func testTheLiftIsQuickAndOnTheLayer() throws {
+        XCTAssertLessThan(SendLift.firstFrame + SendLift.duration, 0.2)
+        let parent = FlippedForLift(frame: NSRect(x: 0, y: 0, width: 100, height: 100))
+        parent.wantsLayer = true
+        let cell = NSView(frame: parent.bounds)
+        parent.addSubview(cell)
+        SendLift.lift(cell)
+        XCTAssertNotNil(cell.layer?.animation(forKey: SendLift.key))
+        XCTAssertEqual(cell.downward(14), 14, "down is +y in a flipped view")
+        XCTAssertEqual(parent.downward(14), -14, "and -y in one that isn't")
+    }
+
+    /// A recycled cell mustn't bring its lift to another row.
+    func testACellDropsItsLiftWhenReused() {
+        let cell = RowCellView()
+        SendLift.lift(cell)
+        XCTAssertNotNil(cell.layer?.animation(forKey: SendLift.key))
+        cell.prepareForReuse()
+        XCTAssertNil(cell.layer?.animation(forKey: SendLift.key))
+    }
+
     /// The pictures' chips go as [Picture N] markers where they sat, the
     /// pictures in the chips' order (docs/protocol.md, "Pictures in a
     /// message"); a failed send puts the chips back.
@@ -415,7 +449,7 @@ final class PendingSendTests: XCTestCase {
 
 /// Holds every request until the test answers or fails it, like a runner
 /// whose event loop is stalled.
-private final class HoldingTransport: RPCTransport, @unchecked Sendable {
+final class HoldingTransport: RPCTransport, @unchecked Sendable {
     private let lock = NSLock()
     private var inbox: [Data] = []
     private var waiter: CheckedContinuation<Data, Error>?
@@ -499,4 +533,8 @@ private final class HoldingTransport: RPCTransport, @unchecked Sendable {
             lock.unlock()
         }
     }
+}
+
+private final class FlippedForLift: NSView {
+    override var isFlipped: Bool { true }
 }

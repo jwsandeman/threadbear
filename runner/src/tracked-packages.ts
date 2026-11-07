@@ -167,6 +167,85 @@ export function bareImport(fromDir: string, spec: string, top: string, reads?: R
   return { files: [...tracked.files].sort() };
 }
 
+// The packages in the node_modules folders from `fromDir` up, inside the
+// repo at `top`, that are links to something of the repo's outside any
+// node_modules: workspace and `file:` packages. Node follows the link and
+// loads the repo's own files, which aren't tracked under node_modules, so
+// bareImport doesn't count them. Not a package npm installed (real files in
+// node_modules, or pnpm's links into its store there), nor one outside the
+// repo (a worktree's node_modules linked to the main checkout's). Each folder
+// is watched, so a link turning up shows in a cached hash.
+export function linkedPackages(fromDir: string, top: string, reads?: Reads): string[] {
+  const out = new Set<string>();
+  const take = (p: string) => {
+    let real: string | undefined;
+    try {
+      real = reads ? reads.real(p) : fs.realpathSync(p);
+    } catch {
+      return;
+    }
+    if (real !== undefined && inside(real, top) && !inNodeModules(path.relative(top, real))) out.add(real);
+  };
+  const links = (dir: string): fs.Dirent[] => {
+    try {
+      return fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return [];
+    }
+  };
+  for (let d = fromDir; inside(d, top); d = path.dirname(d)) {
+    const nm = path.join(d, 'node_modules');
+    reads?.watch(nm);
+    for (const e of links(nm)) {
+      if (e.isSymbolicLink()) take(path.join(nm, e.name));
+      else if (e.isDirectory() && e.name.startsWith('@')) {
+        reads?.watch(path.join(nm, e.name));
+        for (const s of links(path.join(nm, e.name))) if (s.isSymbolicLink()) take(path.join(nm, e.name, s.name));
+      }
+    }
+    if (d === top || path.dirname(d) === d) break;
+  }
+  return [...out].sort();
+}
+
+// Every file of a package the repo links into node_modules, bar its own
+// node_modules and .git. All of them, as its package.json's `exports` and
+// `main` decide which one an import loads, by rules this doesn't repeat.
+// `problem` past `limit`: what's over can't be vouched for.
+export function packageFiles(root: string, limit: number): { files: string[] } | { problem: string } {
+  try {
+    if (fs.statSync(root).isFile()) return { files: [root] };
+  } catch {
+    return { files: [] };
+  }
+  const files: string[] = [];
+  const queue = [root];
+  while (queue.length) {
+    const dir = queue.shift()!;
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const e of entries.sort((a, b) => (a.name < b.name ? -1 : 1))) {
+      if (e.name === 'node_modules' || e.name === '.git') continue;
+      const p = path.join(dir, e.name);
+      if (e.isDirectory()) queue.push(p);
+      else if (e.isFile()) files.push(p);
+      else if (e.isSymbolicLink()) {
+        // A link to a folder could lead anywhere or back, and one to a file
+        // makes a `.js` name stand for what isn't (Codex's review, 7 Nov).
+        // As for links a repo commits under node_modules: not followed.
+        return { problem: `${path.relative(root, p)} in it is a link, which patch trust doesn't follow.` };
+      }
+      if (e.name.endsWith('.node')) return { problem: `${path.relative(root, p)} in it is a native addon, which patch trust can't read.` };
+      if (files.length > limit) return { problem: `it has more than ${limit} files, more than patch trust follows.` };
+    }
+  }
+  return { files };
+}
+
 // For the module hooks (verified-imports.ts): why a file a trusted patch's
 // bare import resolved to mustn't load from disk, or undefined when it may:
 // one git tracks under node_modules in the patch's repo (`top`) that

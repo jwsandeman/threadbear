@@ -779,7 +779,7 @@ test("review 2: a test runner finding its own tests, or a program that loads its
     assert.equal((trust.checkClaude(dir) as { reason?: string }).reason, 'unchecked', command);
   }
   // Ones that load nothing from the folder still can be.
-  for (const command of ['say done', 'afplay /System/Library/Sounds/Glass.aiff', 'echo hi | tee -a log.txt', 'ls -la']) {
+  for (const command of ['say done', 'afplay /System/Library/Sounds/Glass.aiff', 'echo hi | wc -l', 'ls -la']) {
     settingsIn(dir, { hooks: { Stop: [{ hooks: [{ type: 'command', command }] }] } });
     assert.notEqual((trust.checkClaude(dir) as { reason?: string }).reason, 'unchecked', command);
   }
@@ -829,8 +829,11 @@ test('review 3: a program that loads its config from the folder is caught inside
     hook(command);
     assert.equal((trust.checkClaude(dir) as { reason?: string }).reason, 'unchecked', command);
   }
-  // A script's own functions are its own words.
+  // A script's own functions are off the short list of shell now
+  // (shell-allowlist.ts, 7 Nov): one without them is fine.
   hook('sh fine.sh');
+  assert.match((trust.checkClaude(dir) as { problem?: string }).problem ?? '', /fine\.sh line 1 uses a `\(` after a word \(a function/);
+  fs.writeFileSync(path.join(dir, 'fine.sh'), 'echo start\nsay done\n');
   assert.notEqual((trust.checkClaude(dir) as { reason?: string }).reason, 'unchecked');
 });
 
