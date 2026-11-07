@@ -1323,7 +1323,8 @@ private struct ReviewReplyBox: NSViewRepresentable {
         box.pictures = ComposerTextView.Pictures(
             allowed: { [weak session] in session?.picturesAllowed() ?? false },
             importOne: { [weak session] url in await session?.importPicture(url) })
-        box.onSend = send
+        // One box, no next ask to go on to: Return and ⌘Return both send.
+        box.onReturn = { _ in send() }
         box.show(session.replyNote)
         return box
     }
