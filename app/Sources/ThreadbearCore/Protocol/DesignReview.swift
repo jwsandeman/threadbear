@@ -9,13 +9,17 @@ public struct ReviewDraft: Sendable, Hashable, Codable {
     public var notes: [String: String]
     /// His own words on the whole review.
     public var reply: String?
+    /// Pictures pasted in the reply box, placed in `reply` by [Picture N]
+    /// markers as a message's are (Jason, 7 Nov 2026).
+    public var images: [ImageRef]
     /// None of them will do.
     public var none: Bool
 
-    public init(pickedId: String? = nil, pickedIds: [String]? = nil, notes: [String: String] = [:], reply: String? = nil, none: Bool = false) {
+    public init(pickedId: String? = nil, pickedIds: [String]? = nil, notes: [String: String] = [:], reply: String? = nil, images: [ImageRef] = [], none: Bool = false) {
         self.pickedIds = pickedIds ?? pickedId.map { [$0] } ?? []
         self.notes = notes
         self.reply = reply
+        self.images = images
         self.none = none
     }
 
@@ -32,6 +36,7 @@ public struct ReviewDraft: Sendable, Hashable, Codable {
         pickedIds = all ?? first.map { [$0] } ?? []
         notes = (try? c.decodeIfPresent([String: String].self, forKey: .notes)) ?? [:]
         reply = (try? c.decodeIfPresent(String.self, forKey: .reply)) ?? nil
+        images = ((try? c.decodeIfPresent([ImageRef].self, forKey: .images)) ?? nil) ?? []
         none = ((try? c.decodeIfPresent(Bool.self, forKey: .none)) ?? nil) ?? false
     }
 
@@ -41,6 +46,7 @@ public struct ReviewDraft: Sendable, Hashable, Codable {
         if pickedIds.count > 1 { try c.encode(pickedIds, forKey: .pickedIds) }
         try c.encode(notes, forKey: .notes)
         try c.encodeIfPresent(reply, forKey: .reply)
+        if !images.isEmpty { try c.encode(images, forKey: .images) }
         if none { try c.encode(true, forKey: .none) }
     }
 
@@ -57,7 +63,7 @@ public struct ReviewDraft: Sendable, Hashable, Codable {
         guard notes.allSatisfy({ ids.contains($0.key) && $0.value.utf16.count <= 4000 }) else { return false }
         guard (reply ?? "").utf16.count <= 8000, !(none && !pickedIds.isEmpty) else { return false }
         guard pickedIds.allSatisfy({ id in options.contains(where: { $0.id == id && !$0.reference }) }) else { return false }
-        return !pickedIds.isEmpty || none || hasReply || hasNotes
+        return !pickedIds.isEmpty || none || hasReply || hasNotes || !images.isEmpty
     }
 
     public var jsonValue: JSONValue {
@@ -66,11 +72,12 @@ public struct ReviewDraft: Sendable, Hashable, Codable {
         // Always the list, so a runner that knows it takes it over pickedId.
         value["pickedIds"] = .array(pickedIds.map(JSONValue.string))
         if let reply { value["reply"] = .string(reply) }
+        if !images.isEmpty { value["images"] = .array(images.map(\.jsonValue)) }
         if none { value["none"] = .bool(true) }
         return .object(value)
     }
 
-    enum CodingKeys: String, CodingKey { case pickedId, pickedIds, notes, reply, none }
+    enum CodingKeys: String, CodingKey { case pickedId, pickedIds, notes, reply, images, none }
 }
 
 /// One picture of an option: its first, or another screen or state of it.

@@ -195,7 +195,9 @@ starts small enough to see whole). Then scroll or drag to move around, or use
 the small picture in the corner to jump to a part. Pinching out, ⌘0, Esc or a
 double-click goes back to the whole thing, and ⌘+ and ⌘- zoom too. Tick as
 many as you like, or None if none of them will do, write what you think in
-the box at the bottom, and Send takes it all back to the thread.
+the box at the bottom (paste or drop screenshots in it too, or use its
+picture button: each goes in as a chip, as in the message box; Return
+sends, Shift-Return adds a line), and Send takes it all back to the thread.
 
 Inside a thread, rest the pointer on a link for a moment, in a reply or on a
 Needs you card's buttons, to see where it goes: a picture of the file, or

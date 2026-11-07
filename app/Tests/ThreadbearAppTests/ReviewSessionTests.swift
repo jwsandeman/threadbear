@@ -13,6 +13,26 @@ final class ReviewSessionTests: XCTestCase {
 
     func cache() -> UserDefaults { UserDefaults(suiteName: "ReviewTests.\(UUID().uuidString)")! }
 
+    /// A picture pasted in the reply box goes as the draft's image, placed
+    /// in the reply by a [Picture N] marker, and comes back as a chip.
+    func testPicturesInTheReplyGoAsImagesWithMarkers() async {
+        let server = review()
+        var saved: ReviewDraft?
+        let service = ReviewService(load: { server }, save: { _, draft in saved = draft; return server }, respond: { _, draft in saved = draft; return server }, cancel: { _ in server })
+        let session = ReviewSession(threadId: "t", review: server, service: service, defaults: UserDefaults(suiteName: "ReviewSessionTests.pictures")!, autosave: false)
+        let shot = ImageRef(path: "/inbox/shot.png", mediaType: "image/png")
+        session.setReply(AskNote(text: "Like this \(InlinePictures.markString) one", images: [shot]))
+        XCTAssertEqual(session.draft.reply, "Like this [Picture 1] one")
+        XCTAssertEqual(session.draft.images, [shot])
+        XCTAssertEqual(session.replyNote, AskNote(text: "Like this \(InlinePictures.markString) one", images: [shot]))
+        XCTAssertTrue(session.canSubmit, "a picture alone is an answer")
+        session.setReply(AskNote(text: InlinePictures.markString, images: [shot]))
+        XCTAssertNil(session.draft.reply, "pictures alone send no words")
+        XCTAssertEqual(session.draft.images, [shot])
+        await session.submit()
+        XCTAssertEqual(saved?.images, [shot])
+    }
+
     func testAnEditDuringSaveIsKeptForTheNextSave() async {
         var server = review()
         var finish: CheckedContinuation<Void, Never>?

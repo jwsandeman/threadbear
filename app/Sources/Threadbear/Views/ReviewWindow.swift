@@ -31,7 +31,18 @@ extension AppModel {
             load: { try await connected().review(threadId: threadId, reviewId: review.id) },
             save: { revision, draft in try await connected().saveReview(threadId: threadId, reviewId: review.id, revision: revision, draft: draft) },
             respond: { revision, draft in try await connected().respondReview(threadId: threadId, reviewId: review.id, revision: revision, draft: draft).review },
-            cancel: { revision in try await connected().cancelReview(threadId: threadId, reviewId: review.id, revision: revision) }
+            cancel: { revision in try await connected().cancelReview(threadId: threadId, reviewId: review.id, revision: revision) },
+            picturesAllowed: { [weak self] in
+                // A picture this Mac's runner keeps would be a path another
+                // runner hasn't got (as in the composer).
+                guard let self else { return false }
+                if let thread = self.threads[threadId], let name = self.runnerName(of: thread) {
+                    self.errorMessage = "Pictures can't go to \(name) from this Mac yet."
+                    return false
+                }
+                return true
+            },
+            importPicture: { [weak self] url in await self?.importImages([url]).first }
         )
         return ReviewSession(threadId: threadId, review: review, service: service)
     }
@@ -288,7 +299,6 @@ struct ReviewWindow: View {
     let back: () -> Void
     let close: () -> Void
     @Environment(\.colorScheme) private var colorScheme
-    @FocusState private var replying: Bool
 
     private static let railWidth: CGFloat = 340
     private static let stageInset: CGFloat = 14
@@ -674,33 +684,26 @@ struct ReviewWindow: View {
         .contentShape(Rectangle())
     }
 
-    /// One box for what he thinks of the lot, as he'd say it in the thread.
+    /// One box for what he thinks of the lot, as he'd say it in the thread:
+    /// the same box an ask card's Something else has (AskAnswerBox), so a
+    /// screenshot pastes or drops in as a chip. It was a plain TextEditor,
+    /// which took no pictures at all, and said nothing (Jason, 7 Nov 2026).
     private var replyBox: some View {
-        let reply = session.draft.reply ?? ""
-        // Grows with what's typed: the hidden copy sets the height, and the
-        // editor sits over it, as a TextEditor on its own takes all the
-        // room the rail has left.
-        return Text(reply + "\n").font(.system(size: TypeScale.work)).opacity(0)
-            .padding(.horizontal, 5).padding(.vertical, 1)
-            .frame(maxWidth: .infinity, minHeight: 60, alignment: .topLeading)
-            .frame(maxHeight: 220)
-            .fixedSize(horizontal: false, vertical: true)
-            .overlay {
-                TextEditor(text: Binding(get: { session.draft.reply ?? "" }, set: { session.setReply($0) }))
-                    .font(.system(size: TypeScale.work)).scrollContentBackground(.hidden)
-                    .scrollIndicators(.never)
-                    .focused($replying)
-                    .accessibilityLabel("Reply")
-            }
-            .overlay(alignment: .topLeading) {
-                if reply.isEmpty {
-                    Text("Add a reply").font(.system(size: TypeScale.work)).foregroundStyle(.tertiary)
-                        .padding(.leading, 5).allowsHitTesting(false)
-                }
-            }
+        ReviewReplyBox(session: session, send: sendAndClose)
+            .frame(maxWidth: .infinity)
+            .accessibilityLabel("Reply")
         .padding(6)
         .background(Color.black.opacity(colorScheme == .dark ? 0.2 : 0.03), in: RoundedRectangle(cornerRadius: 8))
-        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(replying ? Theme.accentColor : Color(nsColor: .separatorColor), lineWidth: 1))
+    }
+
+    /// Once it's sent there's nothing left to do here, so it gets out of
+    /// the way (Mike, 28 Oct). A failed send stays open with its error and
+    /// the reply kept. Return in the reply box does the same as Send.
+    private func sendAndClose() {
+        Task {
+            await session.submit()
+            if session.review.status == "answered" { close() }
+        }
     }
 
     @ViewBuilder private var footer: some View {
@@ -714,15 +717,7 @@ struct ReviewWindow: View {
                     .buttonStyle(.bordered).controlSize(.large).tint(session.draft.none ? Theme.accentColor : nil)
                     .disabled(!session.editable)
                     .tip(session.draft.none ? "Take back none of them" : "None of them will do")
-                    Button {
-                        Task {
-                            await session.submit()
-                            // Once it's sent there's nothing left to do here, so
-                            // it gets out of the way (Mike, 28 Oct). A failed send
-                            // stays open with its error and the reply kept.
-                            if session.review.status == "answered" { close() }
-                        }
-                    } label: {
+                    Button(action: sendAndClose) {
                         Text(session.sendLabel).fontWeight(.semibold).lineLimit(1).frame(maxWidth: .infinity)
                     }
                     .buttonStyle(.borderedProminent).controlSize(.large)
@@ -1300,4 +1295,32 @@ final class ReviewImageScroll: NSScrollView {
     var pictureSizeForTests: NSSize { picture.frame.size }
     var isFittedForTests: Bool { fitted }
     #endif
+}
+
+/// The reply box as a SwiftUI view: an AskAnswerBox, sized as the ask
+/// cards size theirs (AskBoxMetrics), growing to eight lines then scrolling.
+private struct ReviewReplyBox: NSViewRepresentable {
+    @Bindable var session: ReviewSession
+    let send: () -> Void
+
+    func makeNSView(context: Context) -> AskAnswerBox {
+        let box = AskAnswerBox()
+        box.textView.placeholder = "Add a reply"
+        box.onChange = { [weak session] note in session?.setReply(note) }
+        box.pictures = ComposerTextView.Pictures(
+            allowed: { [weak session] in session?.picturesAllowed() ?? false },
+            importOne: { [weak session] url in await session?.importPicture(url) })
+        box.onSend = send
+        box.show(session.replyNote)
+        return box
+    }
+
+    func updateNSView(_ box: AskAnswerBox, context: Context) {
+        box.show(session.replyNote)
+    }
+
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: AskAnswerBox, context: Context) -> CGSize? {
+        let width = proposal.width ?? 300
+        return CGSize(width: width, height: AskBoxMetrics.height(session.replyNote, width: width))
+    }
 }

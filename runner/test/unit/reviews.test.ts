@@ -6,6 +6,7 @@ import { makeHarness, tick } from '../helpers/fakes.ts';
 import { makePng } from '../helpers/png.ts';
 import { buildThreadbearTools } from '../../src/threadbear-mcp.ts';
 import { stills, withCharset } from '../../src/review-media.ts';
+import type { ImageRef } from '../../src/protocol.ts';
 
 function fixture() {
   const h = makeHarness();
@@ -85,6 +86,24 @@ test('response queues after busy turn, includes metadata and duplicate retries n
   assert.match(reply.text,/Picked B/);
   assert.match(reply.text,/Notes on D/);
   assert.equal(h.runner.get(thread.id).pendingReviews,undefined);
+});
+
+test('a reply with pictures sends them with the answer message', async () => {
+  const {h,thread,input,source}=fixture();
+  const {review}=h.runner.createReview(thread.id,input);
+  const images=[{path:source,mediaType:'image/png',width:120,height:80}];
+  const draft={pickedId:'B',notes:{},reply:'Like this one [Picture 1]',images};
+  h.runner.respondReview(thread.id,review.id,review.revision,draft);
+  h.adapter.last.result(); await tick();
+  const messages=h.runner.events(thread.id,{limit:1000}).events.filter(e=>e.type==='user.message');
+  const reply=messages[1];
+  assert.deepEqual(reply.images,images);
+  assert.match(reply.text,/Like this one \[Picture 1\]/);
+  assert.deepEqual(h.store.load(thread.id)?.reviews?.find(r=>r.id===review.id)?.response?.images,images);
+  // Pictures alone are an answer; a picture without a path is not.
+  const {review: second}=h.runner.createReview(thread.id,input);
+  assert.throws(()=>h.runner.respondReview(thread.id,second.id,second.revision,{notes:{},images:[{mediaType:'image/png'} as unknown as ImageRef]}),/path/);
+  h.runner.respondReview(thread.id,second.id,second.revision,{notes:{},images});
 });
 
 test('accepted review reply survives restart before a busy turn finishes', async () => {
