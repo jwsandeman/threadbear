@@ -4158,7 +4158,12 @@ default).
   other runner's key from its row, as the phone seals it, so the value
   never reaches the backend in the clear), `threads.markSeen` (only when
   the row is unread), `threads.update` (`title`, `archived` with its `verdict`, `starred`,
-  `snoozedUntil`; anything else is `-32000`) and `threads.share` each queue
+  `snoozedUntil`; anything else is `-32000`), `threads.hibernateWhen` (an
+  `update` with `snooze: { said }`; that runner puts the thread away at once
+  and the command is done once its model has said when, so the answer is
+  `{ thread }` from the row, without `until`, `topic` or `why`, or the
+  reason as `-32000`; a runner from before 7 Nov 2026 wakes the thread
+  instead, as it reads a snooze with no time) and `threads.share` each queue
   one command with `relay:queueCommand`, which sends a thread's command to
   the runner whose row the thread is, whatever runner it was asked for, and
   `sync:takeCommand` fails a thread's command (any one's, the phone's too)

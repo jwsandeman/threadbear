@@ -443,3 +443,26 @@ test("an agent's archive goes to that runner with by: agent", async () => {
   const q = h.calls.find((c) => c.fn === 'relay:queueCommand')!;
   assert.deepEqual(q.args.args, { archive: true, by: 'agent' });
 });
+
+test("hibernating in words goes as an update with the words, and answers the row once that runner has worked out when", async () => {
+  // 7 Nov: "Hibernate until…" on another Mac's thread showed "Hibernating
+  // until something happens isn't possible through Convex yet".
+  const h = harness();
+  const p = h.relay.call(T, 'threads.hibernateWhen', { threadId: T, said: 'at the weekend' });
+  await new Promise((r) => setImmediate(r));
+  const queued = h.calls.find((c) => c.fn === 'relay:queueCommand')!;
+  assert.equal(queued.args.kind, 'update');
+  assert.deepEqual(queued.args.args, { snooze: { said: 'at the weekend' } });
+  // That runner put it away at once, and its row says so before the model answers.
+  h.remote.threads[0]!.snoozedUntil = at(3600);
+  h.subs.get('relay:commandState')![0]!.onUpdate({ state: 'done' });
+  const { thread } = (await p) as { thread: Record<string, unknown> };
+  assert.equal(thread.id, T);
+  assert.equal(thread.snoozedUntil, at(3600));
+  // The model couldn't say: the note comes back as the error.
+  const bad = h.relay.call(T, 'threads.hibernateWhen', { threadId: T, said: 'whenever' });
+  await new Promise((r) => setImmediate(r));
+  h.subs.get('relay:commandState')![1]!.onUpdate({ state: 'failed', note: "Couldn't work out when to wake it: no time in that" });
+  await assert.rejects(bad, /Couldn't work out when/);
+  await assert.rejects(h.relay.call(T, 'threads.hibernateWhen', { threadId: T, said: '  ' }), /Say when/);
+});

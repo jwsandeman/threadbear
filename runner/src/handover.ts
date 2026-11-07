@@ -651,6 +651,7 @@ export function phoneCommands(runner: Runner, remote?: Pick<Peers, 'owns' | 'cal
     // it over the local link, both runners sharing the one data dir.
     answerSecret: (p) => at(p.threadId, 'secrets.answer', { ...p }, () => runner.answerSecret(p)),
     update: (p) => at(p.threadId, 'threads.update', { ...p }, () => runner.update(p)),
+    hibernateWhen: (p) => at(p.threadId, 'threads.hibernateWhen', { ...p }, () => runner.hibernateWhen(p)),
     // Up to whatever it has: markSeen keeps it within the thread's events.
     markSeen: (id) => at(id, 'threads.markSeen', { seq: Number.MAX_SAFE_INTEGER }, () => runner.markSeen(id, runner.get(id).lastSeq)),
     create: (p) => runner.create(p),

@@ -465,6 +465,8 @@ export type CommandHost = {
   respondApproval(p: { threadId: string; approvalId: string; decision: ApprovalDecision; message?: string; answers?: Record<string, string> }): unknown;
   answerSecret(p: { threadId: string; approvalId: string; secret?: string; decline?: boolean }): unknown;
   update(p: { threadId: string; title?: string; snoozedUntil?: string | null; archived?: boolean; verdict?: ArchiveVerdict; starred?: boolean }): unknown;
+  // Hibernate in Mike's words (threads.hibernateWhen): a `snooze: { said }` update from the main Mac.
+  hibernateWhen?(p: { threadId: string; said: string }): unknown;
   // Seen up to the last event it has.
   markSeen(threadId: string): unknown;
   create(p: { text: string; images?: ImageRef[]; cwd?: string; accountId?: string; model?: string; effort?: EffortLevel; permissionMode?: 'ask' | 'full' | 'auto'; origin?: 'phone' }): { thread: ThreadSummary };
@@ -3234,8 +3236,11 @@ export class ConvexSync {
       case 'update': {
         const id = needThread();
         if (a.snooze && typeof a.snooze === 'object') {
-          const s = a.snooze as { until?: string; untilRestart?: boolean };
-          await host.update({ threadId: id, snoozedUntil: s.untilRestart ? 'restart' : s.until ?? null });
+          const s = a.snooze as { until?: string; untilRestart?: boolean; said?: string };
+          if (typeof s.said === 'string') {
+            if (!host.hibernateWhen) throw new Error("This runner can't hibernate a thread in words from another Mac.");
+            await host.hibernateWhen({ threadId: id, said: s.said });
+          } else await host.update({ threadId: id, snoozedUntil: s.untilRestart ? 'restart' : s.until ?? null });
         } else if (a.wake) await host.update({ threadId: id, snoozedUntil: null });
         else if (a.archive) {
           // A verdict still rides along if sent (backend API 42), though no app sends one now.
