@@ -45,7 +45,11 @@ export function step(name, cmd, args, opts, io = {}) {
   const { say = console.log, write = (s) => process.stdout.write(s), error = console.error, spawn = spawnSync, tmpdir = os.tmpdir() } = io;
   write(`${name}... `);
   const started = Date.now();
-  const logFile = path.join(tmpdir, `threadbear-deploy-${process.pid}-${name.toLowerCase().replace(/[^a-z0-9]+/g, '-')}.log`);
+  // The name is cut short: rerunning ten test files named each one, and
+  // the file name passed the file system's limit (ENAMETOOLONG, 7 Nov),
+  // so the rerun never ran and the update failed.
+  const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 80);
+  const logFile = path.join(tmpdir, `threadbear-deploy-${process.pid}-${slug}.log`);
   const fd = fs.openSync(logFile, 'w');
   const r = spawn(cmd, args, { ...opts, stdio: ['ignore', fd, fd] });
   fs.closeSync(fd);

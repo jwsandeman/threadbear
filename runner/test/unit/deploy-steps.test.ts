@@ -99,3 +99,19 @@ test('the smoke test waits longer for a release to listen while the Mac is overl
   assert.equal(steps.smokeTimedOut(9 * 60_000, 5.2), false);
   assert.equal(steps.smokeTimedOut(10 * 60_000 + 1, 5.2), true);
 });
+
+// Rerunning ten failed files named each one in the step, and so in its
+// log's file name, which passed the file system's limit (ENAMETOOLONG,
+// 7 Nov): the rerun never ran and the update failed.
+test("step: a long step name doesn't make a log file name the file system refuses", () => {
+  const files = Array.from({ length: 12 }, (_, i) => `test/unit/some-longer-test-file-name-${i}.test.ts`);
+  const { io } = fakeIo([{ status: 1, output: 'boom\n' }]);
+  assert.throws(
+    () => steps.step(`Rerunning ${files.join(', ')}`, c.node, ['--test', ...files], {}, io),
+    (e: Error & { logFile: string }) => {
+      assert.ok(path.basename(e.logFile).length < 120, e.logFile);
+      assert.match(fs.readFileSync(e.logFile, 'utf8'), /boom/);
+      return true;
+    },
+  );
+});
