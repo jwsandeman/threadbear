@@ -60,6 +60,21 @@ function assertLinear<T>(label: string, ref: () => unknown, fn: () => T, factor 
   return out;
 }
 
+// The same work at two sizes, `at(n)` and `at(3 * n)`, the quickest of two
+// each: linear work takes about 3 times as long, quadratic about 9. For a
+// parse that reaches the file system for each word, a plain pass over the
+// text isn't a steady reference: the runner's update ran the suite at
+// background priority on a Mac at load 15 (7 Nov), and the parse slowed 4
+// times over while the pass slowed 2, so the ratio crossed its limit.
+// Measured against itself, both sizes move together.
+function assertScalesLinearly<T>(label: string, at: (n: number) => () => T, n = 10_000): T {
+  const small = Math.min(timed(at(n)).ms, timed(at(n)).ms);
+  const first = timed(at(3 * n));
+  const big = Math.min(first.ms, timed(at(3 * n)).ms);
+  assert.ok(big < 6 * small + 50, `${label}: ${Math.round(big)} ms at 3x the size, against ${Math.round(small)} ms`);
+  return first.out;
+}
+
 // One plain pass over a text: its lines, and its characters one by one
 // (the parsers that replaced regexes walk a line a character at a time).
 const pass = (text: string) => () => {
@@ -451,6 +466,10 @@ export default {
   const ctx = {
     cwd: thread,
     threadId: 't1',
+    // Not the runner's 10 s: a login shell for `echo 3` took longer than
+    // that with the whole suite running on a busy Mac (7 Nov). Tests of
+    // the timeout itself pass their own.
+    timeoutMs: 120_000,
     run: (command: string, cwd: string) => {
       ran.push({ command, cwd });
       return runCommand(command, { cwd, env: process.env });
@@ -708,9 +727,12 @@ test("F22: a command a live function queues to start after it returns isn't run"
 
 test('pre-trust hashing: a long first word with many words after it is linear, and a file over the read limit fails closed', () => {
   const folder = realTmp();
-  const text = 'x'.repeat(20_000) + ' x'.repeat(20_000) + '\n';
-  write(folder, { 'a.sh': text });
-  assertLinear('long first word', () => Array.from(text, (c) => ({ k: 'lit', s: c })), () => reachOf(path.join(folder, 'a.sh'), follow(folder)), 200);
+  // A word of n characters, then n more words.
+  const script = (n: number) => {
+    write(folder, { 'a.sh': 'x'.repeat(n) + ' x'.repeat(n) + '\n' });
+    return () => reachOf(path.join(folder, 'a.sh'), follow(folder));
+  };
+  assertScalesLinearly('long first word', script);
   const big = realTmp();
   fs.mkdirSync(path.join(big, '.threadbear/patches'), { recursive: true });
   fs.writeFileSync(path.join(big, '.threadbear/patches/tools.ts'), "export default { actions: [{ title: 'S', run: 'node ./big.js' }], worktree: { setup: './s.sh' } };\n");
