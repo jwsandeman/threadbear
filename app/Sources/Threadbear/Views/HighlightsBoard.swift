@@ -301,7 +301,7 @@ private struct BoardCard: View {
     private func otherThreadButton(_ other: ThreadSummary) -> some View {
         Button { app.openThread(other.id) } label: {
             HStack(spacing: zoomed(3)) {
-                if other.status.isBusy { Circle().fill(Color.accentColor).frame(width: zoomed(5), height: zoomed(5)) }
+                if other.status.isBusy { Circle().fill(Color(nsColor: Theme.running)).frame(width: zoomed(5), height: zoomed(5)) }
                 Image(systemName: "bubble.left")
             }
             .font(.system(size: zoomed(10.5)))

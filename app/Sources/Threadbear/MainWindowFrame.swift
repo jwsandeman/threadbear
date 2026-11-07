@@ -86,6 +86,8 @@ struct MainWindowFrameTracker: NSViewRepresentable {
         guard MainWindowFrame.window !== window else { return }
         AppLog.write("window", MainWindowFrame.window == nil ? "main window found" : "main window changed")
         MainWindowFrame.window = window
+        // Ink behind everything in dark (Theme.canvas); light is the system's.
+        window.backgroundColor = Theme.canvas
         if !MainWindowFrame.scripted { MainWindowFrame.track(window) }
         // A launch in the background can file it under another display's
         // Space, which a drag then strands on the drag Space (DragSpace).

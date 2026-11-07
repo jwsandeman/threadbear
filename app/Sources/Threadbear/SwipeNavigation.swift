@@ -240,7 +240,7 @@ struct SwipeNavigationArrow: View {
                 .font(.system(size: zoomed(15), weight: .semibold))
                 .foregroundStyle(full ? Color.white : Color.secondary)
                 .frame(width: zoomed(36), height: zoomed(36))
-                .background(Circle().fill(full ? Color.accentColor : Color(nsColor: .controlBackgroundColor)))
+                .background(Circle().fill(full ? Theme.accentColor : Color(nsColor: .controlBackgroundColor)))
                 .overlay(Circle().strokeBorder(Color.primary.opacity(full ? 0 : 0.1)))
                 .shadow(color: .black.opacity(0.18), radius: 6, y: 1)
                 .animation(Juice.hover, value: full)

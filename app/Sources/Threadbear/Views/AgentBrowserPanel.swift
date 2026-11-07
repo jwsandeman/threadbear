@@ -743,7 +743,7 @@ final class AgentSurfaceView: NSView {
         super.init(frame: .zero)
         wantsLayer = true
         layer?.contentsGravity = bridgeTab == nil ? .topLeft : .resize
-        layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+        layer?.backgroundColor = Theme.canvas.cgColor
         layerContentsRedrawPolicy = .never
     }
 

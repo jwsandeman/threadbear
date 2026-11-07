@@ -643,7 +643,7 @@ struct ThreadRowView: View {
                         // unread dot would be, drawn on as it arrives.
                         Image(systemName: "checkmark")
                             .font(.system(size: zoomed(9), weight: .bold))
-                            .foregroundStyle(Color.accentColor)
+                            .foregroundStyle(Theme.accentColor)
                             .frame(width: zoomed(10), height: zoomed(10))
                             .transition(Juice.reduceMotion ? .opacity : AnyTransition(SymbolEffectTransition(effect: .drawOn, options: .default)))
                             .offset(x: -(SidebarMetrics.leading + zoomed(10)) / 2 - zoomed(1))
@@ -653,7 +653,7 @@ struct ThreadRowView: View {
                         // in with a little overshoot, and shrinks away once
                         // the thread's been read.
                         Circle()
-                            .fill(Color.accentColor)
+                            .fill(Color(nsColor: Theme.needsYou))
                             .frame(width: zoomed(7), height: zoomed(7))
                             .transition(Juice.popIn)
                             .offset(x: -(SidebarMetrics.leading + zoomed(7)) / 2 - zoomed(1))
@@ -716,7 +716,7 @@ struct ThreadRowView: View {
         .background {
             if landed {
                 RoundedRectangle(cornerRadius: SidebarMetrics.corner)
-                    .fill(Color.accentColor.opacity(0.14))
+                    .fill(Theme.accentColor.opacity(0.14))
                     .transition(.opacity)
             }
         }
@@ -851,7 +851,7 @@ struct ThreadRowView: View {
                 // once it's been opened.
                 Text("Woke up")
                     .font(.system(size: TypeScale.sidebarMeta, weight: .medium))
-                    .foregroundStyle(Color.accentColor)
+                    .foregroundStyle(Theme.accentColor)
                     .tip(WokeWords.tip(woke))
             } else if section == .hibernating, let wake = app.wakes[thread.id], let next = wake.nextRunAt {
                 // When its schedule messages it next, where the time would be.
@@ -868,7 +868,7 @@ struct ThreadRowView: View {
                 // An accent arc turned in the render server (SpinnerView):
                 // the system mini spinner drew grey whatever the tint, and
                 // the symbol's variable colour left it a pale asterisk.
-                SpinnerMark(color: .controlAccentColor)
+                SpinnerMark(color: Theme.running)
                     .frame(width: zoomed(12), height: zoomed(12))
                     // On the text's baseline, centred on its lowercase.
                     .alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] + zoomed(4) }
@@ -884,7 +884,7 @@ struct ThreadRowView: View {
                 }
             }
             .font(.system(size: TypeScale.sidebarMeta, weight: .medium))
-            .foregroundStyle(Color.accentColor)
+            .foregroundStyle(Color(nsColor: Theme.running))
             .tip("Working")
         case .background:
             // Still being worked on, but by sub-agents or jobs in the

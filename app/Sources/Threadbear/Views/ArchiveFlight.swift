@@ -51,7 +51,7 @@ enum ArchiveFlight {
         card.masksToBounds = true
         // The pane's own background, which the table doesn't draw.
         window.effectiveAppearance.performAsCurrentDrawingAppearance {
-            card.backgroundColor = NSColor.windowBackgroundColor.cgColor
+            card.backgroundColor = Theme.canvas.cgColor
         }
 
         CATransaction.begin()

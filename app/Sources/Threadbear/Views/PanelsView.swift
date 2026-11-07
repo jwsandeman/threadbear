@@ -302,7 +302,7 @@ struct PanelOriginBadge: View {
             }
         }
         .frame(width: zoomed(side), height: zoomed(side))
-        .background(Color(nsColor: .windowBackgroundColor), in: Circle())
+        .background(Color(nsColor: Theme.canvas), in: Circle())
         .overlay(Circle().strokeBorder(.separator, lineWidth: 0.5))
         .offset(x: zoomed(side * 2 / 13), y: zoomed(side / 13))
         .allowsHitTesting(false)
@@ -982,7 +982,7 @@ final class WebPanelPool: NSObject, ObservableObject, WKNavigationDelegate, WKUI
         view.navigationDelegate = self
         view.uiDelegate = self
         view.allowsBackForwardNavigationGestures = true
-        view.underPageBackgroundColor = .windowBackgroundColor
+        view.underPageBackgroundColor = Theme.canvas
         return view
     }
 

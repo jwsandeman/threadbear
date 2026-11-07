@@ -138,7 +138,7 @@ private struct ConnectorRow: View {
 
     private var markColor: Color {
         switch service.state {
-        case "signed_out": return .accentColor
+        case "signed_out": return Theme.accentColor
         case "connected": return Color.secondary.opacity(0.7)
         case "error": return .orange
         default: return Color.secondary.opacity(0.3)

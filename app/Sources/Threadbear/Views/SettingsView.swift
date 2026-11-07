@@ -484,7 +484,7 @@ private struct PoolListRow: View {
         Button(action: action) {
             HStack(spacing: 8) {
                 PoolSymbol(symbol: Pools.symbol(pool, accounts: accounts))
-                    .foregroundStyle(selected ? Color.accentColor : .secondary)
+                    .foregroundStyle(selected ? Theme.accentColor : .secondary)
                 Text(pool.title)
                     .fontWeight(selected ? .semibold : .regular)
                     .foregroundStyle(.primary)
@@ -502,7 +502,7 @@ private struct PoolListRow: View {
             // listRowBackground.
             .background {
                 RoundedRectangle(cornerRadius: 6)
-                    .fill(Color.accentColor.opacity(selected ? 0.2 : 0))
+                    .fill(Theme.accentColor.opacity(selected ? 0.2 : 0))
                     .padding(.horizontal, -8)
                     .padding(.vertical, -5)
             }
@@ -562,7 +562,7 @@ private struct PoolIconPicker: View {
                             .frame(width: 30, height: 30)
                             .background(
                                 RoundedRectangle(cornerRadius: 6, style: .continuous)
-                                    .fill(choice == symbol ? Color.accentColor.opacity(0.25) : .clear)
+                                    .fill(choice == symbol ? Theme.accentColor.opacity(0.25) : .clear)
                             )
                             .contentShape(Rectangle())
                     }

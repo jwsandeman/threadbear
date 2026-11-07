@@ -527,7 +527,7 @@ struct TourOverlay: View {
                     // that faces it.
                     if let hole, let edge = placed.edge {
                         TourArrow(edge: edge, at: TourArrow.anchor(edge: edge, card: CGRect(origin: origin, size: cardSize), target: hole))
-                            .fill(Color(nsColor: .windowBackgroundColor))
+                            .fill(Color(nsColor: Theme.canvas))
                             .frame(width: bounds.width, height: bounds.height)
                             .allowsHitTesting(false)
                     }
@@ -550,8 +550,8 @@ private struct TourGlow: View {
 
     var body: some View {
         RoundedRectangle(cornerRadius: Spotlight.corner)
-            .strokeBorder(Color.accentColor, lineWidth: 2)
-            .shadow(color: Color.accentColor.opacity(bright ? 0.9 : 0.35), radius: bright ? 12 : 5)
+            .strokeBorder(Theme.accentColor, lineWidth: 2)
+            .shadow(color: Theme.accentColor.opacity(bright ? 0.9 : 0.35), radius: bright ? 12 : 5)
             .onAppear {
                 guard !Juice.reduceMotion else { return }
                 withAnimation(.easeInOut(duration: 1.1).repeatForever(autoreverses: true)) { bright = true }
@@ -711,7 +711,7 @@ private struct TourCard: View {
         }
         .padding(zoomed(16))
         .frame(width: zoomed(320), alignment: .leading)
-        .background(Color(nsColor: .windowBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
+        .background(Color(nsColor: Theme.canvas), in: RoundedRectangle(cornerRadius: 12))
         .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(.separator, lineWidth: 0.5))
         .shadow(color: .black.opacity(0.25), radius: 18, y: 6)
         .animation(Juice.swap, value: done)

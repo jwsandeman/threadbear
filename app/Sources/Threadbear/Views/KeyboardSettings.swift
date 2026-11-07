@@ -207,7 +207,7 @@ private struct KeyCap: View {
         switch look {
         case .key: Color.primary.opacity(0.09)
         case .none: .clear
-        case .listening: .accentColor
+        case .listening: Theme.accentColor
         case .taken: Color.orange.opacity(0.18)
         }
     }

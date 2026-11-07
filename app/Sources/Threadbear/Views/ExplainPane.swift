@@ -52,7 +52,7 @@ struct ExplainPane: View {
                     .font(.system(size: zoomed(18)))
             }
             .buttonStyle(.plain)
-            .foregroundStyle(canSend(session) ? Color.accentColor : Color.secondary)
+            .foregroundStyle(canSend(session) ? Theme.accentColor : Color.secondary)
             .disabled(!canSend(session))
             .tip("Ask")
         }

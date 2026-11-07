@@ -56,8 +56,8 @@ struct AnswerChips: View {
         .font(.system(size: TypeScale.chip))
         .padding(.horizontal, zoomed(9))
         .padding(.vertical, zoomed(4))
-        .background(Capsule().fill(Color.accentColor.opacity(0.14)))
-        .overlay(Capsule().strokeBorder(Color.accentColor.opacity(0.45), lineWidth: 0.5))
+        .background(Capsule().fill(Theme.accentColor.opacity(0.14)))
+        .overlay(Capsule().strokeBorder(Theme.accentColor.opacity(0.45), lineWidth: 0.5))
         .tip(PreviewText.plain(answer.action))
     }
 }

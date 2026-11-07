@@ -1210,7 +1210,7 @@ enum RowRenderer {
             if index > 0 { output.append(NSAttributedString(string: "\n", attributes: [.font: font, .paragraphStyle: style, .baselineOffset: offset])) }
             let (mark, color, textColor): (String, NSColor, NSColor) = switch entry.status {
             case .completed: ("✓", Theme.addedText, .secondaryLabelColor)
-            case .in_progress: ("●", .controlAccentColor, .labelColor)
+            case .in_progress: ("●", Theme.accent, .labelColor)
             case .pending: ("○", Theme.faintText, .labelColor)
             }
             output.append(NSAttributedString(string: mark + "\t", attributes: [.font: font, .foregroundColor: color, .paragraphStyle: style, .baselineOffset: offset]))
@@ -1522,13 +1522,13 @@ enum RowRenderer {
             let isPicked = picked == pick
             let isSuggested = !own && ask.suggested == n
             output.append(isPicked
-                ? symbol("checkmark.circle.fill", label: "Picked", font: font, attributes: attributes, color: .controlAccentColor)
-                : symbol("circle", label: "Not picked", font: font, attributes: attributes, color: isSuggested ? .controlAccentColor : Theme.faintText))
+                ? symbol("checkmark.circle.fill", label: "Picked", font: font, attributes: attributes, color: Theme.accent)
+                : symbol("circle", label: "Not picked", font: font, attributes: attributes, color: isSuggested ? Theme.accent : Theme.faintText))
             output.append(NSAttributedString(string: "\t" + (own ? "Something else…" : choices[n]), attributes: attributes))
             if isSuggested {
                 var pickAttributes = attributes
                 pickAttributes[.font] = small
-                pickAttributes[.foregroundColor] = NSColor.controlAccentColor
+                pickAttributes[.foregroundColor] = Theme.accent
                 output.append(NSAttributedString(string: "  my pick", attributes: pickAttributes))
             }
             if !own, n < ask.optionNotes.count, !ask.optionNotes[n].isEmpty {
@@ -1682,7 +1682,7 @@ enum RowRenderer {
             ]
             let ticked = card.pickedNext.contains(n)
             output.append(ticked
-                ? symbol("checkmark.circle.fill", label: "Ticked", font: font, attributes: attributes, color: .controlAccentColor)
+                ? symbol("checkmark.circle.fill", label: "Ticked", font: font, attributes: attributes, color: Theme.accent)
                 : symbol("circle", label: "Not ticked", font: font, attributes: attributes))
             output.append(NSAttributedString(string: "\t" + text, attributes: attributes))
         }

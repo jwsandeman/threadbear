@@ -22,7 +22,7 @@ struct ShareButton: View {
             Image(systemName: "square.and.arrow.up")
                 .font(.system(size: TypeScale.label, weight: .medium))
                 // Accent only when it means something: someone else can read it.
-                .foregroundStyle(on ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.secondary))
+                .foregroundStyle(on ? AnyShapeStyle(Theme.accentColor) : AnyShapeStyle(.secondary))
                 .frame(width: zoomed(26), height: zoomed(26))
                 .contentShape(Rectangle())
         }

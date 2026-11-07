@@ -133,7 +133,7 @@ final class ReviewWindowController: NSWindowController, NSWindowDelegate {
         window.delegate = self
         // The app, for a page's Open in Browser (LocalPagePreview).
         window.contentView = NSHostingView(rootView: ReviewWindow(session: session, back: back, close: { [weak self] in self?.close() })
-            .environment(app).allowsWindowActivationEvents())
+            .environment(app).tint(Theme.accentColor).allowsWindowActivationEvents())
         // Up in the title bar rather than a row of their own, so the images
         // and the choices get that height. Wide enough for all of them, as an
         // accessory doesn't resize when some come and go.
@@ -321,7 +321,7 @@ struct ReviewWindow: View {
                 }
             }
         }
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background(Color(nsColor: Theme.canvas))
         .task {
             await session.refresh()
             // Keeps up with replies from elsewhere (the phone, a second
@@ -363,7 +363,7 @@ struct ReviewWindow: View {
                         .font(.system(size: TypeScale.detail, weight: .medium))
                         .padding(.horizontal, 11).frame(height: 26)
                         .foregroundStyle(session.peeking ? Color.white : Color.primary)
-                        .background(session.peeking ? Color.accentColor : Color.primary.opacity(0.08), in: Capsule())
+                        .background(session.peeking ? Theme.accentColor : Color.primary.opacity(0.08), in: Capsule())
                         .contentShape(Capsule())
                 }.buttonStyle(.plain)
                     .tip(session.peeking ? "Back to \(session.focusedOption?.id ?? "it") (or let go of Space)" : "Flick to \(baseline.title): click, or hold Space")
@@ -481,11 +481,11 @@ struct ReviewWindow: View {
         let here = session.mode == .single && session.focused == index
         return HStack(spacing: 0) {
             Text(option.id).font(.system(size: TypeScale.detail - 1, weight: .semibold))
-                .foregroundStyle(picked ? Color.accentColor : here ? Color.primary : Color.secondary)
+                .foregroundStyle(picked ? Theme.accentColor : here ? Color.primary : Color.secondary)
                 .lineLimit(1).padding(.trailing, 2)
             ForEach(Array(option.allShots.indices), id: \.self) { shot in
                 let current = here && session.shot == shot
-                let colour = picked ? Color.accentColor : current || here ? Color.primary : Color.secondary.opacity(0.45)
+                let colour = picked ? Theme.accentColor : current || here ? Color.primary : Color.secondary.opacity(0.45)
                 Button { session.enlarge(index, shot: shot) } label: {
                     Group {
                         if option.reference { Circle().strokeBorder(colour, lineWidth: 1.5) } else { Circle().fill(colour) }
@@ -534,10 +534,10 @@ struct ReviewWindow: View {
         return VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 6) {
                 Text(option.id).font(.system(size: TypeScale.detail, weight: .semibold))
-                    .foregroundStyle(picked ? Color.accentColor : Color.secondary)
+                    .foregroundStyle(picked ? Theme.accentColor : Color.secondary)
                 if count > 1 { Text("\(count) shots").font(.system(size: TypeScale.detail)).foregroundStyle(.tertiary) }
                 if session.review.recommended == option.id {
-                    Text("my pick").font(.system(size: TypeScale.detail)).foregroundStyle(Color.accentColor)
+                    Text("my pick").font(.system(size: TypeScale.detail)).foregroundStyle(Theme.accentColor)
                 }
             }
             .lineLimit(1).frame(height: Self.captionHeight, alignment: .topLeading)
@@ -561,7 +561,7 @@ struct ReviewWindow: View {
         .frame(width: size.width, height: size.height)
         .overlay {
             if picked {
-                RoundedRectangle(cornerRadius: 10).strokeBorder(Color.accentColor, lineWidth: 2).allowsHitTesting(false)
+                RoundedRectangle(cornerRadius: 10).strokeBorder(Theme.accentColor, lineWidth: 2).allowsHitTesting(false)
             }
         }
     }
@@ -631,7 +631,7 @@ struct ReviewWindow: View {
         }
         .padding(.horizontal, 14).padding(.vertical, 12)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(current ? Color.primary.opacity(0.06) : picked ? Color.accentColor.opacity(0.07) : Color.clear)
+        .background(current ? Color.primary.opacity(0.06) : picked ? Theme.accentColor.opacity(0.07) : Color.clear)
         .overlay(alignment: .leading) {
             if current { Rectangle().fill(Color.primary.opacity(0.5)).frame(width: 3) }
         }
@@ -644,12 +644,12 @@ struct ReviewWindow: View {
             Button { session.pick(option.id) } label: {
                 Image(systemName: picked ? "checkmark.square.fill" : "square")
                     .font(.system(size: 15))
-                    .foregroundStyle(picked ? Color.accentColor : Color.secondary)
+                    .foregroundStyle(picked ? Theme.accentColor : Color.secondary)
                     .frame(width: 16, height: 16).padding(4).contentShape(Rectangle())
             }.buttonStyle(.plain).padding(-4)
                 .tip(picked ? "Unpick \(option.id)" : "Pick \(option.id)")
         } else if picked {
-            Image(systemName: "checkmark.square.fill").font(.system(size: 15)).foregroundStyle(Color.accentColor).frame(width: 16, height: 16)
+            Image(systemName: "checkmark.square.fill").font(.system(size: 15)).foregroundStyle(Theme.accentColor).frame(width: 16, height: 16)
         } else {
             Color.clear.frame(width: 16, height: 16)
         }
@@ -661,7 +661,7 @@ struct ReviewWindow: View {
                 // The agent's pick, worded and coloured as on an asks card.
                 (Text(option.label).font(.system(size: TypeScale.work, weight: .semibold))
                     + (session.review.recommended == option.id
-                        ? Text("  my pick").font(.system(size: TypeScale.detail)).foregroundStyle(Color.accentColor)
+                        ? Text("  my pick").font(.system(size: TypeScale.detail)).foregroundStyle(Theme.accentColor)
                         : Text("")))
                     .fixedSize(horizontal: false, vertical: true)
                 if let reason = option.note, !reason.isEmpty {
@@ -700,7 +700,7 @@ struct ReviewWindow: View {
             }
         .padding(6)
         .background(Color.black.opacity(colorScheme == .dark ? 0.2 : 0.03), in: RoundedRectangle(cornerRadius: 8))
-        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(replying ? Color.accentColor : Color(nsColor: .separatorColor), lineWidth: 1))
+        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(replying ? Theme.accentColor : Color(nsColor: .separatorColor), lineWidth: 1))
     }
 
     @ViewBuilder private var footer: some View {
@@ -711,7 +711,7 @@ struct ReviewWindow: View {
                     Button { session.toggleNone() } label: {
                         Text("None").frame(width: 70)
                     }
-                    .buttonStyle(.bordered).controlSize(.large).tint(session.draft.none ? .accentColor : nil)
+                    .buttonStyle(.bordered).controlSize(.large).tint(session.draft.none ? Theme.accentColor : nil)
                     .disabled(!session.editable)
                     .tip(session.draft.none ? "Take back none of them" : "None of them will do")
                     Button {

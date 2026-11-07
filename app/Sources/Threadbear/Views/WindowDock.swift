@@ -352,7 +352,7 @@ struct RootView: View {
             },
             view: { panel in
                 switch panel {
-                case WindowDock.threads: AnyView(SidebarView().tourTarget(.threads, withBar: true))
+                case WindowDock.threads: AnyView(SidebarView().background(Color(nsColor: Theme.sidebarFill)).tourTarget(.threads, withBar: true))
                 case WindowDock.usage: AnyView(UsagePanel().tourTarget(.panel("usage"), withBar: true))
                 case WindowDock.updates: AnyView(UpdatesPanel().tourTarget(.panel("updates"), withBar: true))
                 case WindowDock.setup: AnyView(SetupPanel().tourTarget(.setupPanel, withBar: true))

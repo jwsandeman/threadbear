@@ -95,7 +95,7 @@ private struct LibrarianState: View {
     private var indicator: some View {
         switch status.state {
         case .working:
-            SpinnerMark(color: .controlAccentColor)
+            SpinnerMark(color: Theme.running)
         case .paused:
             Image(systemName: "pause.circle").font(.system(size: zoomed(12))).foregroundStyle(.secondary)
         case .off:

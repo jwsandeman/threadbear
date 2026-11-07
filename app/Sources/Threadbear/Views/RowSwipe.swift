@@ -250,7 +250,7 @@ private struct RowSwipeModifier: ViewModifier {
                     let armed = controller.swipe.armed || controller.leaving
                     ZStack {
                         RoundedRectangle(cornerRadius: SidebarMetrics.corner)
-                            .fill(armed ? Color.accentColor : Color.primary.opacity(0.07))
+                            .fill(armed ? Theme.accentColor : Color.primary.opacity(0.07))
                         Image(systemName: action.icon)
                             .font(.system(size: zoomed(14), weight: .medium))
                             .foregroundStyle(armed ? Color.white : Color.secondary)

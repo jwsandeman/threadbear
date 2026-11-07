@@ -90,7 +90,7 @@ struct HomeStatusLine: View {
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: zoomed(6)) {
             Circle()
-                .fill(busy ? Color(nsColor: .controlAccentColor) : Color(nsColor: Theme.faintText))
+                .fill(busy ? Color(nsColor: Theme.running) : Color(nsColor: Theme.faintText))
                 .frame(width: zoomed(7), height: zoomed(7))
             Text(text)
                 .font(.system(size: TypeScale.label))

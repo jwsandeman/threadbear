@@ -974,10 +974,12 @@ private struct CircleButtonStyle: ButtonStyle {
     let filled: Bool
 
     func makeBody(configuration: Configuration) -> some View {
+        // Filled in the accent (cyan in Jason's dark look, 7 Nov), as the
+        // mockups he picked drew it; empty, a faint grey.
         configuration.label
-            .foregroundStyle(filled ? AnyShapeStyle(.background) : AnyShapeStyle(.tertiary))
+            .foregroundStyle(filled ? AnyShapeStyle(Color(nsColor: Theme.onAccent)) : AnyShapeStyle(.tertiary))
             .frame(width: SendButton.size, height: SendButton.size)
-            .background(Circle().fill(filled ? Color.primary : Color.primary.opacity(0.1)))
+            .background(Circle().fill(filled ? Theme.accentColor : Color.primary.opacity(0.1)))
             .opacity(configuration.isPressed ? 0.7 : 1)
             .contentShape(Circle())
     }

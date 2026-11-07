@@ -1,5 +1,6 @@
 import AppKit
 import Observation
+import SwiftUI
 import Synchronization
 
 /// The window's zoom: ⌘= and ⌘- in the View menu step it through `steps`
@@ -261,10 +262,31 @@ enum Theme {
                                    light: NSColor(srgbRed: 0.1, green: 0.55, blue: 0.22, alpha: 1))
     static let removedText = dynamic(dark: NSColor(srgbRed: 1, green: 0.45, blue: 0.45, alpha: 1),
                                      light: NSColor(srgbRed: 0.8, green: 0.15, blue: 0.15, alpha: 1))
+    // Jason's dark look (7 Nov 2026): Ink `#101114` for the window, the
+    // sidebar lifted a tenth of the way to Stone `#8E8B84`, and from his
+    // Superset "Neon Noir" theme its cyan as the accent and its yellow for
+    // Needs you and anything running. Light mode keeps the system's colours.
+    private static func srgb(_ hex: UInt32) -> NSColor {
+        NSColor(srgbRed: CGFloat((hex >> 16) & 0xff) / 255, green: CGFloat((hex >> 8) & 0xff) / 255, blue: CGFloat(hex & 0xff) / 255, alpha: 1)
+    }
+    static let cyan = srgb(0x37EBF3)
+    static let yellow = srgb(0xFDF500)
+    /// Everything that followed the Mac's accent colour: selection, chips,
+    /// links, the user's bubble, the send button. Cyan in dark.
+    static let accent = dynamic(dark: cyan, light: .controlAccentColor)
+    static var accentColor: Color { Color(nsColor: accent) }
+    /// Text or a glyph on a solid accent fill: Ink on the cyan, white on the system blue.
+    static let onAccent = dynamic(dark: srgb(0x0D0F14), light: .white)
+    /// A thread's spinner and Working label, and the busy dots.
+    static let running = dynamic(dark: yellow, light: .controlAccentColor)
+    /// The window behind everything, and the Threads sidebar a step lighter.
+    static let canvas = dynamic(dark: srgb(0x101114), light: .windowBackgroundColor)
+    static let sidebarFill = dynamic(dark: srgb(0x1D1D1F), light: .windowBackgroundColor)
+
     /// "Needs you" and "Failed" in the sidebar. System orange and red on
     /// the light sidebar measured about 2:1; these darker light-mode shades
-    /// are about 4.5:1 and the same hue.
-    static let needsYou = dynamic(dark: .systemOrange, light: NSColor(srgbRed: 0.70, green: 0.33, blue: 0, alpha: 1))
+    /// are about 4.5:1 and the same hue. Dark Needs you is the Neon Noir yellow.
+    static let needsYou = dynamic(dark: yellow, light: NSColor(srgbRed: 0.70, green: 0.33, blue: 0, alpha: 1))
     static let failed = dynamic(dark: .systemRed, light: NSColor(srgbRed: 0.78, green: 0.13, blue: 0.13, alpha: 1))
     static let errorBackground = dynamic(dark: NSColor(srgbRed: 0.7, green: 0.2, blue: 0.2, alpha: 0.18),
                                          light: NSColor(srgbRed: 1, green: 0.94, blue: 0.94, alpha: 1))

@@ -190,7 +190,7 @@ struct ComposerView: View {
             // lighter than the pane and read as an outline, not a card.
             .fill(dark ? Color.primary.opacity(0.085) : Color.white)
             .shadow(color: .black.opacity(dark ? 0 : 0.08), radius: zoomed(14), y: zoomed(4))
-            .overlay(shape.strokeBorder(attention ? Color(nsColor: .controlAccentColor) : Color(nsColor: .separatorColor), lineWidth: attention ? 1 : 0.5))
+            .overlay(shape.strokeBorder(attention ? Color(nsColor: Theme.accent) : Color(nsColor: .separatorColor), lineWidth: attention ? 1 : 0.5))
             .contentShape(shape)
             .onTapGesture { app.focusComposer(draftKey) }
     }
@@ -565,8 +565,8 @@ private final class DropMark: NSView {
         guard let layer else { return }
         layer.cornerRadius = zoomed(12)
         layer.borderWidth = 2
-        layer.borderColor = NSColor.controlAccentColor.cgColor
-        layer.backgroundColor = NSColor.controlAccentColor.withAlphaComponent(0.06).cgColor
+        layer.borderColor = Theme.accent.cgColor
+        layer.backgroundColor = Theme.accent.withAlphaComponent(0.06).cgColor
     }
 
     /// Only ever a picture: clicks and the drag itself go to what's under it.

@@ -26,48 +26,50 @@
   --mono: ui-monospace, 'SF Mono', Menlo, monospace;
 }
 /* Dark: the system's, unless this browser chose light (gear menu), or chosen. */
+/* Dark: Ink canvas, a sidebar lifted toward Stone, Neon Noir cyan and
+   yellow (Jason, 7 Nov). Light is unchanged. */
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme='light']) {
-    --bg: #262626;
-    --side: #1f1f1f;
-    --raised: #2d2d2d;
-    --fill: #333333;
+    --bg: #101114;
+    --side: #1d1d1f;
+    --raised: #1d1d1f;
+    --fill: #26272b;
     --hover: rgba(255, 255, 255, 0.05);
-    --line: #353535;
-    --line-strong: #444444;
+    --line: #2a2b30;
+    --line-strong: #3a3b40;
     --text: #e6e4e1;
     --muted: #a3a09b;
     --faint: #7d7b77;
-    --accent: #3478f6;
-    --accent-soft: rgba(52, 120, 246, 0.16);
-    --link: #8fb4ff;
-    --orange: #f0a04b;
+    --accent: #37ebf3;
+    --accent-soft: rgba(55, 235, 243, 0.16);
+    --link: #7cf3f9;
+    --orange: #fdf500;
     --red: #ef6b62;
-    --code: #333333;
-    --bubble: #353535;
+    --code: #1a1b20;
+    --bubble: #1d1d1f;
     --shadow: 0 12px 34px rgba(0, 0, 0, 0.45), 0 0 0 1px rgba(255, 255, 255, 0.07);
   }
 }
 :root[data-theme='light'] { color-scheme: light; }
 :root[data-theme='dark'] {
   color-scheme: dark;
-  --bg: #262626;
-  --side: #1f1f1f;
-  --raised: #2d2d2d;
-  --fill: #333333;
+  --bg: #101114;
+  --side: #1d1d1f;
+  --raised: #1d1d1f;
+  --fill: #26272b;
   --hover: rgba(255, 255, 255, 0.05);
-  --line: #353535;
-  --line-strong: #444444;
+  --line: #2a2b30;
+  --line-strong: #3a3b40;
   --text: #e6e4e1;
   --muted: #a3a09b;
   --faint: #7d7b77;
-  --accent: #3478f6;
-  --accent-soft: rgba(52, 120, 246, 0.16);
-  --link: #8fb4ff;
-  --orange: #f0a04b;
+  --accent: #37ebf3;
+  --accent-soft: rgba(55, 235, 243, 0.16);
+  --link: #7cf3f9;
+  --orange: #fdf500;
   --red: #ef6b62;
-  --code: #333333;
-  --bubble: #353535;
+  --code: #1a1b20;
+  --bubble: #1d1d1f;
   --shadow: 0 12px 34px rgba(0, 0, 0, 0.45), 0 0 0 1px rgba(255, 255, 255, 0.07);
 }
 

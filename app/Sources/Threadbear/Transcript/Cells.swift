@@ -460,7 +460,7 @@ final class TextRowCell: RowCellView {
         case .asks(let card):
             // A closed card, or the done card (nothing's waiting), is a plain card.
             box.isHidden = false
-            box.set(fill: Theme.cardBackground, stroke: card.isOpen && !card.isDone ? NSColor.controlAccentColor : Theme.cardBorder, radius: zoomed(10))
+            box.set(fill: Theme.cardBackground, stroke: card.isOpen && !card.isDone ? Theme.accent : Theme.cardBorder, radius: zoomed(10))
             box.frame = NSRect(x: x, y: top + zoomed(2), width: width, height: render.textSize.height + RowMetrics.cardPad * 2 - zoomed(4))
             textView.place(box.frame.insetBy(dx: RowMetrics.cardPad, dy: RowMetrics.cardPad - zoomed(2)))
 
@@ -590,7 +590,7 @@ final class TextRowCell: RowCellView {
                 let on = card.explainNext.contains(index)
                 let image = Symbols.image(on ? "questionmark.circle.fill" : "questionmark.circle", size: 14)
                 if button.image !== image { button.image = image }
-                let tint: NSColor = on ? .controlAccentColor : .secondaryLabelColor
+                let tint: NSColor = on ? Theme.accent : .secondaryLabelColor
                 if button.contentTintColor != tint { button.contentTintColor = tint }
                 button.state = on ? .on : .off
                 if button.isHidden { button.isHidden = false }
@@ -1349,7 +1349,7 @@ final class PillButton: NSButton {
             Theme.inlineCodeBackground.setFill()
             path.fill()
         } else if prominent {
-            NSColor.controlAccentColor.blended(withFraction: pressed ? 0.2 : 0, of: .black)?.setFill()
+            Theme.accent.blended(withFraction: pressed ? 0.2 : 0, of: .black)?.setFill()
             path.fill()
         } else {
             (pressed ? Theme.inlineCodeBackground : Theme.cardBackground).setFill()
@@ -1428,7 +1428,7 @@ final class ApprovalRowCell: RowCellView {
         let pending = item.resolution == nil
         let top = RowMetrics.rowTop + zoomed(2)
         card.frame = NSRect(x: x, y: top, width: width, height: render.height - top - RowMetrics.rowBottom - zoomed(2))
-        card.set(fill: Theme.cardBackground, stroke: Theme.cardBorder, radius: RowMetrics.cardRadius, accent: .controlAccentColor)
+        card.set(fill: Theme.cardBackground, stroke: Theme.cardBorder, radius: RowMetrics.cardRadius, accent: Theme.accent)
         let left = x + pad + RowMetrics.accentBar
         let inner = width - pad * 2 - RowMetrics.accentBar
         var y = card.frame.minY + pad
@@ -1681,7 +1681,7 @@ final class QuestionRowCell: RowCellView, NSTextFieldDelegate {
         // Answered, it's history: an outline with no fill or accent, so a
         // card still waiting on Mike stands out from it.
         card.set(fill: pending ? Theme.cardBackground : nil, stroke: Theme.cardBorder, radius: RowMetrics.cardRadius,
-                 accent: pending ? .controlAccentColor : nil)
+                 accent: pending ? Theme.accent : nil)
 
         let key = "\(row.id)|\(row.version)|\(Int(tableWidth))|\(TypeScale.percent)"
         if builtFor != key {
@@ -1702,7 +1702,7 @@ final class QuestionRowCell: RowCellView, NSTextFieldDelegate {
         answer.isHidden = pending
         if let resolution = item.resolution {
             let (symbol, tint): (String, NSColor) = switch resolution.decision {
-            case .answered: ("checkmark.circle.fill", .controlAccentColor)
+            case .answered: ("checkmark.circle.fill", Theme.accent)
             case .expired: ("clock", Theme.faintIcon)
             default: ("xmark.circle", Theme.faintIcon)
             }
@@ -1732,7 +1732,7 @@ final class QuestionRowCell: RowCellView, NSTextFieldDelegate {
     /// The box's outline takes the accent colour while Mike types in it,
     /// standing in for the focus ring the plain field doesn't draw.
     private func updateOtherBox() {
-        otherBox.set(fill: Theme.codeBackground, stroke: editing ? NSColor.controlAccentColor.withAlphaComponent(0.5) : Theme.cardBorder, radius: zoomed(8))
+        otherBox.set(fill: Theme.codeBackground, stroke: editing ? Theme.accent.withAlphaComponent(0.5) : Theme.cardBorder, radius: zoomed(8))
     }
 
     func controlTextDidBeginEditing(_ notification: Notification) {
@@ -2001,7 +2001,7 @@ final class SecretRowCell: RowCellView, NSTextFieldDelegate {
         let inner = width - pad * 2 - RowMetrics.accentBar
         let top = RowMetrics.rowTop + zoomed(2)
         card.frame = NSRect(x: x, y: top, width: width, height: render.height - top - RowMetrics.rowBottom - zoomed(2))
-        card.set(fill: Theme.cardBackground, stroke: Theme.cardBorder, radius: RowMetrics.cardRadius, accent: .controlAccentColor)
+        card.set(fill: Theme.cardBackground, stroke: Theme.cardBorder, radius: RowMetrics.cardRadius, accent: Theme.accent)
 
         var y = card.frame.minY + pad
         textView.place(NSRect(x: left, y: y, width: inner, height: render.textSize.height))
@@ -2072,7 +2072,7 @@ final class SecretRowCell: RowCellView, NSTextFieldDelegate {
     /// The box's outline takes the accent colour while Mike types in it,
     /// as the question card's does.
     private func updateFieldBox() {
-        fieldBox.set(fill: Theme.codeBackground, stroke: editing ? NSColor.controlAccentColor.withAlphaComponent(0.5) : Theme.cardBorder, radius: zoomed(8))
+        fieldBox.set(fill: Theme.codeBackground, stroke: editing ? Theme.accent.withAlphaComponent(0.5) : Theme.cardBorder, radius: zoomed(8))
     }
 
     /// Empties the field and its editor, so the value isn't left in either.

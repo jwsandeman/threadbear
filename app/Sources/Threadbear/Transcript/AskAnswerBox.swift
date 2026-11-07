@@ -209,7 +209,7 @@ final class AskAnswerBox: NSView {
     private func updateBorder() {
         let focused = window?.firstResponder === textView
         effectiveAppearance.performAsCurrentDrawingAppearance {
-            layer?.borderColor = (focused ? NSColor.controlAccentColor : NSColor.separatorColor).cgColor
+            layer?.borderColor = (focused ? Theme.accent : NSColor.separatorColor).cgColor
             layer?.backgroundColor = NSColor.textBackgroundColor.withAlphaComponent(0.35).cgColor
         }
     }

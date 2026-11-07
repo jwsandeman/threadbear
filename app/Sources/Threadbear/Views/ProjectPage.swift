@@ -456,7 +456,7 @@ struct TaskCard: View {
                     if let thread {
                         Button { app.openThread(thread.id) } label: {
                             HStack(spacing: zoomed(3)) {
-                                if thread.status.isBusy { Circle().fill(Color.accentColor).frame(width: zoomed(5), height: zoomed(5)) }
+                                if thread.status.isBusy { Circle().fill(Color(nsColor: Theme.running)).frame(width: zoomed(5), height: zoomed(5)) }
                                 Image(systemName: "bubble.left")
                             }
                             .padding(.horizontal, zoomed(4))

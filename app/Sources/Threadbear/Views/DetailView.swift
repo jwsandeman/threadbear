@@ -165,7 +165,7 @@ private struct ArchivedToast: View {
             Rectangle().fill(Color(nsColor: .separatorColor)).frame(width: 0.5, height: zoomed(14))
             Button("Undo") { app.undoArchive() }
                 .buttonStyle(.plain)
-                .foregroundStyle(Color(nsColor: .controlAccentColor))
+                .foregroundStyle(Color(nsColor: Theme.accent))
                 .fontWeight(.medium)
                 .tip("Put it back in the inbox")
         }
@@ -708,7 +708,7 @@ private struct AccountRoomCard: View {
             .background(Color.primary.opacity(selected ? 0.07 : hovering ? 0.05 : 0.025), in: RoundedRectangle(cornerRadius: zoomed(8)))
             .overlay {
                 RoundedRectangle(cornerRadius: zoomed(8))
-                    .strokeBorder(selected ? Color.accentColor.opacity(0.7) : Color.primary.opacity(0.06), lineWidth: selected ? 1 : 0.5)
+                    .strokeBorder(selected ? Theme.accentColor.opacity(0.7) : Color.primary.opacity(0.06), lineWidth: selected ? 1 : 0.5)
             }
             .contentShape(RoundedRectangle(cornerRadius: zoomed(8)))
         }

@@ -104,7 +104,7 @@ struct SlashPaletteView: View {
         .frame(height: height)
         .background {
             RoundedRectangle(cornerRadius: zoomed(14), style: .continuous)
-                .fill(Color(nsColor: .windowBackgroundColor))
+                .fill(Color(nsColor: Theme.canvas))
                 .shadow(color: .black.opacity(0.35), radius: zoomed(18), y: zoomed(6))
         }
         .overlay(RoundedRectangle(cornerRadius: zoomed(14), style: .continuous).strokeBorder(Color(nsColor: .separatorColor), lineWidth: 0.5))
@@ -175,7 +175,7 @@ struct SlashPaletteView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, zoomed(14))
             .padding(.vertical, zoomed(6))
-            .background(on ? Color(nsColor: .controlAccentColor).opacity(0.75) : .clear)
+            .background(on ? Color(nsColor: Theme.accent).opacity(0.75) : .clear)
             .contentShape(Rectangle())
             // Picked on the first click, at once: a double-tap gesture
             // beside a single one makes SwiftUI hold every click until the

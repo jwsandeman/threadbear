@@ -204,7 +204,7 @@ private struct StatusLine: View {
                 ForEach(Array(status.parts.enumerated()), id: \.offset) { index, part in
                     if index > 0 { Text("·").foregroundStyle(Color(nsColor: Theme.faintText)) }
                     if case .working = part {
-                        SpinnerMark(color: .controlAccentColor)
+                        SpinnerMark(color: Theme.running)
                             .frame(width: zoomed(11), height: zoomed(11))
                             .alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] + zoomed(4) }
                     }
@@ -219,7 +219,7 @@ private struct StatusLine: View {
     private func color(of part: ProjectCardStatus.Part) -> Color {
         switch part {
         case .needsYou: Color(nsColor: Theme.needsYou)
-        case .working: .accentColor
+        case .working: Color(nsColor: Theme.running)
         case .failed: Color(nsColor: Theme.failed)
         case .unread: .secondary
         }

@@ -226,7 +226,7 @@ struct HighlightsView: View {
     /// Opens the thread itself, as a thread chip in a reply does.
     private func startedRow(_ row: StartedThreadRows.Row) -> some View {
         let color: Color? = switch row.state {
-        case .needsYou: Color.accentColor
+        case .needsYou: Color(nsColor: Theme.needsYou)
         case .failed: Color(nsColor: Theme.failed)
         default: nil
         }
@@ -515,7 +515,7 @@ private struct AskRow: View {
             Button(action: tick) {
                 Image(systemName: ask.ticked ? "checkmark.square.fill" : "square")
                     .font(.system(size: zoomed(13)))
-                    .foregroundStyle(ask.ticked ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(Color(nsColor: Theme.faintIcon)))
+                    .foregroundStyle(ask.ticked ? AnyShapeStyle(Theme.accentColor) : AnyShapeStyle(Color(nsColor: Theme.faintIcon)))
                     .frame(width: zoomed(16))
                     .contentShape(Rectangle())
             }

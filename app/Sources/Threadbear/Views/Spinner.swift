@@ -92,7 +92,7 @@ final class SpinnerView: NSView {
 
 /// The spinner in SwiftUI (the sidebar's running rows).
 struct SpinnerMark: NSViewRepresentable {
-    var color: NSColor = .controlAccentColor
+    var color: NSColor = Theme.running
 
     func makeNSView(context: Context) -> SpinnerView {
         let view = SpinnerView()

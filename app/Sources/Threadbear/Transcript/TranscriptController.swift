@@ -563,10 +563,10 @@ final class TranscriptController: NSObject, NSTableViewDataSource, NSTableViewDe
         let glow = CALayer()
         glow.frame = cell.bounds.insetBy(dx: 4, dy: 0)
         glow.cornerRadius = 6
-        glow.backgroundColor = NSColor.controlAccentColor.withAlphaComponent(0.24).cgColor
+        glow.backgroundColor = Theme.accent.withAlphaComponent(0.24).cgColor
         let rail = CALayer()
         rail.frame = NSRect(x: 0, y: 0, width: 3, height: glow.frame.height)
-        rail.backgroundColor = NSColor.controlAccentColor.cgColor
+        rail.backgroundColor = Theme.accent.cgColor
         glow.addSublayer(rail)
         cell.layer?.insertSublayer(glow, at: 0)
         let fade = CABasicAnimation(keyPath: "opacity")

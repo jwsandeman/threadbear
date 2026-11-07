@@ -59,7 +59,7 @@ final class CopiedBubble: NSView {
 
     override func updateLayer() {
         // Colours follow the look, read when the layer's drawn.
-        layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+        layer?.backgroundColor = Theme.canvas.cgColor
         layer?.borderColor = Theme.cardBorder.cgColor
     }
 
