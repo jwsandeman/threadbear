@@ -503,6 +503,10 @@ function setupFull(opts: { heads?: { threadId: string; lastSeq: number }[]; take
         applied.push(`update ${JSON.stringify(p)}`);
         return h.runner.update(p);
       },
+      hibernateWhen: (p) => {
+        applied.push(`hibernateWhen ${p.threadId} ${p.said}`);
+        return h.runner.update({ threadId: p.threadId, snoozedUntil: '2026-11-08T00:00:00.000Z' });
+      },
       markSeen: (id) => {
         applied.push(`markSeen ${id}`);
         return h.runner.markSeen(id, h.runner.get(id).lastSeq);
@@ -3140,4 +3144,22 @@ test('which cards the phone may allow: a short one-line command, or a threadbear
   assert.equal(remoteCardShowsAll('mcp__threadbear__send_message', { threadId: 'abc', text: 'hi' }), false, 'its line would be the id, not the message');
   assert.equal(remoteCardShowsAll('mcp__threadbear__create_thread', { text: 'go', folder: '/x' }), false, 'two things to read');
   assert.equal(remoteCardShowsAll('mcp__threadbear__schedule_message', { text: 'x', options: ['a'] } as never), false);
+});
+
+test('commands: an update with snooze.said hibernates the thread in those words (the main Mac\'s "Hibernate until…")', async () => {
+  const { h, sync, calls, push, applied } = setupFull();
+  sync.start();
+  await sync.flushNow();
+  const t = h.runner.create({ text: 'hello', cwd: h.cfg.defaults.cwd, accountId: 'claude-3' }).thread;
+  const s = session(h, t.id);
+  s.init();
+  s.result('completed');
+  await tick();
+  push([{ commandId: 'w1', kind: 'update', threadId: t.id, args: { snooze: { said: 'at the weekend' }, from: 'mac' }, createdAt: 1 }]);
+  await tick(10);
+  assert.deepEqual(applied, [`hibernateWhen ${t.id} at the weekend`]);
+  assert.equal(h.runner.get(t.id).snoozedUntil, '2026-11-08T00:00:00.000Z');
+  const finished = calls.filter((c) => c.fn === 'sync:finishCommand').map((c) => c.args);
+  assert.equal(finished.length, 1);
+  assert.equal(finished[0]!.ok, true);
 });

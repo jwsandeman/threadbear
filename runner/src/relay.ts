@@ -60,6 +60,8 @@ const SWEEP_MS = 15_000;
 // How long an action waits to hear the other runner took it.
 const TAKE_MS = 20_000;
 const CALL_MS = 30_000;
+// A hibernate in words waits for that runner's model to say when (the app waits 150 s).
+const HIBERNATE_MS = 120_000;
 
 // sync:remoteBody's answer: null, or one that's gone, says nothing new.
 export type HeldBody =
@@ -867,6 +869,17 @@ export class Relay {
         // with a "Key 'thread' not found" banner after it had gone through.
         return { thread: this.summary(threadId) };
       }
+      case 'threads.hibernateWhen': {
+        // An `update` with the words: that runner's hibernateWhen puts the
+        // thread away at once (its row shows it) and the command is done
+        // once its model has said when, or failed with why. The backend
+        // keeps no result for an update, so `until`, `topic` and `why`
+        // aren't answered; the row carries the time.
+        const said = typeof p.said === 'string' ? p.said.trim() : '';
+        if (!said) throw new RpcError(ErrorCode.badParams, 'Say when it should wake.');
+        await this.command(w.runnerId, threadId, 'update', { snooze: { said } }, { done: true, ms: HIBERNATE_MS });
+        return { thread: this.summary(threadId) };
+      }
       case 'threads.share': {
         const access = p.access;
         if (access !== 'off' && access !== 'link') throw new RpcError(ErrorCode.badParams, 'access must be "off" or "link"');
@@ -981,8 +994,6 @@ function describe(method: string): string {
   switch (method) {
     case 'threads.edit':
       return 'Editing a message';
-    case 'threads.hibernateWhen':
-      return 'Hibernating until something happens';
     case 'threads.highlights':
     case 'threads.removeHighlight':
       return 'Its highlights';
