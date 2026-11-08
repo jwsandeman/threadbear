@@ -99,7 +99,7 @@ const HELP = `tb: talk to the Threadbear runner
   tb archive <threadId>      tb unarchive <threadId>
   tb move <threadId> <folder>
   tb delete <threadId>
-  tb accounts                     the Claude and Codex logins (* new threads start on it)
+  tb accounts                     the available harness accounts (* new threads start on it)
   tb accounts <account> [--json]  that account's models and its default
   tb pools [--json]               the pools, their logins and room (* new threads start on it)
   tb actions <threadId> [--json]  the thread's actions, panels and patches (from its folder)
@@ -563,7 +563,7 @@ async function run(client: RunnerClient, cmd: string, args: string[], f: Flags):
         const note = a.note ? `  (${a.note})` : '';
         // The provider has its own column, so not "Codex · " again.
         const who = a.email ?? a.title.replace(/^Codex · /, '');
-        console.log(`${a.id === r.defaults.accountId ? '*' : ' '} ${a.id.padEnd(12)} ${(a.provider === 'codex' ? 'Codex' : 'Claude').padEnd(7)}${who}${note}`);
+        console.log(`${a.id === r.defaults.accountId ? '*' : ' '} ${a.id.padEnd(12)} ${(a.provider === 'omp' ? 'Oh My Pi' : a.provider === 'codex' ? 'Codex' : 'Claude').padEnd(7)}${who}${note}`);
       }
       return 0;
     }

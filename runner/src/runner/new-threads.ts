@@ -176,6 +176,7 @@ export const newThreadsPart = {
     const account = this.accounts.get(accountId);
     if (!account) throw new RpcError(ErrorCode.accountNotFound, `No account called ${accountId}`);
     this.checkProvider(account);
+    if (account.provider === 'omp' && params.permissionMode === 'plan') throw new RpcError(ErrorCode.badParams, 'Plan first is not supported by Oh My Pi. Choose Ask before edits.');
     if (!isDirectory(cwd)) throw new RpcError(ErrorCode.badParams, `Folder not found: ${cwd}`);
     // In a sandbox folder a Claude thread is shut in it from the start. One
     // asked for that which can't be (a Codex login, a folder outside) is
@@ -263,11 +264,11 @@ export const newThreadsPart = {
     }
     if (effort) {
       const row = modelRow(account, model ?? account.defaultModel);
-      const offered = (e: EffortLevel) => !(provider === 'claude' && e === 'ultra') && (!row?.effortLevels || row.effortLevels.includes(e));
+      const offered = (e: EffortLevel) => !(provider !== 'codex' && e === 'ultra') && (provider === 'omp' ? Boolean(row?.effortLevels?.includes(e)) : !row?.effortLevels || row.effortLevels.includes(e));
       if (!offered(effort)) {
         const fallback = this.defaultEffortFor(provider);
         const next = fallback && fallback !== effort && offered(fallback) ? fallback : undefined;
-        const why = provider === 'claude' && effort === 'ultra' ? `${effortTitle(effort)} effort is Codex only` : `${row ? row.title : 'This model'} doesn't offer ${effortTitle(effort)} effort`;
+        const why = provider !== 'codex' && effort === 'ultra' ? `${effortTitle(effort)} effort is Codex only` : `${row ? row.title : 'This model'} doesn't offer ${effortTitle(effort)} effort`;
         notes.push(`${why}, so this thread uses ${next ? `${effortTitle(next)} effort` : "the model's own level"}.`);
         effort = next;
       }
@@ -281,6 +282,8 @@ export const newThreadsPart = {
   modelFits(this: Runner, account: Account, model: string): boolean {
     if (modelRow(account, model)) return true;
     if (account.provider === 'codex') return !account.models?.length && model.startsWith('gpt-');
+    if (account.provider === 'omp') return !account.models?.length && /^[^/\s]+\/\S+$/.test(model);
+    if (this.safeAccounts().some((a) => a.provider === 'omp' && modelRow(a, model))) return false;
     if (isClaudeModel(model)) return true;
     const codexIds = this.safeAccounts().filter((a) => a.provider === 'codex').some((a) => modelRow(a, model));
     return !model.startsWith('gpt-') && !codexIds;

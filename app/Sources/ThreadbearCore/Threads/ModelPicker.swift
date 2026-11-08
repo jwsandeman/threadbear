@@ -106,6 +106,7 @@ public enum ModelPicker {
         switch id {
         case "claude": return "Claude"
         case "codex": return "Codex"
+        case "omp": return "Oh My Pi"
         default: return id.isEmpty ? "Claude" : id.prefix(1).uppercased() + id.dropFirst()
         }
     }
@@ -117,6 +118,7 @@ public enum ModelPicker {
         switch id {
         case "claude": return "sparkle"
         case "codex": return "chevron.left.forwardslash.chevron.right"
+        case "omp": return "option"
         default: return "cpu"
         }
     }
@@ -139,8 +141,8 @@ public enum ModelPicker {
     /// CLI always takes; Codex offers just its default, since a Claude
     /// alias would be the wrong provider's model.
     public static func rows(choices: [ModelChoice], defaultId: String?, selected: String?, query: String = "", provider: String = "claude") -> [Row] {
-        let codex = provider == "codex"
-        let fallback: [ModelChoice] = codex
+        let claude = provider == "claude" || provider.isEmpty
+        let fallback: [ModelChoice] = !claude
             ? [defaultId].compactMap { $0 }.filter { !$0.isEmpty }.map { ModelChoice(id: $0, model: $0, title: ComposerChips.model($0)) }
             : aliases.map { ModelChoice(id: $0, model: $0, title: ComposerChips.model($0)) }
         let known = choices.isEmpty ? fallback : choices
@@ -152,7 +154,7 @@ public enum ModelPicker {
             rows.append(Row(id: c.id, title: c.title, subtitle: c.description, isDefault: isDefault, isSelected: matches(c, selected), isOlder: older))
         }
         let isMain = { (c: ModelChoice) -> Bool in
-            codex || c.id.allSatisfy(\.isLetter) || matches(c, defaultId) || matches(c, selected)
+            !claude || c.id.allSatisfy(\.isLetter) || matches(c, defaultId) || matches(c, selected)
         }
         for c in known where isMain(c) { add(c, older: false) }
         if let selected, !selected.isEmpty, !known.contains(where: { matches($0, selected) }) {

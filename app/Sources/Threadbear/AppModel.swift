@@ -371,6 +371,10 @@ final class AppModel {
     private(set) var lastModels: [String: String] = AppModel.loadMemory(AppModel.lastModelKey)
     private(set) var lastEfforts: [String: String] = AppModel.loadMemory(AppModel.lastEffortKey)
     var newThreadPermission: PermissionMode = .full
+    /// OMP has no Plan first mode; a draft switched from it keeps asking before edits.
+    var newThreadPermissionMode: PermissionMode {
+        newThreadProviderId == "omp" && newThreadPermission == .plan ? .ask : newThreadPermission
+    }
     /// What the runner says about the Claude and Codex CLIs (`clis.list`,
     /// `clis.updated`). Empty until it's said anything.
     var clis: [CliStatus] = []
@@ -699,7 +703,7 @@ final class AppModel {
     /// came along is still remembered; other providers add ".<provider>".
     static let lastModelKey = "lastModel"
     static let lastEffortKey = "lastEffort"
-    static let memoryProviders = ["claude", "codex"]
+    static let memoryProviders = ["claude", "codex", "omp"]
     static let collapsedSectionsKey = "collapsedSections"
     /// Set once Hibernating and Archive have been folded the first time.
     /// They came after collapsedSections did, so a saved list without them

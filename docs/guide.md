@@ -806,6 +806,10 @@ window can be seen; a runner too old to send them says so.
 ## Accounts, pools and Usage
 <!-- slug: accounts -->
 
+With the Oh My Pi experiment enabled, Oh My Pi also appears in the picker.
+It uses OMP's own sign-ins and available models, with messages and approval
+cards in Threadbear. See [Experiments](#experiments) for setup and limits.
+
 Threadbear uses the Claude Code and Codex logins already on your Mac: the
 Claude Code login in `~/.claude` and the Codex login in `~/.codex`. It never
 reads their passwords or tokens. The account and model a thread runs on are

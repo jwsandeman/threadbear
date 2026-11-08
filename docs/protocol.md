@@ -88,7 +88,7 @@ upgrade with an `Authorization` header that's wrong is turned away with HTTP
 ## Types
 
 ```ts
-type Provider = "claude" | "codex"
+type Provider = "claude" | "codex" | "omp"
 
 type Account = {
   id: string            // "claude-main", "claude-1", "codex-main", "codex-1", ...
@@ -643,6 +643,38 @@ type Settings = {
   }
 }
 ```
+
+## Oh My Pi harness
+
+The `ohMyPi` experiment adds provider `omp`, the Oh My Pi harness. Its
+underlying model provider stays part of the model id (`provider/model`),
+not the thread's provider. The runner uses an installed `omp` executable
+(`ompPath` in runner.json) and its own authenticated OMP configuration
+(`ompMainDir`, default `~/.omp/agent`); it never imports or reads tokens.
+The account is `omp-main`, and its available models come from OMP.
+
+Each thread owns an OMP session under its thread data, driven over stdio
+RPC with UI requests enabled. Resuming uses that exact saved session;
+it never resumes another thread's most recent session. Text, thinking,
+tool activity and results use the existing events below. Threadbear tools
+are registered as host tools. Stop aborts the running prompt; a message
+sent during a turn steers it. The adapter distinguishes a completed prompt
+from a session with background work still running.
+
+The adapter enforces Full access, Ask and Auto at the tool boundary,
+with requests answered through the existing approval cards. Saved OMP
+tool grants must not bypass Threadbear's choice. Auto uses the same
+checks as Ask; it makes no promise of an OMP classifier. Plan first is
+rejected explicitly. Permission changes must not silently leave a less
+restrictive policy running. OMP's own
+authentication setup is separate from Claude Code and Codex sign-ins.
+The bundled guard is loaded explicitly with extension discovery disabled.
+It blocks delegated tasks in Ask and Auto, since their separate execution
+cannot currently be approved from Threadbear. Native message rewind and
+subagent transcript drilldown are unavailable.
+OMP is externally installed and updated, with no Threadbear-managed updater.
+Its usage tally and automatic network-recovery probe are not supported.
+A network error remains visible and can be retried by sending another message.
 
 ## Events
 

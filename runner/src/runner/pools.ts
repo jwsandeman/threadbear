@@ -119,6 +119,7 @@ export const poolsPart = {
     const accounts = this.safeAccounts();
     if (model.startsWith('gpt-') || accounts.some((a) => a.provider === 'codex' && modelRow(a, model))) return 'codex';
     if (accounts.some((a) => a.provider === 'claude' && modelRow(a, model))) return 'claude';
+    if (accounts.some((a) => a.provider === 'omp' && modelRow(a, model)) || model.includes('/')) return 'omp';
     return undefined;
   },
 
@@ -216,6 +217,11 @@ export const poolsPart = {
     let note = `Moved to ${to.title}: ${why}.`;
     if (to.provider !== rec.provider) {
       rec.provider = to.provider;
+      if (to.provider === 'omp' && rec.permissionMode === 'plan') {
+        rec.permissionMode = 'ask';
+        delete rec.modeBeforePlan;
+        note += ' Oh My Pi uses Ask before edits because Plan first is not supported.';
+      }
       delete rec.allowRules;
       delete rec.cliVersion;
       const checked = this.checkSettings(to, this.defaultModelFor(to.provider), this.defaultEffortFor(to.provider));

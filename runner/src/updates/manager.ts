@@ -15,11 +15,13 @@ import type { Config } from '../config.ts';
 import type { Logger } from '../log.ts';
 import { paths } from '../config.ts';
 import type { CliPolicy, CliStatus, Provider } from '../protocol.ts';
-import { PROVIDERS } from '../protocol.ts';
+import { experimentOn } from '../experiments.ts';
 import { claudeChannel, claudeInstalledVersion, claudeLatestVersion, runClaudeUpdate } from './claude.ts';
 import { CodexCopies, NPM_LATEST, codexPackageVersion, type CodexResolver, type SurfaceCheck } from './codex.ts';
 import { VERSION_RE, compareVersions, defaultExec, defaultFetchText, type Exec, type FetchText } from './exec.ts';
 import { UpdateHistory, type ProviderState, type UpdatesFile } from './history.ts';
+
+const MANAGED_PROVIDERS = ['claude', 'codex'] as const;
 
 export const FIRST_CHECK_MS = 60_000;
 export const CHECK_JITTER_MS = 5 * 60_000;
@@ -101,7 +103,7 @@ export class CliUpdates {
     });
     // A previous update that was running when the runner stopped didn't
     // finish; say so rather than show it running forever.
-    for (const p of PROVIDERS) {
+    for (const p of MANAGED_PROVIDERS) {
       const u = this.st[p]?.update;
       if (u && (u.state === 'running' || u.state === 'waiting')) this.st[p]!.update = { ...u, state: 'failed', message: 'The runner stopped before this finished.' };
     }
@@ -137,11 +139,13 @@ export class CliUpdates {
   }
 
   list(): CliStatus[] {
-    return PROVIDERS.map((p) => this.status(p));
+    const providers: Provider[] = [...MANAGED_PROVIDERS];
+    if (experimentOn(this.cfg.home, 'ohMyPi')) providers.push('omp');
+    return providers.map((p) => this.status(p));
   }
 
   check(p?: Provider): CliStatus[] {
-    for (const prov of p ? [p] : PROVIDERS) this.track(prov, this.runCheck(prov, true));
+    for (const prov of p ? [p] : MANAGED_PROVIDERS) this.track(prov, this.runCheck(prov, true));
     return this.list();
   }
 
@@ -151,6 +155,7 @@ export class CliUpdates {
   }
 
   setPolicy(p: Provider, policy: CliPolicy): CliStatus[] {
+    if (p === 'omp') return this.list();
     this.ps(p).policy = policy;
     this.save();
     this.changed();
@@ -167,7 +172,7 @@ export class CliUpdates {
   // CLI's init (Claude) or initialize (Codex). Two failures in a row on a
   // version it just moved to send a warning, once.
   sessionStarted(p: Provider, version: string | undefined, ok: boolean): void {
-    if (!version) return;
+    if (!version || p === 'omp') return;
     const s = this.ps(p);
     if (ok) {
       if (s.startFailures?.version === version) {
@@ -195,6 +200,12 @@ export class CliUpdates {
   // ---- status
 
   private status(p: Provider): CliStatus {
+    if (p === 'omp') return {
+      provider: p, path: this.cfg.ompPath ?? 'omp', managedBy: 'none',
+      status: this.cfg.ompPath && fs.existsSync(this.cfg.ompPath) ? 'unknown' : 'missing',
+      policy: 'off', inUse: this.d.hooks.versionsInUse(p),
+      ...(this.st.omp?.update ? { update: this.st.omp.update } : {}),
+    };
     const s = this.st[p] ?? {};
     const installedVersion = this.installed[p];
     const latestVersion = s.latestVersion;
@@ -227,13 +238,13 @@ export class CliUpdates {
   // "off" can't be turned on from the app; a Codex binary set by hand is
   // never updated.
   private policy(p: Provider): CliPolicy {
-    if (this.configOff(p)) return 'off';
+    if (p === 'omp' || this.configOff(p)) return 'off';
     if (p === 'codex' && this.cfg.codexPath) return 'off';
     return this.st[p]?.policy ?? this.cfg.cliUpdates[p];
   }
 
   private configOff(p: Provider): boolean {
-    return this.env.THREADBEAR_CLI_UPDATES === 'off' || this.cfg.cliUpdates[p] === 'off';
+    return p === 'omp' || this.env.THREADBEAR_CLI_UPDATES === 'off' || this.cfg.cliUpdates[p] === 'off';
   }
 
   private managedCodex(): boolean {
@@ -264,7 +275,7 @@ export class CliUpdates {
       this.d.clock.setTimeout(() => {
         this.timers.delete(name);
         if (name === 'check') {
-          for (const p of PROVIDERS) this.track(p, this.runCheck(p, false));
+          for (const p of MANAGED_PROVIDERS) this.track(p, this.runCheck(p, false));
           const jitter = Math.floor((this.d.random ?? Math.random)() * CHECK_JITTER_MS);
           this.schedule('check', this.cfg.cliUpdates.checkMinutes * 60_000 + jitter);
         } else if (name.startsWith('retry:')) {
@@ -278,6 +289,7 @@ export class CliUpdates {
   }
 
   private async runCheck(p: Provider, asked: boolean): Promise<void> {
+    if (p === 'omp') return;
     await this.refreshInstalled();
     const policy = this.policy(p);
     if (policy === 'off' && !asked) return;
@@ -315,6 +327,10 @@ export class CliUpdates {
   // ---- updating
 
   private startUpdate(p: Provider, o: UpdateOptions, attempt = 1): void {
+    if (p === 'omp') {
+      this.finish(p, { state: 'failed', message: 'Oh My Pi is installed separately. Update it with omp update.' });
+      return;
+    }
     if (this.running[p] || this.stopped) return;
     const target = o.version ?? this.st[p]?.latestVersion;
     if (this.d.hooks.restartPending()) {

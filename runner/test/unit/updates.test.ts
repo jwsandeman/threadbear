@@ -492,3 +492,25 @@ test('compareVersions orders releases and pre-releases', () => {
   const vs = ['0.165.0', '0.164.0', '0.165.0-alpha.2', '0.99.1', '0.165.0-alpha.10', '1.0.0'];
   assert.deepEqual([...vs].sort(compareVersions), ['0.99.1', '0.164.0', '0.165.0-alpha.2', '0.165.0-alpha.10', '0.165.0', '1.0.0']);
 });
+
+
+test('OMP is externally managed and never falls through to a Codex check or install', async () => {
+  const t = setup();
+  assert.equal(t.u.list().some(c => c.provider === 'omp'), false);
+  fs.writeFileSync(path.join(t.home, 'runner.json'), JSON.stringify({ experiments: { ohMyPi: true } }));
+  t.cfg.ompPath = path.join(t.root, 'bin', 'omp');
+  script(t.cfg.ompPath, 'exit 0');
+  const status = of(t.u.list(), 'omp');
+  assert.equal(status.path, t.cfg.ompPath);
+  assert.equal(status.managedBy, 'none');
+  assert.equal(status.policy, 'off');
+  t.u.setPolicy('omp', 'auto');
+  t.u.check('omp');
+  t.u.update('omp', { force: true });
+  await t.u.settled();
+  assert.deepEqual(t.fetched, []);
+  assert.deepEqual(t.npm.installs(), []);
+  assert.equal(t.claude.calls(), 0);
+  assert.equal(of(t.u.list(), 'omp').policy, 'off');
+  assert.match(of(t.u.list(), 'omp').update?.message ?? '', /installed separately/);
+});

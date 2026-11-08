@@ -13,7 +13,7 @@ import type { Provider } from './protocol.ts';
 
 export type Reachable = (provider: Provider) => Promise<boolean>;
 
-const HOSTS: Record<Provider, string> = {
+const HOSTS: Partial<Record<Provider, string>> = {
   claude: 'api.anthropic.com',
   // Codex logins are ChatGPT ones; its requests go to chatgpt.com.
   codex: 'chatgpt.com',
@@ -22,7 +22,8 @@ const HOSTS: Record<Provider, string> = {
 const PROBE_TIMEOUT_MS = 5_000;
 
 export function probeTarget(provider: Provider, env: NodeJS.ProcessEnv = process.env): { host: string; port: number; proxy?: { host: string; port: number } } {
-  const host = HOSTS[provider] ?? HOSTS.claude;
+  const host = HOSTS[provider];
+  if (!host) throw new Error(`No fixed API host for ${provider}`);
   const proxy = env.HTTPS_PROXY || env.https_proxy;
   if (proxy) {
     try {
@@ -36,6 +37,7 @@ export function probeTarget(provider: Provider, env: NodeJS.ProcessEnv = process
 }
 
 export const reachable: Reachable = (provider) => {
+  if (!HOSTS[provider]) return Promise.resolve(false);
   const { host, port, proxy } = probeTarget(provider);
   return new Promise((resolve) => {
     const socket = net.connect(proxy ?? { host, port });

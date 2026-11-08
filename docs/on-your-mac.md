@@ -219,6 +219,19 @@ started, errors), never what was said, and is started afresh past 256 KB.
   restart in the background) is put on its own display's. These are
   private window server calls, and they only touch the app's own windows.
 
+### Oh My Pi experiment
+
+When the `ohMyPi` experiment is enabled, the runner also starts your
+installed `omp` executable, one process for each live OMP thread. Threadbear
+does not install or update it. `ompPath` can select its executable and
+`ompMainDir` its agent configuration directory (default `~/.omp/agent`).
+OMP reads its own settings and credentials and connects to the model
+providers and tools configured there. Threadbear asks OMP for available
+models over its local stdio interface; it never reads the credential store.
+OMP session files are kept with the thread's data for exact resumption.
+The full configuration and provider behavior are described in
+[OMP's documentation](https://github.com/can1357/oh-my-pi/tree/main/docs).
+
 ## What it reads
 
 - From your Claude and Codex logins: which account each is (the email in

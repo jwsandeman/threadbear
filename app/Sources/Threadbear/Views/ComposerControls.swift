@@ -209,11 +209,11 @@ struct ThreadSettings {
     var cwd: String { thread?.cwd ?? app.newThreadCwd ?? logins.defaults.cwd }
     /// A new thread's is the one with the most room until Mike picks one.
     var account: String { thread?.accountId ?? app.newThreadAccountId }
-    /// "claude" or "codex": the account's, which a thread's own follows.
+    /// The account's harness, which a thread's own follows.
     var provider: String { thread?.provider ?? (logins.account(account)?.provider ?? "claude") }
     var model: String? { thread == nil ? app.lastModels[provider] : thread?.model }
     var effort: String? { thread == nil ? app.lastEfforts[provider] : thread?.effort }
-    var permissionMode: PermissionMode { thread?.permissionMode ?? app.newThreadPermission }
+    var permissionMode: PermissionMode { thread?.permissionMode ?? app.newThreadPermissionMode }
     /// A new thread for another runner: its folders are paths on that Mac.
     var draftRunnerId: String? { thread == nil ? app.newThreadRunnerId : nil }
     /// Another runner's thread, or a new one for another runner.
@@ -468,8 +468,11 @@ struct ThreadSettings {
         guard usesPools else {
             return providers.map { ModelPicker.Column(id: $0.id, title: $0.title, symbol: ModelPicker.providerSymbol($0.id)) }
         }
+        let pooled = Set(logins.pools.flatMap { Pools.providers($0, accounts: logins.accounts) })
+        let unpooled = providers.filter { !pooled.contains($0.id) }
         return logins.pools.map { ModelPicker.Column(id: $0.id, title: $0.title, subtitle: Pools.railSubtitle($0, accounts: logins.accounts), logins: Pools.logins($0, accounts: logins.accounts).count,
                                                     providers: Pools.providers($0, accounts: logins.accounts)) }
+            + unpooled.map { ModelPicker.Column(id: "@provider:" + $0.id, title: $0.title, symbol: ModelPicker.providerSymbol($0.id)) }
     }
 
     /// The column the picker opens on.
@@ -484,6 +487,10 @@ struct ThreadSettings {
     /// a plain list until a model there is picked.
     func sections(for columnId: String, query: String = "") -> [ModelPicker.Section] {
         guard usesPools else { return [ModelPicker.Section(id: columnId, rows: rows(for: columnId, query: query))] }
+        if columnId.hasPrefix("@provider:") {
+            let id = String(columnId.dropFirst("@provider:".count))
+            return [ModelPicker.Section(id: id, rows: rows(for: id, query: query))]
+        }
         guard let shown = logins.pool(columnId) else {
             return [ModelPicker.Section(id: provider, rows: ModelPicker.rows(choices: choices, defaultId: defaultModel, selected: effectiveModel, query: query, provider: provider))]
         }
@@ -506,6 +513,11 @@ struct ThreadSettings {
     /// and provider.
     func pick(_ row: ModelPicker.Row, section: String, column: String) {
         guard usesPools else { return pick(row, in: column) }
+        if column.hasPrefix("@provider:") {
+            guard let account = listedAccount(for: section) else { return }
+            if thread == nil { pin(account) }
+            return pick(row, in: section)
+        }
         let model = row.isDefault ? nil : row.id
         if column == Self.pinnedColumn || (column == pool?.id && section == provider) { return setModel(model) }
         app.choosePool(column, provider: section, model: model, threadId: thread?.id)
@@ -651,7 +663,8 @@ struct ThreadSettings {
         let menu = NSMenu()
         // Auto is Claude Code's; Codex has nothing like it, so it's only offered
         // for Claude (or if a thread is somehow on it already).
-        let modes: [PermissionMode] = provider == "claude" || permissionMode == .auto ? [.full, .auto, .ask, .plan] : [.full, .ask, .plan]
+        var modes: [PermissionMode] = provider == "claude" || permissionMode == .auto ? [.full, .auto, .ask, .plan] : [.full, .ask, .plan]
+        if provider == "omp" { modes.removeAll { $0 == .plan } }
         for mode in modes {
             let item = ActionMenuItem(mode.composerTitle, symbol: mode.composerIcon, checked: permissionMode == mode) { setPermission(mode) }
             item.subtitle = mode.composerHelp
