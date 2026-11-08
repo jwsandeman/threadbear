@@ -1384,8 +1384,8 @@ unless you pick one for it alone: Settings (⌘,) > General > Appearance has
 Same as the Mac, Light and Dark. It changes straight away and stays picked
 the next time the app opens.
 
-In dark mode, conversations sit on Ink, with the sidebars, outer rails and
-toolbars in the lighter Stone shade.
+In dark mode, conversations, the Threads list and Highlights sit on Ink,
+with the outer icon rails and toolbars in the lighter Stone shade.
 
 ### A ding when a thread is done
 

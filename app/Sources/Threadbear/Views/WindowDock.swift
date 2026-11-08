@@ -357,7 +357,10 @@ struct RootView: View {
             },
             view: { panel in
                 switch panel {
-                case WindowDock.threads: AnyView(SidebarView().background(Color(nsColor: Theme.sidebarFill)).tourTarget(.threads, withBar: true))
+                case WindowDock.threads: AnyView(SidebarView()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(Color(nsColor: Theme.canvas))
+                    .tourTarget(.threads, withBar: true))
                 case WindowDock.usage: AnyView(UsagePanel().tourTarget(.panel("usage"), withBar: true))
                 case WindowDock.updates: AnyView(UpdatesPanel().tourTarget(.panel("updates"), withBar: true))
                 case WindowDock.setup: AnyView(SetupPanel().tourTarget(.setupPanel, withBar: true))
@@ -371,7 +374,10 @@ struct RootView: View {
                     AnyView(PinnedThreadView(threadId: WindowDock.pinnedThread(id)!).id(id)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                         .background(Color(nsColor: Theme.canvas)))
-                case PaneSection.highlightsId: AnyView(DockPane(section: .highlights).tourTarget(.highlights, withBar: true))
+                case PaneSection.highlightsId: AnyView(DockPane(section: .highlights)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(Color(nsColor: Theme.canvas))
+                    .tourTarget(.highlights, withBar: true))
                 default: AnyView(DockPane(section: PaneSection(id: panel)))
                 }
             }
