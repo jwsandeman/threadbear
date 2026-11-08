@@ -78,7 +78,11 @@ public enum ComposerChips {
 
     /// The levels a provider offers when the model's own list isn't known.
     public static func effortLevels(provider: String) -> [String] {
-        provider == "codex" ? codexEffortLevels : effortLevels
+        switch provider {
+        case "omp": return [] // OMP's models can have no reasoning; use its reported levels only.
+        case "codex": return codexEffortLevels
+        default: return effortLevels
+        }
     }
 
     /// Goldilocks: what the porridge is like at each level, under its name

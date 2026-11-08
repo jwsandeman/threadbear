@@ -73,6 +73,8 @@ export type Config = {
   // <data dir>/accounts: more logins for anyone without Token Stats (the
   // guide's "Adding another login"), claude-N and codex-N as there.
   accountsDir?: string;
+  ompPath?: string; // externally installed Oh My Pi executable
+  ompMainDir?: string; // OMP-owned configuration; no credentials are read
   // A Codex binary set by hand, used as is and never updated. Unset means
   // Threadbear's own copy (<home>/tools/codex/current), or until there is
   // one the codex next to the runner's Node; never ~/.local/bin/codex.
@@ -149,6 +151,8 @@ export type RunnerJson = {
   claudePath?: string;
   idleMinutes?: number;
   maxLiveCLIs?: number;
+  ompPath?: string; // externally installed Oh My Pi executable
+  ompMainDir?: string; // OMP-owned configuration; no credentials are read
   codexPath?: string;
   codexArgs?: string[];
   cliUpdates?: Partial<CliUpdatesConfig>;
@@ -278,6 +282,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     ...(codexPath ? { codexPath: expandHome(codexPath) } : {}),
     codexArgs: Array.isArray(json.codexArgs) ? json.codexArgs.filter((a): a is string => typeof a === 'string') : [],
     codexMainDir: expandHome(env.THREADBEAR_CODEX_MAIN_DIR || '~/.codex'),
+    ompPath: expandHome(env.THREADBEAR_OMP_PATH || json.ompPath || findOmp(env)),
+    ompMainDir: expandHome(env.THREADBEAR_OMP_MAIN_DIR || json.ompMainDir || '~/.omp/agent'),
     tokenStatsLimitsFile: expandHome(
       env.THREADBEAR_TOKEN_STATS_LIMITS || '~/Library/Application Support/Token Stats/limits.json',
     ),
@@ -337,6 +343,13 @@ function syncConfig(raw: RunnerJson['sync'], env: NodeJS.ProcessEnv): Config['sy
   if (raw?.pastedPictures === false) out.pastedPictures = false;
   if (raw?.full === true) out.full = true;
   return out;
+}
+
+function findOmp(env: NodeJS.ProcessEnv): string {
+  const dirs = [...(env.PATH ?? '').split(path.delimiter), '/opt/homebrew/bin', '/usr/local/bin', path.join(os.homedir(), '.local/bin')];
+  return dirs.filter(Boolean).map(dir => path.join(dir, 'omp')).find(file => {
+    try { fs.accessSync(file, fs.constants.X_OK); return fs.statSync(file).isFile(); } catch { return false; }
+  }) ?? 'omp';
 }
 
 function nonEmpty(v: unknown): string | undefined {

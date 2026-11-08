@@ -171,6 +171,8 @@ export class TokenTally {
     const seenRoots = new Set<string>();
     const seenFiles = new Set<string>();
     for (const account of this.accounts()) {
+      // OMP has a different transcript format; do not treat it as Claude.
+      if (account.provider === 'omp') continue;
       const roots =
         account.provider === 'codex'
           ? [path.join(account.configDir, 'sessions'), path.join(account.configDir, 'archived_sessions')]

@@ -336,6 +336,7 @@ public enum CliText {
         switch provider {
         case "claude": return "Claude Code"
         case "codex": return "Codex"
+        case "omp": return "Oh My Pi"
         default: return provider.prefix(1).uppercased() + provider.dropFirst()
         }
     }

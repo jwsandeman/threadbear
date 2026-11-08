@@ -3,7 +3,7 @@
 // section his own instructions ask every agent to end with. No model call:
 // the agent that did the work is the one that knows.
 
-import type { Ask, AskLink, NeedsWho, PersistedEvent } from './protocol.ts';
+import type { Ask, AskLink, NeedsWho, PersistedEvent, Provider } from './protocol.ts';
 import { hasLineBreak, replaceLinks } from './linear-text.ts';
 import { cutSafely, safeEnd } from './safe-cut.ts';
 
@@ -602,9 +602,9 @@ const ONE_REPLY_WHAT =
 export const ONE_REPLY_DESCRIPTION = ONE_REPLY_WHAT + ONE_REPLY_REPLY + ONE_REPLY_FIELDS;
 export const CODEX_ONE_REPLY_DESCRIPTION = ONE_REPLY_WHAT + CODEX_END_TURN_HOW + ONE_REPLY_REPLY.replace('your final message', 'your final answer') + ONE_REPLY_FIELDS;
 
-export function endTurnDescription(provider: 'claude' | 'codex', bulletReplies: boolean, oneReply = false): string {
-  if (oneReply) return provider === 'codex' ? CODEX_ONE_REPLY_DESCRIPTION : ONE_REPLY_DESCRIPTION;
-  if (provider === 'codex') return bulletReplies ? CODEX_END_TURN_DESCRIPTION : CODEX_MESSAGE_END_TURN_DESCRIPTION;
+export function endTurnDescription(provider: Provider, bulletReplies: boolean, oneReply = false): string {
+  if (oneReply) return provider !== 'claude' ? CODEX_ONE_REPLY_DESCRIPTION : ONE_REPLY_DESCRIPTION;
+  if (provider !== 'claude') return bulletReplies ? CODEX_END_TURN_DESCRIPTION : CODEX_MESSAGE_END_TURN_DESCRIPTION;
   return bulletReplies ? END_TURN_DESCRIPTION : MESSAGE_END_TURN_DESCRIPTION;
 }
 

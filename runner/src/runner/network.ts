@@ -28,6 +28,11 @@ export const networkPart = {
     delete rec.waitingForNetwork;
     this.markDirty(st);
     if (this.bucket(rec) !== 'inbox' || rec.queue.length) return;
+    // OMP may use any model endpoint; an Anthropic/OpenAI probe cannot verify it.
+    if (rec.provider === 'omp') {
+      this.emit(st, { type: 'system.note', text: "Oh My Pi could not reach its model provider. Send a message to try again." });
+      return;
+    }
     const since = chain?.since ?? this.isoNow();
     const tries = chain?.tries ?? 0;
     if (tries >= NET_CARRY_ON_MAX || this.clock.now() - Date.parse(since) > NET_WAIT_MAX_MS) {

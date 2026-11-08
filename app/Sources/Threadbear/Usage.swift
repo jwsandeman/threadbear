@@ -156,6 +156,7 @@ extension AppModel {
         switch thread.provider {
         case "claude": return Account(id: "claude-main", provider: "claude", title: "Claude")
         case "codex": return Account(id: "codex-main", provider: "codex", title: "Codex")
+        case "omp": return Account(id: "omp-main", provider: "omp", title: "Oh My Pi")
         default: return nil
         }
     }
@@ -259,16 +260,19 @@ enum SignIn {
     /// often Threadbear's own copy, not on the PATH); empty uses the PATH's.
     static func script(_ account: Account, cliPath: String) -> String {
         let codex = account.provider == "codex"
-        var env = ""
+        let omp = account.provider == "omp"
+        // Match the runner's explicit account directory instead of a shell profile.
+        var env = omp ? "env -u OMP_PROFILE -u PI_PROFILE " : ""
         if codex, !account.configDir.isEmpty { env = "CODEX_HOME=\(quoted(account.configDir)) " }
-        if !codex, account.id != "claude-main", !account.configDir.isEmpty { env = "CLAUDE_CONFIG_DIR=\(quoted(account.configDir)) " }
-        let binary = cliPath.isEmpty ? (codex ? "codex" : "claude") : quoted(cliPath)
+        if omp, !account.configDir.isEmpty { env += "PI_CODING_AGENT_DIR=\(quoted(account.configDir)) " }
+        if !codex, !omp, account.id != "claude-main", !account.configDir.isEmpty { env = "CLAUDE_CONFIG_DIR=\(quoted(account.configDir)) " }
+        let binary = cliPath.isEmpty ? (omp ? "omp" : codex ? "codex" : "claude") : quoted(cliPath)
         return """
         #!/bin/zsh -l
         export PATH="$HOME/.local/bin:$PATH"
-        printf '%s\\n' \(quoted("Signing in to \(codex ? "Codex" : "Claude") for Threadbear (\(Self.oneLine(account.title)))."))
+        printf '%s\\n' \(quoted("Signing in to \(omp ? "Oh My Pi" : codex ? "Codex" : "Claude") for Threadbear (\(Self.oneLine(account.title)))."))
         echo
-        \(env)\(binary) \(codex ? "login" : "auth login")
+        \(env)\(binary) \(codex || omp ? "login" : "auth login")
         echo
         echo "Done. Go back to Threadbear and press Send again. You can close this window."
 

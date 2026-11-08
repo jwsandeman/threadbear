@@ -260,10 +260,10 @@ export const REMOTE_ALLOW_REFUSED = "It's too long to show in full here, so it c
 export function remoteCardShowsAll(name: string, input: Record<string, unknown>, cwd?: string, title = ''): boolean {
   if (name === 'permissions' || title.includes(RUNS_AS_CODE) || title.includes(MAYBE_RUNS_AS_CODE)) return false;
   const fits = (v: string) => v.trim().length <= REMOTE_COMMAND_CHARS && !/[\r\n]/.test(v.trim());
-  // An MCP tool's arguments say what it does (a threadbear tool's own ask,
-  // in Ask mode, or any other server's), a `command` among them or not:
+  // An MCP or OMP tool's arguments say what it does (including aliases
+  // and unknown OMP tools), a `command` among them or not:
   // whole only when its one string that isn't an id is the line shown, and short.
-  if (name.startsWith('mcp__')) {
+  if (name.startsWith('mcp__') || name.startsWith('omp__')) {
     // Only ours are known to be ids; another server's `id` can be what it acts on.
     const ids = name.startsWith('mcp__threadbear__') ? ID_KEYS : new Set<string>();
     const values = Object.entries(input).filter(([k, v]) => v !== undefined && v !== null && !ids.has(k));

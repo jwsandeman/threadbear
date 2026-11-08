@@ -138,7 +138,7 @@ type Result = { content: { type: 'text'; text: string }[]; isError?: boolean };
 // model doesn't offer, with a note.
 const effortEnum = z.enum(EFFORT_LEVELS as unknown as [EffortLevel, ...EffortLevel[]]);
 
-const providerName = (a: Pick<Account, 'provider'>): string => (a.provider === 'codex' ? 'Codex' : 'Claude');
+const providerName = (a: Pick<Account, 'provider'>): string => (a.provider === 'omp' ? 'Oh My Pi' : a.provider === 'codex' ? 'Codex' : 'Claude');
 
 const ok = (text: string): Result => ({ content: [{ type: 'text', text }] });
 const fail = (text: string): Result => ({ content: [{ type: 'text', text }], isError: true });
@@ -201,7 +201,7 @@ export function buildThreadbearTools(
   // gateway service needs signing in (connectors.ts, signInSignal).
   opts: {
     sleep?: (ms: number) => Promise<void>;
-    provider?: 'claude' | 'codex';
+    provider?: 'claude' | 'codex' | 'omp';
     bulletReplies?: () => boolean;
     oneReply?: () => boolean;
     pocket?: () => PocketControl | undefined;
@@ -217,7 +217,7 @@ export function buildThreadbearTools(
     replyButtons?: () => boolean;
   } = {},
 ) {
-  const codex = opts.provider === 'codex';
+  const codex = opts.provider === 'codex' || opts.provider === 'omp';
   const checks = opts.scheduleChecks?.() === true;
   const checkArg = (update: boolean): Record<string, z.ZodOptional<z.ZodTypeAny>> =>
     checks
@@ -495,7 +495,7 @@ export function buildThreadbearTools(
       `runner: ${runner} (read through Convex: messages and one line per tool call; tool output stays on that runner)`,
       `status: ${t.status}${t.needsYou ? ' (needs the user)' : ''}`,
       `folder: ${t.cwd} (on ${runner})`,
-      `account: ${t.accountId} (${t.provider === 'codex' ? 'Codex' : 'Claude'})`,
+      `account: ${t.accountId} (${t.provider === 'omp' ? 'Oh My Pi' : t.provider === 'codex' ? 'Codex' : 'Claude'})`,
       `model: ${t.model ?? 'default'}`,
       t.snoozedUntil ? `snoozed until: ${t.snoozedUntil}` : '',
       t.archivedAt ? `archived: ${t.archivedAt}` : '',
@@ -778,7 +778,7 @@ export function buildThreadbearTools(
         ...thisOrOther,
         new_thread: z.boolean().optional().describe('Start a new thread each time instead of sending to a thread.'),
         folder: z.string().optional().describe("With new_thread: its working folder. Default: this thread's folder."),
-        account: z.string().optional().describe('With new_thread: account id or email (Claude or Codex; see list_accounts). Default: the one with the most room, on the provider last used.'),
+        account: z.string().optional().describe('With new_thread: account id or email (see list_accounts). Default: the one with the most room, on the provider last used.'),
         pool: z.string().optional().describe('With new_thread, instead of account: pool id or title (list_accounts); each run starts on its login with the most room.'),
         model: z.string().optional().describe("With new_thread: model id, one of the account's (list_accounts shows them)."),
         effort: effortEnum.optional().describe('With new_thread: reasoning effort (ultra is Codex only).'),
@@ -1608,7 +1608,7 @@ export function buildThreadbearTools(
     ),
     tool(
       'list_accounts',
-      'Lists the Claude and Codex logins Threadbear can run threads on (provider, how much room each has left, its models), then the pools: named lists of logins a thread can run on, where the runner picks the login with room for each turn and moves the thread when one runs dry. Says which pool a new thread with no account or pool starts on.',
+      'Lists the accounts Threadbear can run threads on (provider, how much room each has left, its models), then the pools: named lists of logins a thread can run on, where the runner picks the login with room for each turn and moves the thread when one runs dry. Says which pool a new thread with no account or pool starts on.',
       {},
       handle(async () => {
         const h = control.hello();
@@ -1635,10 +1635,10 @@ export function buildThreadbearTools(
         title: z.string().optional().describe('Title for the sidebar. Default: the first line of text.'),
         folder: z.string().optional().describe("Working folder. Default: this thread's folder. Relative paths are from this thread's folder."),
         pool: z.string().optional().describe("Pool id or title (see list_accounts). The runner picks the pool's login with room for each turn and moves the thread when one runs dry. Default: the folder's pool, else the one with the model's provider, else the last one picked."),
-        account: z.string().optional().describe('Account id or email, Claude or Codex (see list_accounts). Pins the thread to that login, which it then never leaves; leave it out to let a pool pick.'),
+        account: z.string().optional().describe('Account id or email (see list_accounts). Pins the thread to that login, which it then never leaves; leave it out to let a pool pick.'),
         model: z.string().optional().describe("Model id, one of the account's (list_accounts shows them; Codex ones look like gpt-6-luna). With no account or pool, its provider picks the pool. Default: the runner's default model for the provider if it has one (a dev runner's is the cheapest), else the account's."),
         effort: effortEnum.optional().describe("Reasoning effort (ultra is Codex only). Default: the model's own level."),
-        permissionMode: z.enum(['full', 'ask', 'auto']).optional().describe('"full" (default), "ask" before edits and commands, or "auto": a classifier approves or blocks each action and asks only when it can\'t decide, for work on untrusted text (Claude only; on Codex it acts like ask).'),
+        permissionMode: z.enum(['full', 'ask', 'auto']).optional().describe('"full" (default), "ask" before edits and commands, or "auto": a classifier approves or blocks each action and asks only when it can\'t decide, for work on untrusted text (Claude only; other harnesses act like ask).'),
         why: z.string().optional().describe('A few plain words on why this thread exists, about 6 ("fixing a hook it hit"). The sidebar shows them when the user hovers the mark on its row, as they have none of your context for it.'),
         runner: z.string().optional().describe('Another of the user\'s machines to start it on: its name, or "main". folder is a path there. Where this machine can\'t, it asks the user first and waits.'),
       },
@@ -1812,7 +1812,7 @@ export function buildThreadbearTools(
       {
         folder: z.string().describe("The new folder. ~ works; relative paths are from this thread's current folder."),
         ...thisOrOther,
-        account: z.string().optional().describe('Also move to this account (id or email), Claude or Codex. Another provider starts fresh with a summary, on that provider\'s default model.'),
+        account: z.string().optional().describe('Also move to this account (id or email). Another provider starts fresh with a summary, on that provider\'s default model.'),
         then: z.string().optional().describe('For this thread: what to do next once moved, sent as the next message.'),
       },
       handle(async ({ folder: f, threadId, id: alias, account: acc, then }, extra) => {
@@ -1824,20 +1824,21 @@ export function buildThreadbearTools(
         const caller = await restricted();
         const cwd = await folder(f);
         const accountId = await account(acc);
-        // Out of a sandbox: a folder that isn't in one, or a Codex login,
-        // which never runs in one (sandbox.ts).
+        // Out of a sandbox: a folder that isn't in one, or a login whose
+        // harness can't run in one (sandbox.ts).
         // Only a full access caller outside any sandbox (Mike's own level)
         // moves one out unasked; any other asks first.
         const provider = accountId ? control.hello().accounts.find((a) => a.id === accountId)?.provider : undefined;
+        const outsideProvider = provider !== undefined && provider !== 'claude';
         const shutIn = id === selfId ? Boolean(caller?.confined) : Boolean(await control.confinedOf?.(id));
-        const leaves = shutIn && (!control.sandboxed?.(cwd) || provider === 'codex');
+        const leaves = shutIn && (!control.sandboxed?.(cwd) || outsideProvider);
         if (caller) {
           const t = id === selfId ? undefined : await accessOf(id);
           const checks = schedules ? (await schedules.list(id)).filter((sc) => sc.threadId === id && sc.check?.trim()) : [];
           const name = threadName(id, t?.title ?? '');
           const reasons = [
             ...(t && above(t, caller) ? [`Move "${t.title}", which has ${accessName(t, caller)}, to ${cwd}${then?.trim() ? ' and send it a message' : ''}`] : []),
-            ...(leaves ? [`Move ${name} out of the sandbox to ${cwd}${provider === 'codex' ? ' on a Codex login' : ''}: from its next turn it runs on this machine with ${MODE_NAMES[(await modeOf(id)).mode]}`] : []),
+            ...(leaves ? [`Move ${name} out of the sandbox to ${cwd}${outsideProvider ? ` using ${providerName({ provider })}` : ''}: from its next turn it runs on this machine with ${MODE_NAMES[(await modeOf(id)).mode]}`] : []),
             ...(checks.length ? [`Move ${name} to ${cwd}, where ${checks.length === 1 ? `the schedule "${checks[0].title}" runs its shell check` : `${checks.length} schedules run their shell checks`} as you`] : []),
           ];
           await confirm('move_thread', reasons, { threadId: id, folder: cwd, ...(acc ? { account: accountId } : {}), ...(then ? { then } : {}) }, extra?.signal);

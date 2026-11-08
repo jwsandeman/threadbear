@@ -3,6 +3,7 @@ import path from 'node:path';
 import { isEffortLevel, type Account, type EffortLevel, type ModelChoice } from './protocol.ts';
 import type { UsageStore } from './usage.ts';
 import type { Config } from './config.ts';
+import { experimentOn } from './experiments.ts';
 import { isDirectory } from './fsutil.ts';
 
 // Reads only oauthAccount.emailAddress from a .claude.json. Tokens live in
@@ -84,7 +85,7 @@ export function isCodexLogin(dir: string): boolean {
 }
 
 export type DiscoveryConfig = Pick<Config, 'claudeMainDir' | 'claudeMainJson' | 'tokenStatsAccountsDir'> &
-  Partial<Pick<Config, 'codexMainDir' | 'accountNotes' | 'accountsDir'>>;
+  Partial<Pick<Config, 'codexMainDir' | 'accountNotes' | 'accountsDir' | 'ompMainDir' | 'home'>>;
 
 // claude-main is ~/.claude (its .claude.json sits at ~/.claude.json);
 // codex-main is ~/.codex. Token Stats' Accounts folder holds claude-N and
@@ -121,6 +122,9 @@ export function discoverAccounts(cfg: DiscoveryConfig): Account[] {
   for (const { id, dir } of [...codex, ...numbered('codex')]) {
     if (isCodexLogin(dir)) out.push(codexAccount(id, dir));
   }
+  if (cfg.home && cfg.ompMainDir && experimentOn(cfg.home, 'ohMyPi') && isDirectory(cfg.ompMainDir)) {
+    out.push({ id: 'omp-main', provider: 'omp', title: 'Oh My Pi', configDir: cfg.ompMainDir });
+  }
   for (const a of out) {
     const note = cfg.accountNotes?.[a.id];
     if (note) a.note = note;
@@ -153,6 +157,7 @@ function codexTitle(email: string | undefined, id: string): string {
 // The model an account names for sessions that name none: Claude's
 // settings.json, Codex's config.toml.
 function settingsModel(account: Account): string | undefined {
+  if (account.provider === 'omp') return undefined;
   if (account.provider === 'codex') return readCodexConfig(path.join(account.configDir, 'config.toml')).model;
   return readSettingsModel(path.join(account.configDir, 'settings.json'));
 }
@@ -232,7 +237,7 @@ export class AccountRegistry {
     const id = this.usage.identityFor(account);
     if (id.email) out.email = id.email;
     if (id.plan) out.plan = id.plan;
-    out.title = out.provider === 'codex' ? codexTitle(out.email, out.id) : (out.email ?? out.id);
+    out.title = out.provider === 'omp' ? 'Oh My Pi' : out.provider === 'codex' ? codexTitle(out.email, out.id) : (out.email ?? out.id);
     const usage = this.usage.usageFor(out);
     if (usage) out.usage = usage;
     return out;

@@ -1276,7 +1276,7 @@ export class Runner {
     const cwd = known?.cwd ?? rec.cwd;
     const account = this.accounts.get(known?.accountId ?? rec.accountId);
     const sessionId = known?.sessionId ?? rec.nativeSessionId;
-    const file = account && sessionId ? this.subagentTranscript(account.configDir, cwd, sessionId, subagentId) : null;
+    const file = account && account.provider !== 'omp' && sessionId ? this.subagentTranscript(account.configDir, cwd, sessionId, subagentId) : null;
     if (!file) throw new RpcError(ErrorCode.subagentNotFound, `There's no record of sub-agent ${subagentId} in this thread`);
     const ctx = fileContext(cwd, this.store.mediaDir(rec.id), path.join(this.store.blobsDir(rec.id), 'subagents'));
     let read: ReturnType<typeof readSubagentTranscript>;
@@ -1793,7 +1793,7 @@ export class Runner {
     // A thread shut in a sandbox starts in one or not at all (the adapters
     // check too); one that starts in one is shut in it from now on.
     const inSandbox = rec.provider === 'claude' && this.sandboxed(rec.cwd);
-    if (rec.confined && !inSandbox) throw new Error(rec.provider === 'claude' ? CONFINED_NO_SANDBOX(rec.cwd) : "This thread runs in a sandbox, and Codex can't, so it wasn't started. Move it to a Claude login.");
+    if (rec.confined && !inSandbox) throw new Error(rec.provider === 'claude' ? CONFINED_NO_SANDBOX(rec.cwd) : `This thread runs in a sandbox, and ${providerName(rec.provider)} can't, so it wasn't started. Move it to a Claude login.`);
     if (inSandbox) rec.confined = true;
     const claude = rec.provider === 'claude' ? this.patchTrust.checkClaude(rec.cwd, claudeOptions(rec)) : undefined;
     rt.claudeSkipped = claude && !claude.trusted ? claude.hash : undefined;
@@ -2625,11 +2625,6 @@ export class Runner {
       }
       toAccountId = id ?? poolAccounts(pool, accounts)[0]?.id;
     }
-    if (params.title !== undefined) {
-      rec.title = cutSafely(params.title.trim(), 200) || rec.title;
-      rec.titleSet = true;
-      if (params.titleBy !== 'agent') rec.titleByMike = true;
-    }
     if (params.cwd !== undefined && !params.cwd.trim()) throw new RpcError(ErrorCode.badParams, 'cwd must not be blank');
     const newCwd = params.cwd !== undefined ? path.resolve(expandHome(params.cwd.trim())) : undefined;
     if (newCwd !== undefined && !isDirectory(newCwd)) throw new RpcError(ErrorCode.badParams, `Folder not found: ${newCwd}`);
@@ -2641,7 +2636,15 @@ export class Runner {
     // Checked before anything changes: where it would run after this.
     const stillIn = (newAccount?.provider ?? rec.provider) === 'claude' && this.sandboxed(newCwd ?? rec.cwd);
     if (rec.confined && (newCwd !== undefined || toAccountId !== undefined) && !stillIn && !params.unconfine) {
-      throw new RpcError(ErrorCode.badParams, `"${rec.title}" runs in a sandbox, and this would take it out of it (a folder that isn't in one, or a Codex login). Only the user can do that.`);
+      throw new RpcError(ErrorCode.badParams, `"${rec.title}" runs in a sandbox, and this would take it out of it (a folder that isn't in one, or a harness that can't run in one). Only the user can do that.`);
+    }
+    if ((newAccount?.provider ?? rec.provider) === 'omp' && params.permissionMode === 'plan') {
+      throw new RpcError(ErrorCode.badParams, 'Plan first is not supported by Oh My Pi. Choose Ask before edits.');
+    }
+    if (params.title !== undefined) {
+      rec.title = cutSafely(params.title.trim(), 200) || rec.title;
+      rec.titleSet = true;
+      if (params.titleBy !== 'agent') rec.titleByMike = true;
     }
     // Pinned (an account named, or poolId null), or into a pool.
     if (params.accountId !== undefined || params.poolId === null) {
@@ -2703,6 +2706,11 @@ export class Runner {
       // them), and none of the old CLI's "Always allow" rules, which are in
       // its own syntax.
       rec.provider = newAccount!.provider;
+      if (rec.provider === 'omp' && rec.permissionMode === 'plan' && params.permissionMode === undefined) {
+        rec.permissionMode = 'ask';
+        delete rec.modeBeforePlan;
+        this.emit(st, { type: 'system.note', text: 'Oh My Pi uses Ask before edits because Plan first is not supported.' }, rt.turn?.turnId);
+      }
       delete rec.allowRules;
       delete rec.cliVersion;
       model = this.defaultModelFor(rec.provider);
@@ -3297,11 +3305,11 @@ export class Runner {
     return st;
   }
 
-  // What a starting session is told about the thread's projects. Only a
-  // fresh session: Claude Code keeps a resumed session's system prompt and
-  // ignores an appended one, so a resume hears through projectNews.
+  // Claude and Codex keep a resumed session's instructions, so changes
+  // arrive through the news messages. OMP rebuilds its system prompt on
+  // every launch and needs the current brief again when it resumes.
   briefFor(rec: ThreadRecord, resume: boolean): { instructions?: string } {
-    if (resume) return {};
+    if (resume && rec.provider !== 'omp') return {};
     const parts: string[] = [];
     // Mike's own standing instructions first: they're for everything.
     const standing = this.standingInstructions?.().trim() ?? '';
@@ -3647,11 +3655,11 @@ export function oneLine(text: string, max: number): string {
 
 // A provider's name in notes.
 export function providerName(p: Provider): string {
-  return p === 'codex' ? 'Codex' : 'Claude';
+  return p === 'omp' ? 'Oh My Pi' : p === 'codex' ? 'Codex' : 'Claude';
 }
 
 function cliName(p: Provider): string {
-  return p === 'codex' ? 'Codex' : 'Claude Code';
+  return p === 'omp' ? 'Oh My Pi' : p === 'codex' ? 'Codex' : 'Claude Code';
 }
 
 // Claude's own ids: its aliases, and anything starting claude- (with or

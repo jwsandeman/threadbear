@@ -101,7 +101,11 @@ public enum NewThreadChoices {
         var seen = Set<String>()
         var out: [PhoneModelChoice] = []
         for account in sorted {
-            for model in account.models where seen.insert(model.id).inserted { out.append(model) }
+            for var model in account.models where seen.insert(model.id).inserted {
+                // OMP explicitly discovers capabilities; absence means no reasoning controls.
+                if account.provider == "omp", model.effortLevels == nil { model.effortLevels = [] }
+                out.append(model)
+            }
         }
         return out
     }
@@ -109,8 +113,8 @@ public enum NewThreadChoices {
     /// The efforts a model offers, or with no model picked Claude's levels
     /// (the runner drops one the model it lands on doesn't offer).
     public static func efforts(for model: PhoneModelChoice?) -> [String] {
-        let levels = model?.effortLevels ?? []
-        return levels.isEmpty ? claudeLevels : levels.filter { all.contains($0) }
+        guard let levels = model?.effortLevels else { return claudeLevels }
+        return levels.filter { all.contains($0) }
     }
 
     public static func effortTitle(_ level: String) -> String {

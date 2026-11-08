@@ -34,6 +34,17 @@ import Testing
         #expect(NewThreadChoices.effortTitle("xhigh") == "Extra high")
     }
 
+    @Test func ompModelsKeepTheirProviderIdsAndDoNotInventEffortLevels() {
+        let model = PhoneModelChoice(id: "openrouter/example/model", title: "Example", effortLevels: [])
+        let accounts = [PhoneAccount(id: "omp-main", provider: "omp", title: "Oh My Pi", models: [model])]
+        #expect(NewThreadChoices.models(accounts).map(\.id) == ["openrouter/example/model"])
+        #expect(NewThreadChoices.efforts(for: model).isEmpty)
+        #expect(!NewThreadChoices.keeps(effort: "high", model: model))
+        let noReasoning = PhoneModelChoice(id: "ollama/small", title: "Small")
+        let choices = NewThreadChoices.models([PhoneAccount(id: "omp-main", provider: "omp", title: "Oh My Pi", models: [noReasoning])])
+        #expect(NewThreadChoices.efforts(for: choices.first).isEmpty)
+    }
+
     /// The Mac asleep on 6 Nov left the phone with nowhere to start a thread:
     /// the picker starts on the first runner online in Mike's order.
     @Test func runnerIsTheFirstOnlineInOrder() {

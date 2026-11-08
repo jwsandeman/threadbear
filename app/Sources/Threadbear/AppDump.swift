@@ -125,8 +125,8 @@ struct AppDump: Encodable {
     static func newThreadSettings(_ app: AppModel) -> Settings {
         let account = app.newThreadAccountId
         return Settings(cwd: app.newThreadCwd ?? app.draftLogins.defaults.cwd, account: account,
-                        model: app.newThreadModel ?? defaultModel(app, account: account), ask: app.newThreadPermission == .ask,
-                        mode: app.newThreadPermission, effort: app.newThreadEffort ?? "default", pool: app.newThreadPoolId)
+                        model: app.newThreadModel ?? defaultModel(app, account: account), ask: app.newThreadPermissionMode == .ask,
+                        mode: app.newThreadPermissionMode, effort: app.newThreadEffort ?? "default", pool: app.newThreadPoolId)
     }
 
     /// Whose default a new thread gets, and which model that is when known.
