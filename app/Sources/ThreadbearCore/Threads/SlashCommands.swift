@@ -65,7 +65,11 @@ public enum SlashPalette {
     }
 
     public static func cliName(_ provider: String) -> String {
-        CliText.name(provider.isEmpty ? "claude" : provider)
+        switch provider {
+        case "codex": return "Codex"
+        case "omp": return "Oh My Pi"
+        default: return "Claude Code"
+        }
     }
 
     /// The command being typed, without its slash, while the message is
