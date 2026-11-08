@@ -209,7 +209,7 @@ private struct Ghost: View {
                 .environment(\.isDockGhost, true)
         }
         .frame(width: sourceSize.width, height: sourceSize.height)
-        .background(DockTheme.panel)
+        .background(options.panelBackground)
         .clipShape(RoundedRectangle(cornerRadius: 10 / max(min(sx, sy), 0.2)))
         .overlay(RoundedRectangle(cornerRadius: 10 / max(min(sx, sy), 0.2)).strokeBorder(Color.primary.opacity(0.14), lineWidth: 1 / max(min(sx, sy), 0.2)))
         .scaleEffect(x: sx, y: sy, anchor: .topLeading)

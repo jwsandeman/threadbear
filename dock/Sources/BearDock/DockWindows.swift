@@ -173,7 +173,7 @@ struct FloatingPanelView: View {
                 .contentShape(Rectangle())
                 .contextMenu { PanelMenu(panel: panel, tabbed: false) }
         }
-        .background(DockTheme.panel)
+        .background(options.panelBackground)
         .ignoresSafeArea(.container, edges: .top)
         .coordinateSpace(.named(DockSpace.name))
     }

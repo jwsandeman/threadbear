@@ -322,7 +322,7 @@ struct PanelOriginBadge: View {
             }
         }
         .frame(width: zoomed(side), height: zoomed(side))
-        .background(Color(nsColor: Theme.canvas), in: Circle())
+        .background(Color(nsColor: Theme.sidebarFill), in: Circle())
         .overlay(Circle().strokeBorder(.separator, lineWidth: 0.5))
         .offset(x: zoomed(side * 2 / 13), y: zoomed(side / 13))
         .allowsHitTesting(false)

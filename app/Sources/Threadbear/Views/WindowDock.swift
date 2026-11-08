@@ -250,6 +250,7 @@ struct RootView: View {
                 PanelRail(thread: thread, project: app.openProject)
             }
         }
+        .background(Color(nsColor: Theme.sidebarFill))
         // The tour's frames are in this space, and its overlay covers it.
         .coordinateSpace(.named(Tour.space))
         // Back and forward's arrow while a trackpad swipe is under way.
@@ -299,6 +300,7 @@ struct RootView: View {
         var o = DockOptions()
         o.headerHeight = PaneHeader<EmptyView, EmptyView>.height
         o.titleSize = TypeScale.label
+        o.panelBackground = Color(nsColor: Theme.sidebarFill)
         // The traffic lights take 78 points from the left edge; the
         // activity bar under them has the first of those.
         o.trafficLights = max(0, 78 - ActivityBar.width)
@@ -361,9 +363,14 @@ struct RootView: View {
                 case WindowDock.setup: AnyView(SetupPanel().tourTarget(.setupPanel, withBar: true))
                 case WindowDock.connectors: AnyView(ConnectorsPanel().tourTarget(.panel("connectors"), withBar: true))
                 case WindowDock.runners: AnyView(RunnersPanel())
-                case WindowDock.main: AnyView(DetailView().tourTarget(.mainPanel, withBar: true))
+                case WindowDock.main: AnyView(DetailView()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(Color(nsColor: Theme.canvas))
+                    .tourTarget(.mainPanel, withBar: true))
                 case let id where WindowDock.pinnedThread(id) != nil:
-                    AnyView(PinnedThreadView(threadId: WindowDock.pinnedThread(id)!).id(id))
+                    AnyView(PinnedThreadView(threadId: WindowDock.pinnedThread(id)!).id(id)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .background(Color(nsColor: Theme.canvas)))
                 case PaneSection.highlightsId: AnyView(DockPane(section: .highlights).tourTarget(.highlights, withBar: true))
                 default: AnyView(DockPane(section: PaneSection(id: panel)))
                 }

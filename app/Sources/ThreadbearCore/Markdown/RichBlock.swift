@@ -56,7 +56,7 @@ public struct RichBlock: Hashable, Sendable {
 public struct RichPalette: Sendable, Equatable {
     public let bg, fg, muted, line, surface, surfaceAlt, border, accent: String
 
-    public static let dark = RichPalette(bg: "#282828", fg: "#ececec", muted: "#9a9a9a", line: "#8e8e93",
+    public static let dark = RichPalette(bg: "#1b1c1f", fg: "#ececec", muted: "#9a9a9a", line: "#8e8e93",
                                          surface: "#333335", surfaceAlt: "#3a3a3c", border: "#5a5a5e", accent: "#0a84ff")
     public static let light = RichPalette(bg: "#f7f7f7", fg: "#1d1d1f", muted: "#6e6e73", line: "#86868b",
                                           surface: "#ffffff", surfaceAlt: "#f0f0f2", border: "#c7c7cc", accent: "#007aff")

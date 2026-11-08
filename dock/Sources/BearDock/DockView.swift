@@ -51,6 +51,8 @@ public struct DockContent {
 public struct DockOptions {
     public var headerHeight: CGFloat = 32
     public var titleSize: CGFloat = 12
+    /// The fill behind panels and their title bars; content can supply its own.
+    public var panelBackground = Color(nsColor: .windowBackgroundColor)
     /// In a window without a title bar: room left at the start of the
     /// top-left panel's bar for the traffic lights. 0 with a title bar.
     public var trafficLights: CGFloat = 0
@@ -84,7 +86,6 @@ enum DockSpace {
 
 /// System colours, so the dock follows light and dark like the app around it.
 enum DockTheme {
-    static let panel = Color(nsColor: .windowBackgroundColor)
     /// Shows through the 1 pt gaps between panels, as the hairlines.
     static let hairline = Color(nsColor: .separatorColor)
     static let headerText = Color.primary
@@ -122,7 +123,7 @@ public struct DockView: View {
         NodeView(node: controller.layout.root)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(DockTheme.hairline)
-            .background(DockTheme.panel)
+            .background(options.panelBackground)
             .overlay(alignment: .topLeading) {
                 DragOverlay()
                     .allowsHitTesting(false)
@@ -389,7 +390,7 @@ struct GroupView: View {
                 .opacity(lifted ? 0.18 : 1)
                 .scaleEffect(lifted ? 0.985 : 1)
         }
-        .background(DockTheme.panel)
+        .background(options.panelBackground)
         .overlay(alignment: .top) {
             if !header && !corner {
                 HiddenTitleStrip(panel: group.selected)

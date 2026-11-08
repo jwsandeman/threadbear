@@ -214,7 +214,7 @@ enum Theme {
     static let switchThumb = dynamic(dark: NSColor(white: 1, alpha: 0.16), light: NSColor(white: 1, alpha: 1))
     /// codeBackground over the transcript, as one solid colour, for a fade
     /// that has to end in it (RichPalette's bg is the same).
-    static let codeBackgroundOpaque = dynamic(dark: NSColor(srgbRed: 0x28 / 255, green: 0x28 / 255, blue: 0x28 / 255, alpha: 1),
+    static let codeBackgroundOpaque = dynamic(dark: NSColor(srgbRed: 0x1b / 255, green: 0x1c / 255, blue: 0x1f / 255, alpha: 1),
                                               light: NSColor(srgbRed: 0xf7 / 255, green: 0xf7 / 255, blue: 0xf7 / 255, alpha: 1))
     static let hairline = dynamic(dark: NSColor(white: 1, alpha: 0.1), light: NSColor(white: 0, alpha: 0.1))
 
@@ -291,8 +291,8 @@ enum Theme {
                                    light: NSColor(srgbRed: 0.1, green: 0.55, blue: 0.22, alpha: 1))
     static let removedText = dynamic(dark: NSColor(srgbRed: 1, green: 0.45, blue: 0.45, alpha: 1),
                                      light: NSColor(srgbRed: 0.8, green: 0.15, blue: 0.15, alpha: 1))
-    // Jason's dark look (7 Nov 2026): Ink `#101114` for the window, the
-    // sidebar lifted a tenth of the way to Stone `#8E8B84`, and from his
+    // Jason's dark look: Ink `#101114` behind conversations; sidebars, rails
+    // and toolbars lifted a tenth of the way to Stone `#8E8B84`. From his
     // Superset "Neon Noir" theme its cyan as the accent and its yellow for
     // Needs you and anything running. Light mode keeps the system's colours.
     private static func srgb(_ hex: UInt32) -> NSColor {
@@ -308,7 +308,7 @@ enum Theme {
     static let onAccent = dynamic(dark: srgb(0x0D0F14), light: .white)
     /// A thread's spinner and Working label, and the busy dots.
     static let running = dynamic(dark: yellow, light: .controlAccentColor)
-    /// The window behind everything, and the Threads sidebar a step lighter.
+    /// Ink conversation canvas, with lighter Stone chrome around it.
     static let canvas = dynamic(dark: srgb(0x101114), light: .windowBackgroundColor)
     static let sidebarFill = dynamic(dark: srgb(0x1D1D1F), light: .windowBackgroundColor)
 
