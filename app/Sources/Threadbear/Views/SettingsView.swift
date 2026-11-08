@@ -37,6 +37,12 @@ struct SettingsView: View {
             KeyboardSettings()
                 .tabItem { Label("Keyboard", systemImage: "keyboard") }
                 .tag(SettingsTab.keyboard)
+            // A runner from before experiments in settings sends none.
+            if app.runnerSettings?.experimentsSupported == true {
+                ExperimentsSettings()
+                    .tabItem { Label("Experiments", systemImage: "flask") }
+                    .tag(SettingsTab.experiments)
+            }
         }
         .frame(width: 540)
         .background(SettingsWindowFinder())
@@ -231,6 +237,77 @@ private struct GeneralSettings: View {
         if panel.runModal() == .OK, let url = panel.url {
             app.updateSettings(SettingsUpdate(defaultCwd: url.path))
         }
+    }
+}
+
+// MARK: Experiments
+
+/// Settings > Experiments: every experiment the runner has, with its
+/// switch (runner.json `experiments`). Jason asked for it on 8 Nov rather
+/// than editing the file for each one. A switch takes effect at once,
+/// apart from the few that say otherwise in their line.
+private struct ExperimentsSettings: View {
+    @Environment(AppModel.self) private var app
+
+    var body: some View {
+        SettingsGate { settings in
+            Form {
+                SettingsSection("Experiments",
+                                about: "New features still being tried out, off unless you turn them on. Each switch is saved in runner.json and read at once, so there's nothing to restart. One that's on by default says so.",
+                                ask: "explain one, turn it on or off, or take it out of Threadbear altogether.") {
+                    if settings.experiments.isEmpty {
+                        Text("No experiments in this release.")
+                            .foregroundStyle(.secondary)
+                    }
+                    ForEach(settings.experiments.sorted { $0.added > $1.added || ($0.added == $1.added && $0.name < $1.name) }) { experiment in
+                        ExperimentRow(experiment: experiment)
+                    }
+                }
+                SettingsErrorRow()
+            }
+            .formStyle(.grouped)
+            .fixedSize(horizontal: false, vertical: true)
+            .scrollIndicators(.never)
+            .scrollDisabled(true)
+        }
+    }
+}
+
+private struct ExperimentRow: View {
+    @Environment(AppModel.self) private var app
+    let experiment: RunnerSettings.Experiment
+
+    var body: some View {
+        Toggle(isOn: Binding(get: { experiment.on },
+                             set: { app.updateSettings(SettingsUpdate(experiments: [experiment.id: $0])) })) {
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
+                    Text(experiment.name)
+                    if experiment.standard {
+                        Text("On by default")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                if !detail.isEmpty {
+                    Text(detail)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+        .tip(experiment.on ? "Turn \(experiment.name) off" : "Turn \(experiment.name) on")
+    }
+
+    /// The title without the name it usually opens with ("Voice mode: talk
+    /// with…"), and without Markdown's backticks, which a label can't draw.
+    private var detail: String {
+        var text = experiment.title.replacingOccurrences(of: "`", with: "")
+        let lead = experiment.name + ":"
+        if text.lowercased().hasPrefix(lead.lowercased()) { text = String(text.dropFirst(lead.count)) }
+        text = text.trimmingCharacters(in: .whitespaces)
+        return text.prefix(1).uppercased() + text.dropFirst()
     }
 }
 

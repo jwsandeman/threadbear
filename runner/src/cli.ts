@@ -731,6 +731,9 @@ function printSettings(s: Settings): void {
   console.log(`Bullet replies   ${s.bulletReplies === false ? 'off' : 'on'}`);
   console.log(`One reply        ${s.oneReply ? 'on' : 'off'}`);
   printModels(s);
+  // An older runner sends no list.
+  const on = (s.experiments ?? []).filter((x) => x.on).map((x) => x.id);
+  console.log(`Experiments on   ${on.length ? on.join(', ') : 'none'}`);
 }
 
 function printModels(s: Settings): void {

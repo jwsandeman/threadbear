@@ -10,6 +10,7 @@ import type { Notification } from './runner.ts';
 import type { Models } from './models/index.ts';
 import type { BringInSetting } from './bring-in.ts';
 import { DEFAULT_BRING_IN_DAYS, parseBringIn } from './bring-in.ts';
+import { EXPERIMENTS, experimentOn } from './experiments.ts';
 
 export type Settings = {
   defaultCwd: string;
@@ -25,6 +26,19 @@ export type Settings = {
     pool: string | null;
     privateFolders: string[];
   };
+  // Every experiment (experiments.ts), for Settings > Experiments: `on` is
+  // what this runner does now, `standard` what it would do with nothing in
+  // runner.json.
+  experiments: ExperimentSetting[];
+};
+
+export type ExperimentSetting = {
+  id: string;
+  name: string;
+  title: string;
+  added: string;
+  on: boolean;
+  standard: boolean;
 };
 
 export type SettingsUpdate = {
@@ -36,6 +50,9 @@ export type SettingsUpdate = {
   oneReply?: boolean;
   bringIn?: BringInSetting;
   models?: { pool?: string | null; privateFolders?: string[] };
+  // true or false sets the switch in runner.json; null takes it out, so
+  // the experiment goes back to its default.
+  experiments?: Record<string, boolean | null>;
 };
 
 export class SettingsService {
@@ -64,6 +81,7 @@ export class SettingsService {
         pool: this.cfg.models.pool,
         privateFolders: [...this.cfg.models.privateFolders],
       },
+      experiments: EXPERIMENTS.map((x) => ({ id: x.id, name: x.name, title: x.title, added: x.added, on: experimentOn(this.cfg.home, x.id), standard: x.on })),
     };
   }
 
@@ -84,6 +102,9 @@ export class SettingsService {
     if (pool === '') throw bad('pool must be a pool id or null');
     const pools = pool ? this.poolIds?.() : undefined;
     if (pool && pools && !pools.includes(pool)) throw bad(`No pool called ${pool}. Pools: ${pools.join(', ') || 'none'}`);
+    for (const id of Object.keys(u.experiments ?? {})) {
+      if (!EXPERIMENTS.some((x) => x.id === id)) throw bad(`No experiment called ${id}. Experiments: ${EXPERIMENTS.map((x) => x.id).join(', ')}`);
+    }
 
     const json = readRunnerJson(this.cfg.home);
     if (cwd !== undefined) {
@@ -108,6 +129,18 @@ export class SettingsService {
       json.models = { ...json.models };
       if (pool !== undefined) json.models.pool = this.cfg.models.pool = pool;
       if (folders !== undefined) json.models.privateFolders = this.cfg.models.privateFolders = [...new Set(folders)];
+    }
+    // Read afresh wherever an experiment is checked (experimentOn), so a
+    // switch takes effect at once; one that lives in the app is read from
+    // settings.updated there.
+    if (u.experiments) {
+      const flags = { ...json.experiments };
+      for (const [id, on] of Object.entries(u.experiments)) {
+        if (on === null) delete flags[id];
+        else flags[id] = on;
+      }
+      if (Object.keys(flags).length) json.experiments = flags;
+      else delete json.experiments;
     }
     writeRunnerJson(this.cfg.home, json);
     return this.changed();
@@ -159,6 +192,15 @@ export function settingsMethods(s: SettingsService): Record<string, (p: Record<s
             throw bad('models.privateFolders must be an array of strings');
           }
           u.models.privateFolders = mm.privateFolders as string[];
+        }
+      }
+      if (p.experiments !== undefined) {
+        const e = p.experiments;
+        if (!e || typeof e !== 'object' || Array.isArray(e)) throw bad('experiments must be an object of id to true, false or null');
+        u.experiments = {};
+        for (const [id, on] of Object.entries(e as Record<string, unknown>)) {
+          if (on !== null && typeof on !== 'boolean') throw bad(`experiments.${id} must be true, false or null`);
+          u.experiments[id] = on;
         }
       }
       return { settings: s.update(u) };

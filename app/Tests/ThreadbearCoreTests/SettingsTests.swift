@@ -57,6 +57,19 @@ final class SettingsTests: XCTestCase {
         XCTAssertEqual(SettingsUpdate(bringIn: .off).params, ["bringIn": .string("off")])
     }
 
+    func testExperimentsDecodeWithTheirSwitches() throws {
+        func decode(_ json: String) throws -> RunnerSettings { try JSONDecoder().decode(RunnerSettings.self, from: Data(json.utf8)) }
+        let settings = try decode(#"{"experiments":[{"id":"voiceMode","name":"Voice mode","title":"Talk out loud","added":"2026-11-07","on":true,"standard":false},{"name":"no id"},{"id":"bare"}]}"#)
+        XCTAssertTrue(settings.experimentsSupported)
+        XCTAssertEqual(settings.experiments.map(\.id), ["voiceMode", "bare"], "one without an id is skipped")
+        XCTAssertEqual(settings.experiments[0], RunnerSettings.Experiment(id: "voiceMode", name: "Voice mode", title: "Talk out loud", added: "2026-11-07", on: true, standard: false))
+        XCTAssertEqual(settings.experiments[1].name, "bare", "a missing name is the id")
+        XCTAssertFalse(try decode("{}").experimentsSupported, "an older runner sends none")
+        XCTAssertEqual(SettingsUpdate(experiments: ["labReview": true]).params, ["experiments": .object(["labReview": .bool(true)])])
+        XCTAssertEqual(SettingsUpdate(experiments: ["labReview": nil as Bool?]).params, ["experiments": .object(["labReview": .null])],
+                       "back to the default is sent as null")
+    }
+
     func testBringInChoicesKeepACustomNumber() {
         XCTAssertEqual(SettingsText.bringInChoices(current: .standard).map(\.title),
                        ["Every day", "Every 3 days", "Every 5 days", "Every week", "Every 2 weeks", "Only important ones", "Never"])

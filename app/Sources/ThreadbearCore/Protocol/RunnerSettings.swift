@@ -59,6 +59,41 @@ public struct RunnerSettings: Sendable, Hashable, Decodable {
         enum CodingKeys: String, CodingKey { case pool, privateFolders }
     }
 
+    /// One experiment (runner/src/experiments/), for Settings > Experiments.
+    public struct Experiment: Sendable, Hashable, Decodable, Identifiable {
+        public var id: String
+        public var name: String
+        /// What it does, in a line.
+        public var title: String
+        /// YYYY-MM-DD it landed.
+        public var added: String
+        /// What this runner does now.
+        public var on: Bool
+        /// What it does with nothing in runner.json.
+        public var standard: Bool
+
+        public init(id: String, name: String, title: String = "", added: String = "", on: Bool = false, standard: Bool = false) {
+            self.id = id
+            self.name = name
+            self.title = title
+            self.added = added
+            self.on = on
+            self.standard = standard
+        }
+
+        public init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            id = try c.decode(String.self, forKey: .id)
+            name = (try? c.decodeIfPresent(String.self, forKey: .name)) ?? id
+            title = (try? c.decodeIfPresent(String.self, forKey: .title)) ?? ""
+            added = (try? c.decodeIfPresent(String.self, forKey: .added)) ?? ""
+            on = (try? c.decodeIfPresent(Bool.self, forKey: .on)) ?? false
+            standard = (try? c.decodeIfPresent(Bool.self, forKey: .standard)) ?? false
+        }
+
+        enum CodingKeys: String, CodingKey { case id, name, title, added, on, standard }
+    }
+
     public var defaultCwd: String
     public var idleMinutes: Int
     public var maxLiveCLIs: Int
@@ -73,9 +108,15 @@ public struct RunnerSettings: Sendable, Hashable, Decodable {
     /// Whether the runner sends `bringIn` at all. An older one doesn't.
     public var bringInSupported: Bool
     public var models: Models
+    /// Every experiment and its switch. Empty from a runner that sends none.
+    public var experiments: [Experiment]
+    /// Whether the runner sends `experiments` at all. An older one doesn't,
+    /// and then there's no Experiments tab.
+    public var experimentsSupported: Bool
 
     public init(defaultCwd: String = "", idleMinutes: Int = 30, maxLiveCLIs: Int = 6, followMain: Bool = true, bulletReplies: Bool = true, oneReply: Bool = false,
-                bringIn: BringIn = .standard, bringInSupported: Bool = false, models: Models = Models()) {
+                bringIn: BringIn = .standard, bringInSupported: Bool = false, models: Models = Models(),
+                experiments: [Experiment] = [], experimentsSupported: Bool = false) {
         self.defaultCwd = defaultCwd
         self.idleMinutes = idleMinutes
         self.maxLiveCLIs = maxLiveCLIs
@@ -85,6 +126,8 @@ public struct RunnerSettings: Sendable, Hashable, Decodable {
         self.bringIn = bringIn
         self.bringInSupported = bringInSupported
         self.models = models
+        self.experiments = experiments
+        self.experimentsSupported = experimentsSupported
     }
 
     public init(from decoder: Decoder) throws {
@@ -98,9 +141,11 @@ public struct RunnerSettings: Sendable, Hashable, Decodable {
         bringInSupported = c.contains(.bringIn)
         bringIn = BringIn.decode(c) ?? .standard
         models = (try? c.decodeIfPresent(Models.self, forKey: .models)) ?? Models()
+        experimentsSupported = c.contains(.experiments)
+        experiments = c.lossyArray(Experiment.self, forKey: .experiments)
     }
 
-    enum CodingKeys: String, CodingKey { case defaultCwd, idleMinutes, maxLiveCLIs, followMain, bulletReplies, oneReply, bringIn, models }
+    enum CodingKeys: String, CodingKey { case defaultCwd, idleMinutes, maxLiveCLIs, followMain, bulletReplies, oneReply, bringIn, models, experiments }
 }
 
 /// Fields for `settings.update`; nil ones are left out, so an edit to one
@@ -116,9 +161,12 @@ public struct SettingsUpdate: Sendable, Hashable {
     /// `.some(nil)` sends null: no pool, so no small jobs.
     public var pool: String??
     public var privateFolders: [String]?
+    /// Experiment id to its switch; nil for a value sends null, back to its default.
+    public var experiments: [String: Bool?]?
 
     public init(defaultCwd: String? = nil, idleMinutes: Int? = nil, maxLiveCLIs: Int? = nil, followMain: Bool? = nil, bulletReplies: Bool? = nil, oneReply: Bool? = nil,
-                bringIn: RunnerSettings.BringIn? = nil, pool: String?? = nil, privateFolders: [String]? = nil) {
+                bringIn: RunnerSettings.BringIn? = nil, pool: String?? = nil, privateFolders: [String]? = nil, experiments: [String: Bool?]? = nil) {
+        self.experiments = experiments
         self.pool = pool
         self.bringIn = bringIn
         self.defaultCwd = defaultCwd
@@ -143,6 +191,9 @@ public struct SettingsUpdate: Sendable, Hashable {
         if let pool { models["pool"] = pool.map { .string($0) } ?? .null }
         if let privateFolders { models["privateFolders"] = .array(privateFolders.map { .string($0) }) }
         if !models.isEmpty { params["models"] = .object(models) }
+        if let experiments {
+            params["experiments"] = .object(experiments.mapValues { $0.map { .bool($0) } ?? .null })
+        }
         return params
     }
 }

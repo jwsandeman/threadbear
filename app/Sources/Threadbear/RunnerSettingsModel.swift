@@ -2,7 +2,7 @@ import AppKit
 import ThreadbearCore
 
 enum SettingsTab: String, Hashable, CaseIterable {
-    case general, voice, models, pools, runners, devices, keyboard
+    case general, voice, models, pools, runners, devices, keyboard, experiments
 }
 
 /// The Settings window's side of AppModel. Everything in it is the
@@ -27,6 +27,9 @@ extension AppModel {
     func receive(_ settings: RunnerSettings) {
         runnerSettings = settings
         settingsUnsupported = false
+        // Experiments that live in the app (Voice mode) follow the switch
+        // from here as well as from hello, so a flip in Settings shows at once.
+        if settings.experimentsSupported { experiments = Set(settings.experiments.filter(\.on).map(\.id)) }
         // The new-thread composer starts in the default folder.
         if !settings.defaultCwd.isEmpty { defaults.cwd = (settings.defaultCwd as NSString).expandingTildeInPath }
     }
@@ -60,6 +63,13 @@ extension AppModel {
             if let v = update.bringIn { shown.bringIn = v }
             if let v = update.pool { shown.models.pool = v }
             if let v = update.privateFolders { shown.models.privateFolders = v }
+            if let flips = update.experiments {
+                for i in shown.experiments.indices {
+                    guard let flip = flips[shown.experiments[i].id] else { continue }
+                    shown.experiments[i].on = flip ?? shown.experiments[i].standard
+                }
+                experiments = Set(shown.experiments.filter(\.on).map(\.id))
+            }
             runnerSettings = shown
         }
         Task {

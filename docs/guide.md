@@ -970,9 +970,10 @@ to `f20`.
 <!-- slug: experiments -->
 
 Some new features start as experiments: off unless you turn them on, while
-they're tried out. Each has a switch under `experiments` in `runner.json`
-in Threadbear's data folder, read at every turn, so there's nothing to
-restart:
+they're tried out. Settings > Experiments lists them, each with a switch
+and a line on what it does; a change takes effect at once, with nothing to
+restart. The switches live under `experiments` in `runner.json` in
+Threadbear's data folder, which an agent can edit too:
 
 ```json
 "experiments": { "labReview": true }
