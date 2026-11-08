@@ -76,7 +76,9 @@ final class RichBlocks: @unchecked Sendable {
     /// fails, or flips between its picture and its source.
     var generation: Int { inner.withLock { $0.generation } }
 
-    static func key(_ block: RichBlock, zoom: Int = TypeScale.percent) -> String { "\(block.id)-\(zoom)" }
+    /// Bump when the palette or renderer changes, for both pictures and pane pages.
+    static let cacheVersion = 2
+    static func key(_ block: RichBlock, zoom: Int = TypeScale.percent) -> String { "\(block.id)-\(zoom)-v\(cacheVersion)" }
 
     /// The block's state, starting it drawing if it's new.
     func state(_ block: RichBlock) -> State {
@@ -186,7 +188,7 @@ enum RichDiskCache {
     /// The page or diagram the side pane shows for a block, in a folder
     /// of its own: the preview scheme lets a page read what's beside it.
     static func panePage(_ block: RichBlock) -> URL {
-        folder.appendingPathComponent("page-\(block.id)", isDirectory: true).appendingPathComponent("index.html")
+        folder.appendingPathComponent("page-\(block.id)-v\(RichBlocks.cacheVersion)", isDirectory: true).appendingPathComponent("index.html")
     }
 
     /// Keeps the folder to the newest few hundred files.
