@@ -179,11 +179,11 @@ export const newThreadsPart = {
     if (account.provider === 'omp' && params.permissionMode === 'plan') throw new RpcError(ErrorCode.badParams, 'Plan first is not supported by Oh My Pi. Choose Ask before edits.');
     if (!isDirectory(cwd)) throw new RpcError(ErrorCode.badParams, `Folder not found: ${cwd}`);
     // In a sandbox folder a Claude thread is shut in it from the start. One
-    // asked for that which can't be (a Codex login, a folder outside) is
+    // asked for that which can't be (another harness, a folder outside) is
     // refused rather than started outside (sandbox.ts).
     const sandboxed = account.provider === 'claude' && this.sandboxed(cwd);
     if (params.confined && !sandboxed) {
-      throw new RpcError(ErrorCode.badParams, account.provider === 'claude' ? `${cwd} isn't in a sandbox folder, and a sandboxed thread can only start threads in one without asking.` : "A sandboxed thread can only start Claude threads, as Codex doesn't run in the sandbox.");
+      throw new RpcError(ErrorCode.badParams, account.provider === 'claude' ? `${cwd} isn't in a sandbox folder, and a sandboxed thread can only start threads in one without asking.` : `A sandboxed thread can only start Claude threads, as ${providerName(account.provider)} doesn't run in the sandbox.`);
     }
     const now = this.isoNow();
     const id = crypto.randomUUID();

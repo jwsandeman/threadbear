@@ -12,6 +12,8 @@ import type { RemoteThreads } from '../../src/thread-index.ts';
 import { needsFromTool } from '../../src/needs.ts';
 import { CodexTools, type ToolDefinition } from '../../src/adapters/codex/tools.ts';
 import { toolTitle } from '../../src/tools.ts';
+import { LIMITS } from '../../src/protocol.ts';
+import { z } from 'zod';
 
 function start(h: ReturnType<typeof makeHarness>, text = 'Fix the tests', extra: Record<string, unknown> = {}) {
   const { thread } = h.runner.create({ text, accountId: 'claude-3', ...extra });
@@ -1146,6 +1148,28 @@ test("A Codex thread in ask mode ends its turn and reads without asking, and ask
   assert.deepEqual(asked, []);
   assert.equal((await call('send_message', { id: thread.id, text: 'hi' })).success, false);
   assert.deepEqual(asked, ['send_message']);
+});
+
+test('Codex and OMP host tool approvals show all nested arguments or refuse without running', async () => {
+  const cards: unknown[] = [];
+  let calls = 0;
+  const host = new CodexTools([{
+    name: 'send_message', description: 'Send a message', inputSchema: { payload: z.object({ command: z.string() }) },
+    handler: async () => { calls++; return { content: [] }; },
+  }], {
+    requestApproval: async (r) => { cards.push(r.input); return { decision: 'allow' }; },
+    cwd: () => '/tmp', mode: () => 'ask', rules: () => [], addRules: () => {},
+  });
+  const call = (command: string) => host.call({ threadId: 'n', turnId: 't', callId: 'c', namespace: 'threadbear', tool: 'send_message', arguments: { payload: { command } } }, { fromChild: false, signal: new AbortController().signal });
+  const long = await call('x'.repeat(LIMITS.toolInputString + 1));
+  assert.equal(long.success, false);
+  assert.match(JSON.stringify(long.contentItems), /longer than an approval card/);
+  assert.deepEqual(cards, []);
+  assert.equal(calls, 0);
+  const short = 'x'.repeat(LIMITS.toolInputString);
+  assert.equal((await call(short)).success, true);
+  assert.deepEqual(cards, [{ payload: { command: short } }]);
+  assert.equal(calls, 1);
 });
 
 // A Codex thread's tool list is fixed when it starts, so what it was told

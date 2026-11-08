@@ -8,8 +8,8 @@ import { isEffortLevel } from '../../protocol.ts';
 import type { ProcessRegistry } from '../../proc.ts';
 import type { Logger } from '../../log.ts';
 import { atomicWriteFileSync } from '../../fsutil.ts';
-import { toolTitle, truncateInput } from '../../tools.ts';
-import type { AgentAdapter, AgentSession, SessionSink, StartSessionOptions, TurnResult, UserInput } from '../types.ts';
+import { cardInput, toolTitle, tooLongForCard } from '../../tools.ts';
+import type { AgentAdapter, AgentSession, SessionSink, StartSessionOptions, ToolApprovalRequest, TurnResult, UserInput } from '../types.ts';
 import { SessionNotFoundError } from '../types.ts';
 import { fileContext } from '../context.ts';
 import { CodexTools, NAMESPACE, toolGuidance, type ToolDefinition } from '../codex/tools.ts';
@@ -54,6 +54,7 @@ export class OmpAdapter implements AgentAdapter {
     this.deps = deps;
   }
   start(options: StartSessionOptions, sink: SessionSink): AgentSession {
+    if (options.confined) throw new Error("This thread runs in a sandbox, and Oh My Pi can't, so it wasn't started. Move it to a Claude login.");
     if (options.permissionMode === 'plan') throw new Error('Plan first is not supported by Oh My Pi. Choose Ask before edits.');
     return new OmpSession(options, sink, this.deps, async () => {
       if (!this.defaults.has(options.account.configDir)) await this.models(options.account);
@@ -394,6 +395,16 @@ class OmpSession implements AgentSession {
       } catch {}
     }
   }
+  private async approve(request: ToolApprovalRequest): Promise<boolean> {
+    // OMP and its MCP aliases can put executable content in any argument.
+    const card = cardInput(request.input, 'all');
+    if (card.tooLong) {
+      this.sink.output({ kind: 'event', event: { type: 'system.note', text: tooLongForCard(card.tooLong) } });
+      return false;
+    }
+    const result = await this.sink.requestApproval({ ...request, name: `omp__${request.name}`, input: card.input });
+    return !request.signal.aborted && !result.stopped && (result.decision === 'allow' || result.decision === 'allowAlways');
+  }
   private async ui(f: Frame): Promise<void> {
     if (f.method === 'notify' && f.message === `threadbear-guard-ready:${this.nonce}`) {
       this.guardReady = true;
@@ -413,48 +424,43 @@ class OmpSession implements AgentSession {
       }
       if (f.method === 'confirm' && f.title === 'Threadbear tool approval') {
         const request = JSON.parse(f.message);
-        if (request.nonce !== this.nonce || typeof request.name !== 'string' || !request.input || typeof request.input !== 'object')
+        if (request.nonce !== this.nonce || typeof request.name !== 'string' || !request.input || typeof request.input !== 'object' || Array.isArray(request.input))
           throw new Error('Invalid Threadbear approval request');
         const display = displayTool(request.name, request.input);
-        const result = await this.sink.requestApproval({
+        const confirmed = await this.approve({
           toolUseId: this.normalizer.toolId(request.toolCallId),
           name: request.name,
           title: toolTitle(display.name, display.input, this.opts.cwd),
-          input: truncateInput(request.input),
+          input: request.input,
           canAlwaysAllow: false,
           signal: abort.signal,
         });
-        this.answer(f.id, {
-          confirmed: !abort.signal.aborted && (result.decision === 'allow' || result.decision === 'allowAlways'),
-        });
+        this.answer(f.id, { confirmed });
         return;
       }
       const options = Array.isArray(f.options) ? f.options.filter((s: unknown) => typeof s === 'string') : [];
       if (f.method === 'select' && options.includes('Deny') && (options.includes('Approve') || options.includes('Approve Once'))) {
-        const result = await this.sink.requestApproval({
-          name: 'omp',
+        const approved = await this.approve({
+          name: 'approval',
           title: String(f.title ?? 'Oh My Pi approval').split('\n')[0],
-          input: { details: String(f.title ?? '') },
+          input: { details: String(f.title ?? ''), ...(Array.isArray(f.optionDetails) ? { options, optionDetails: f.optionDetails } : {}) },
           canAlwaysAllow: false,
           signal: abort.signal,
         });
         this.answer(f.id, {
-          value:
-            !abort.signal.aborted && (result.decision === 'allow' || result.decision === 'allowAlways') ? (options.includes('Approve Once') ? 'Approve Once' : 'Approve') : 'Deny',
+          value: approved ? (options.includes('Approve Once') ? 'Approve Once' : 'Approve') : 'Deny',
         });
         return;
       }
       if (f.method === 'confirm') {
-        const result = await this.sink.requestApproval({
-          name: 'omp',
+        const confirmed = await this.approve({
+          name: 'approval',
           title: String(f.title ?? 'Oh My Pi confirmation'),
-          input: { message: String(f.message ?? '') },
+          input: { title: String(f.title ?? 'Oh My Pi confirmation'), message: String(f.message ?? '') },
           canAlwaysAllow: false,
           signal: abort.signal,
         });
-        this.answer(f.id, {
-          confirmed: !abort.signal.aborted && result.decision === 'allow',
-        });
+        this.answer(f.id, { confirmed });
         return;
       }
       const questions: Question[] =
@@ -483,7 +489,7 @@ class OmpSession implements AgentSession {
         questions,
         signal: abort.signal,
       });
-      if (!result.answers || abort.signal.aborted) {
+      if (!result.answers || result.stopped || abort.signal.aborted) {
         this.answer(f.id, { cancelled: true });
         return;
       }

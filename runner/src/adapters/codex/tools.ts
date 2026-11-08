@@ -18,7 +18,7 @@ import type { PermissionMode } from '../../protocol.ts';
 import { ALWAYS_ASK_TOOLS, FILING_PROJECTS, NEVER_ASK_TOOLS, guideLine, POCKET_LINE, SERVER_NAME, SHOWING_THE_USER } from '../../threadbear-mcp.ts';
 import { userLine } from '../../user-name.ts';
 import { CODEX_ONE_REPLY_DESCRIPTION, END_TURN_TOOL } from '../../needs.ts';
-import { toolTitle, truncateInput } from '../../tools.ts';
+import { cardInput, toolTitle, tooLongForCard } from '../../tools.ts';
 import type { DynamicToolCallParams, DynamicToolCallResponse, DynamicToolSpec } from './types.ts';
 
 // What the SDK's tool() makes (buildThreadbearTools' array), loosely typed
@@ -142,11 +142,13 @@ export class CodexTools {
     const readOnly = NEVER_ASK_TOOLS.has(fullName) || tool.annotations?.readOnlyHint === true;
     const allowed = !alwaysAsk && [...this.deps.rules()].includes(fullName);
     if (alwaysAsk || (this.deps.mode() !== 'full' && !readOnly && !allowed)) {
+      const card = cardInput(args, 'all');
+      if (card.tooLong) return text(tooLongForCard(card.tooLong), false);
       const ans = await this.deps.requestApproval({
         toolUseId: o.fromChild ? undefined : params.callId,
         name: fullName,
         title: toolTitle(fullName, args, this.deps.cwd()),
-        input: truncateInput(args),
+        input: card.input,
         canAlwaysAllow: !alwaysAsk,
         signal: o.signal,
       });

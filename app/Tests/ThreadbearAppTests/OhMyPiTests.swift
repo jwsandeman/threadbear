@@ -51,7 +51,7 @@ final class OhMyPiTests: XCTestCase {
 
     func testOmpSignInUsesItsOwnExecutableAndConfiguration() {
         let script = SignIn.script(Account(id: "omp-main", provider: "omp", title: "Oh My Pi", configDir: "/tmp/omp agent"), cliPath: "/opt/bin/omp")
-        XCTAssertTrue(script.contains("PI_CODING_AGENT_DIR='/tmp/omp agent' '/opt/bin/omp' login"), script)
+        XCTAssertTrue(script.contains("\nenv -u OMP_PROFILE -u PI_PROFILE PI_CODING_AGENT_DIR='/tmp/omp agent' '/opt/bin/omp' login\n"), script)
         XCTAssertFalse(script.contains("CLAUDE_CONFIG_DIR"))
         XCTAssertTrue(script.contains("Signing in to Oh My Pi"))
         XCTAssertTrue(AppModel.memoryProviders.contains("omp"))

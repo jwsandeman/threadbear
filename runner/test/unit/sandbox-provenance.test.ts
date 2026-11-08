@@ -12,7 +12,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { FakeAccounts, makeHarness, tick, tmpDir, withCodex } from '../helpers/fakes.ts';
+import { FakeAccounts, FakeAdapter, makeHarness, tick, tmpDir, withCodex } from '../helpers/fakes.ts';
 import { TRUST_ALL } from '../../src/patch-trust.ts';
 import { buildThreadbearTools } from '../../src/threadbear-mcp.ts';
 import { Scheduler } from '../../src/schedules.ts';
@@ -28,9 +28,10 @@ function setup(opts: { callerIn?: 'box' | 'host'; mode?: PermissionMode } = {}) 
   for (const d of [demo, outside]) fs.mkdirSync(d, { recursive: true });
   const trusted: string[] = [];
   const h = makeHarness(tmpDir(), { sandbox: { folders: [box], image: 'threadbear-sandbox', docker: 'docker' } }, {
-    accounts: new FakeAccounts(withCodex()),
+    accounts: new FakeAccounts([...withCodex(), { id: 'omp-main', provider: 'omp', title: 'Oh My Pi', configDir: '/unused/omp' }]),
     patchTrust: { ...TRUST_ALL, trustAgentWrite: (file: string) => (trusted.push(file), [file]) },
   });
+  h.runner.adapters.omp = new FakeAdapter('omp');
   const sched = new Scheduler({ runner: h.runner, home: h.home, clock: h.clock, log: nullLogger, zone: () => 'UTC' });
   sched.start();
   const host = h.runner.create({ text: 'Host work', accountId: 'claude-3', cwd: outside, permissionMode: 'ask' }).thread;
@@ -73,6 +74,24 @@ test('a thread started in a sandbox folder is shut in it, and its session is tol
   assert.equal(s.rec(s.me.id).confined, true);
   assert.equal(s.h.adapter.sessions.find((x) => x.opts.threadId === s.me.id)?.opts.confined, true);
   assert.equal(s.rec(s.host.id).confined, undefined, 'one outside it is not');
+});
+
+test('moving a sandboxed thread to OMP in the same folder requires permission to leave the sandbox', async () => {
+  const s = setup();
+  try {
+    const denied = await s.withCard('deny', 'move_thread', { folder: '.', account: 'omp-main' });
+    assert.equal(denied.error, true);
+    assert.match(denied.card.title, /out of the sandbox.*Oh My Pi/);
+    assert.equal(s.rec(s.me.id).confined, true);
+    assert.equal(s.h.runner.get(s.me.id).provider, 'claude');
+    const allowed = await s.withCard('allow', 'move_thread', { folder: '.', account: 'omp-main' });
+    assert.equal(allowed.error, false, allowed.text);
+    assert.equal(s.rec(s.me.id).confined, undefined);
+    assert.equal(s.h.runner.get(s.me.id).provider, 'omp');
+  } finally {
+    s.sched.stop();
+    await s.h.runner.shutdown();
+  }
 });
 
 test("the scan's attack: create_thread from a sandboxed Full thread into ~ or any folder outside asks, with no Always allow", async () => {

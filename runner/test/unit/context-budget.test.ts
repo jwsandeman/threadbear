@@ -40,7 +40,7 @@ const bytes = (s: string) => Buffer.byteLength(norm(s), 'utf8');
 function stub<T extends object>(): T {
   return new Proxy({}, { get: () => () => undefined }) as T;
 }
-function tools(provider: 'claude' | 'codex', oneReply: boolean): ToolDefinition[] {
+function tools(provider: 'claude' | 'codex' | 'omp', oneReply: boolean): ToolDefinition[] {
   return buildThreadbearTools(stub<ThreadControl>(), SELF, () => 0, stub(), stub(), stub(), {
     provider,
     oneReply: () => oneReply,
@@ -70,13 +70,17 @@ export function measure() {
   const claudeTools = toolBytes(tools('claude', true));
   const codexDefs = tools('codex', true);
   const codexTools = toolBytes(codexDefs);
+  const ompDefs = tools('omp', true);
+  const ompTools = toolBytes(ompDefs);
   const claudeInstructions = bytes(serverInstructions(SELF, { one: true, bulletReplies: true, pocket: true, projects: true }));
   // The namespace's own description goes with the tools (dynamicToolSpecs).
   const codexInstructions = bytes(toolGuidance(codexDefs)) + bytes(NAMESPACE_DESCRIPTION);
+  const ompInstructions = bytes(toolGuidance(ompDefs));
   const worktree = bytes(worktreeInstructions({ repo: 'repo', path: '/repo-threads/slot-1', branch: 'thread/00000000', mainCheckout: '/repo', base: '0000000' }));
   return {
     claude: { instructions: claudeInstructions, tools: claudeTools.total, total: claudeInstructions + claudeTools.total },
     codex: { instructions: codexInstructions, tools: codexTools.total, total: codexInstructions + codexTools.total },
+    omp: { instructions: ompInstructions, tools: ompTools.total, total: ompInstructions + ompTools.total },
     worktreeInstructions: worktree,
     perTool: claudeTools.perTool,
   };

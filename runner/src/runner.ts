@@ -1793,7 +1793,7 @@ export class Runner {
     // A thread shut in a sandbox starts in one or not at all (the adapters
     // check too); one that starts in one is shut in it from now on.
     const inSandbox = rec.provider === 'claude' && this.sandboxed(rec.cwd);
-    if (rec.confined && !inSandbox) throw new Error(rec.provider === 'claude' ? CONFINED_NO_SANDBOX(rec.cwd) : "This thread runs in a sandbox, and Codex can't, so it wasn't started. Move it to a Claude login.");
+    if (rec.confined && !inSandbox) throw new Error(rec.provider === 'claude' ? CONFINED_NO_SANDBOX(rec.cwd) : `This thread runs in a sandbox, and ${providerName(rec.provider)} can't, so it wasn't started. Move it to a Claude login.`);
     if (inSandbox) rec.confined = true;
     const claude = rec.provider === 'claude' ? this.patchTrust.checkClaude(rec.cwd, claudeOptions(rec)) : undefined;
     rt.claudeSkipped = claude && !claude.trusted ? claude.hash : undefined;
@@ -2636,7 +2636,7 @@ export class Runner {
     // Checked before anything changes: where it would run after this.
     const stillIn = (newAccount?.provider ?? rec.provider) === 'claude' && this.sandboxed(newCwd ?? rec.cwd);
     if (rec.confined && (newCwd !== undefined || toAccountId !== undefined) && !stillIn && !params.unconfine) {
-      throw new RpcError(ErrorCode.badParams, `"${rec.title}" runs in a sandbox, and this would take it out of it (a folder that isn't in one, or a Codex login). Only the user can do that.`);
+      throw new RpcError(ErrorCode.badParams, `"${rec.title}" runs in a sandbox, and this would take it out of it (a folder that isn't in one, or a harness that can't run in one). Only the user can do that.`);
     }
     if ((newAccount?.provider ?? rec.provider) === 'omp' && params.permissionMode === 'plan') {
       throw new RpcError(ErrorCode.badParams, 'Plan first is not supported by Oh My Pi. Choose Ask before edits.');
@@ -3305,11 +3305,11 @@ export class Runner {
     return st;
   }
 
-  // What a starting session is told about the thread's projects. Only a
-  // fresh session: Claude Code keeps a resumed session's system prompt and
-  // ignores an appended one, so a resume hears through projectNews.
+  // Claude and Codex keep a resumed session's instructions, so changes
+  // arrive through the news messages. OMP rebuilds its system prompt on
+  // every launch and needs the current brief again when it resumes.
   briefFor(rec: ThreadRecord, resume: boolean): { instructions?: string } {
-    if (resume) return {};
+    if (resume && rec.provider !== 'omp') return {};
     const parts: string[] = [];
     // Mike's own standing instructions first: they're for everything.
     const standing = this.standingInstructions?.().trim() ?? '';

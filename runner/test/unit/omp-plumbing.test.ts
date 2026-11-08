@@ -93,3 +93,30 @@ test('moving a Plan first thread to OMP selects Ask before edits', async () => {
     assert.equal(changed.thread.permissionMode, 'ask');
   } finally { await h.runner.shutdown(); }
 });
+
+test('OMP reloads standing instructions into its rebuilt system prompt on resume', async () => {
+  const adapter = new FakeAdapter('omp');
+  let instructions = 'Use Australian spelling.';
+  const deps = { accounts: new FakeAccounts([omp]), adapters: { omp: adapter }, standingInstructions: () => instructions };
+  const h = makeHarness(undefined, {}, deps);
+  const { thread } = h.runner.create({ text: 'remember this', accountId: omp.id });
+  assert.match(adapter.last.opts.instructions ?? '', /Use Australian spelling/);
+  adapter.last.init('/sessions/this-thread.jsonl', 'openai/gpt-example');
+  adapter.last.result();
+  await tick();
+  await h.runner.shutdown();
+  const again = makeHarness(h.home, {}, deps);
+  try {
+    again.runner.send(thread.id, 'continue');
+    await tick();
+    assert.equal(adapter.last.opts.resume, true);
+    assert.match(adapter.last.opts.instructions ?? '', /Use Australian spelling/);
+    adapter.last.result();
+    await tick();
+    instructions = 'Use short sentences.';
+    again.runner.send(thread.id, 'carry on');
+    await tick();
+    assert.match(adapter.last.sent.at(-1)!.text, /standing instructions have changed/);
+    assert.match(adapter.last.sent.at(-1)!.text, /Use short sentences/);
+  } finally { await again.runner.shutdown(); }
+});

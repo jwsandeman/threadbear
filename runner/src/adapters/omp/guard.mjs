@@ -36,7 +36,7 @@ export default function threadbearGuard(pi) {
       // Headless children cannot ask Threadbear: their mutating calls fail closed.
       if (!ctx.hasUI || ctx.agent?.kind === 'sub') return { block: true, reason: 'Threadbear requires approval for this subagent tool. Ask the parent to perform the action.' };
       const request = JSON.stringify({ nonce: policy.nonce, toolCallId: event.toolCallId, name: event.toolName, input });
-      if (!(await ctx.ui.confirm('Threadbear tool approval', request))) return { block: true, reason: 'The user denied this tool call.' };
+      if (!(await ctx.ui.confirm('Threadbear tool approval', request))) return { block: true, reason: 'This tool call was not approved.' };
     } catch {
       return { block: true, reason: 'Threadbear could not verify approval for this tool call.' };
     }

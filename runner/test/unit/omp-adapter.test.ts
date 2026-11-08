@@ -9,6 +9,8 @@ import { OmpAdapter } from '../../src/adapters/omp/adapter.ts';
 import { nullLogger } from '../../src/log.ts';
 import type { AdapterOutput, SessionSink, StartSessionOptions } from '../../src/adapters/types.ts';
 import { fileContext } from '../../src/adapters/context.ts';
+import { LIMITS } from '../../src/protocol.ts';
+import { remoteCardShowsAll } from '../../src/tools.ts';
 
 function temp() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'tb-omp-test-'));
@@ -100,12 +102,31 @@ const dir = arg('--session-dir'); const sessionFile = arg('--resume') || (dir ? 
 if (dir) { fs.mkdirSync(dir, {recursive:true}); fs.writeFileSync(sessionFile, '{}\\n'); }
 const write = x => process.stdout.write(JSON.stringify(x)+'\\n');
 let currentModel={provider:'test',id:'small'};
+let approvalPrompt;
 write({type:'ready',supportedProtocolVersions:[1,2]});
 if(process.env.THREADBEAR_OMP_POLICY) { const policy=JSON.parse(fs.readFileSync(process.env.THREADBEAR_OMP_POLICY,'utf8')); write({type:'extension_ui_request',method:'notify',message:'threadbear-guard-ready:'+policy.nonce}); }
 rl.on('line',line=> { const c=JSON.parse(line); let data={};
 if(c.type==='get_state') data={sessionFile,sessionId:'native-id',model:currentModel,isSettled:true};
 if(c.type==='set_model') {currentModel={provider:c.provider,id:c.modelId};data=currentModel;write({type:'model_changed',model:currentModel});}
 if(c.type==='get_available_models') data={models:[{provider:'test',id:'small',name:'Small',reasoning:false}]};
+if(c.type==='prompt' && c.message.startsWith('approval:')) {
+  approvalPrompt=c;
+  const request=JSON.parse(c.message.slice('approval:'.length));
+  if(request.title==='Threadbear tool approval') {
+    const policy=JSON.parse(fs.readFileSync(process.env.THREADBEAR_OMP_POLICY,'utf8'));
+    request.message=JSON.stringify({...request.message,nonce:policy.nonce});
+  }
+  write({type:'response',id:c.id,command:c.type,success:true,data:{agentInvoked:true}});
+  write({type:'agent_start'});
+  write({type:'extension_ui_request',id:'approval',...request});
+  return;
+}
+if(c.type==='extension_ui_response' && approvalPrompt) {
+  write({type:'message_end',messageId:approvalPrompt.id,message:{role:'assistant',content:[{type:'text',text:JSON.stringify(c)}]}});
+  write({type:'prompt_result',id:approvalPrompt.id,status:'completed',sessionSettled:true});
+  approvalPrompt=undefined;
+  return;
+}
 if(c.type==='prompt') {write({type:'response',id:c.id,command:c.type,success:true,data:{agentInvoked:true}}); write({type:'agent_start'}); write({type:'message_end',messageId:'m',message:{role:'assistant',content:[{type:'text',text:c.message}]}}); write({type:'prompt_result',id:c.id,status:'completed',sessionSettled:false}); write({type:'session_settled'});return;}
 if(c.type==='extension_ui_response'||c.type==='host_tool_result') return;
 write({type:'response',id:c.id,command:c.type,success:true,data});
@@ -181,6 +202,130 @@ test('OMP adapter discovers qualified models, sends and resumes only its exact s
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('OMP refuses confined threads before starting a process or writing session files', () => {
+  const dir = temp();
+  try {
+    const adapter = new OmpAdapter({
+      ompBinary: () => {
+        throw new Error('Must not launch');
+      },
+      registry,
+      log: nullLogger,
+    });
+    const opts: StartSessionOptions = {
+      threadId: 'thread',
+      cwd: dir,
+      account: { id: 'omp-main', provider: 'omp', title: 'Oh My Pi', configDir: path.join(dir, 'auth') },
+      sessionId: 'allocated',
+      resume: false,
+      permissionMode: 'full',
+      confined: true,
+      mediaDir: path.join(dir, 'media'),
+      blobsDir: path.join(dir, 'blobs'),
+      tmpDir: path.join(dir, 'tmp'),
+    };
+    const sink: SessionSink = {
+      output() {},
+      exited() {},
+      requestApproval: async () => ({ decision: 'allow' }),
+      requestQuestion: async () => ({ answers: null }),
+    };
+    assert.throws(() => adapter.start(opts, sink), /sandbox.*Oh My Pi/i);
+    assert.deepEqual(fs.readdirSync(dir), []);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('OMP approvals contain the whole action or refuse it without exposing Allow', async () => {
+  const dir = temp();
+  const bin = path.join(dir, 'fake-omp');
+  fs.writeFileSync(bin, fixture, { mode: 0o700 });
+  const outputs: AdapterOutput[] = [];
+  const cards: Parameters<SessionSink['requestApproval']>[0][] = [];
+  const sink: SessionSink = {
+    output: (o) => outputs.push(o),
+    exited() {},
+    requestApproval: async (card) => {
+      cards.push(card);
+      return { decision: 'allow' };
+    },
+    requestQuestion: async () => ({ answers: null }),
+  };
+  const adapter = new OmpAdapter({ ompBinary: () => bin, registry, log: nullLogger });
+  const session = adapter.start(
+    {
+      threadId: 'thread',
+      cwd: dir,
+      account: { id: 'omp-main', provider: 'omp', title: 'Oh My Pi', configDir: path.join(dir, 'auth') },
+      sessionId: 'allocated',
+      resume: false,
+      permissionMode: 'ask',
+      mediaDir: path.join(dir, 'thread/media'),
+      blobsDir: path.join(dir, 'thread/blobs'),
+      tmpDir: path.join(dir, 'thread/tmp'),
+    },
+    sink,
+  );
+  const request = async (frame: Record<string, unknown>) => {
+    outputs.length = 0;
+    cards.length = 0;
+    session.send({ id: 'turn', text: 'approval:' + JSON.stringify(frame), images: [] });
+    await until(() => outputs.some((o) => o.kind === 'result'));
+    const response = outputs.find((o) => o.kind === 'event' && o.event.type === 'assistant.text');
+    assert.ok(response?.kind === 'event' && response.event.type === 'assistant.text');
+    return JSON.parse(response.event.text);
+  };
+  const guard = (name: string, input: Record<string, unknown>) => ({ method: 'confirm', title: 'Threadbear tool approval', message: { name, input, toolCallId: 'tool' } });
+  const long = 'x'.repeat(LIMITS.toolInputString + 1);
+  try {
+    for (const frame of [
+      guard('bash', { command: long }),
+      guard('python', { code: 'print(1)', options: { prelude: long } }),
+      { method: 'select', title: long, options: ['Approve Once', 'Deny'] },
+      { method: 'select', title: 'Run command', options: ['Approve Once', 'Deny'], optionDetails: [{ description: long }, {}] },
+      { method: 'confirm', title: 'Allow action', message: long },
+      { method: 'confirm', title: long, message: 'Allow action' },
+    ]) {
+      const answer = await request(frame);
+      assert.equal(cards.length, 0, 'An incomplete approval must never offer Allow');
+      assert.ok(answer.confirmed === false || answer.value === 'Deny');
+      assert.ok(outputs.some((o) => o.kind === 'event' && o.event.type === 'system.note' && o.event.text.includes('longer than an approval card')));
+    }
+    const input = { code: 'print(1)', cwd: '/other' };
+    assert.equal((await request(guard('python', input))).confirmed, true);
+    assert.equal(cards[0].name, 'omp__python');
+    assert.deepEqual(cards[0].input, input);
+    assert.equal(remoteCardShowsAll(cards[0].name, cards[0].input, dir, cards[0].title), false);
+    assert.equal((await request({ method: 'confirm', title: 'Remove file', message: 'file.txt' })).confirmed, true);
+    assert.deepEqual(cards[0].input, { title: 'Remove file', message: 'file.txt' });
+    assert.equal(remoteCardShowsAll(cards[0].name, cards[0].input, dir, cards[0].title), false);
+    assert.equal((await request({ method: 'select', title: 'Run command\necho hi', options: ['Approve Once', 'Deny'] })).value, 'Approve Once');
+    assert.deepEqual(cards[0].input, { details: 'Run command\necho hi' });
+    assert.equal(remoteCardShowsAll(cards[0].name, cards[0].input, dir, cards[0].title), false);
+    const optionDetails = [{ description: 'Runs in /elsewhere' }, {}];
+    await request({ method: 'select', title: 'Run command', options: ['Approve Once', 'Deny'], optionDetails });
+    assert.deepEqual(cards[0].input, { details: 'Run command', options: ['Approve Once', 'Deny'], optionDetails });
+    assert.equal(remoteCardShowsAll(cards[0].name, cards[0].input, dir, cards[0].title), false);
+  } finally {
+    await session.end({ hard: true });
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('OMP remote approvals require every argument to fit the visible line', () => {
+  assert.equal(remoteCardShowsAll('omp__bash', { command: 'ls' }), true);
+  assert.equal(remoteCardShowsAll('omp__bash', { command: 'ls', cwd: '/elsewhere' }), false);
+  assert.equal(remoteCardShowsAll('omp__bash', { command: 'ls', network: true }), false);
+  assert.equal(remoteCardShowsAll('omp__python', { code: 'print(1)' }), true);
+  assert.equal(remoteCardShowsAll('omp__python', { code: 'print(1)\nremove_file()' }), false);
+  assert.equal(remoteCardShowsAll('omp__python', { code: 'x'.repeat(161) }), false);
+  assert.equal(remoteCardShowsAll('omp__remote_run', { command: 'ls', id: 'production' }), false);
+  assert.equal(remoteCardShowsAll('omp__write', { path: 'a', content: 'new' }), false);
+  assert.equal(remoteCardShowsAll('omp__approval', { title: 'Remove file', message: 'a' }), false);
+  assert.equal(remoteCardShowsAll('omp__custom', { options: { enabled: true } }), false);
 });
 async function until(predicate: () => boolean) {
   const end = Date.now() + 5000;

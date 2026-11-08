@@ -261,9 +261,10 @@ enum SignIn {
     static func script(_ account: Account, cliPath: String) -> String {
         let codex = account.provider == "codex"
         let omp = account.provider == "omp"
-        var env = ""
+        // Match the runner's explicit account directory instead of a shell profile.
+        var env = omp ? "env -u OMP_PROFILE -u PI_PROFILE " : ""
         if codex, !account.configDir.isEmpty { env = "CODEX_HOME=\(quoted(account.configDir)) " }
-        if omp, !account.configDir.isEmpty { env = "PI_CODING_AGENT_DIR=\(quoted(account.configDir)) " }
+        if omp, !account.configDir.isEmpty { env += "PI_CODING_AGENT_DIR=\(quoted(account.configDir)) " }
         if !codex, !omp, account.id != "claude-main", !account.configDir.isEmpty { env = "CLAUDE_CONFIG_DIR=\(quoted(account.configDir)) " }
         let binary = cliPath.isEmpty ? (omp ? "omp" : codex ? "codex" : "claude") : quoted(cliPath)
         return """

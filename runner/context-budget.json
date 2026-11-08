@@ -9,6 +9,11 @@
     "tools": 35041,
     "total": 37199
   },
+  "omp": {
+    "instructions": 1935,
+    "tools": 35041,
+    "total": 36976
+  },
   "worktreeInstructions": 498,
   "perTool": {
     "ask_secret": 1241,
