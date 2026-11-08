@@ -24,7 +24,8 @@ import { ErrorCode, RpcError } from './protocol.ts';
 import type { PermissionMode, ThreadSummary } from './protocol.ts';
 import type { Notification, Runner } from './runner.ts';
 import type { UsageReading } from './usage.ts';
-import type { AgentApprovalRequest, ProjectControl, ScheduleControl, ThreadControl } from './threadbear-mcp.ts';
+import type { AgentApprovalRequest, ProjectControl, RemoteControl, ScheduleControl, ThreadControl } from './threadbear-mcp.ts';
+import type { RemoteThreads } from './thread-index.ts';
 import type { ToolApprovalAnswer } from './adapters/types.ts';
 import type { Scheduler } from './schedules.ts';
 import type { CommandHost } from './sync.ts';
@@ -542,6 +543,24 @@ export function primaryElsewhere(link: PrimaryLink, runner: Pick<Runner, 'has'>)
   };
 }
 
+// Other runners' threads for a draining runner's agent tools, through the
+// primary: a draining runner has stopped its own sync, but its kept turns
+// still have to reach them. On 8 Nov a thread started from the cloud runner
+// finished its turn on a draining M5 runner and couldn't send_message the
+// cloud thread its brief said to report to. The primary lists them as its
+// own tools have them (remoteThreads.list with forTools, which waits there
+// for the backend's rows), and passes a call for one of them on through its
+// relay (rpc.ts, THREAD_METHODS).
+export function primaryRemote(link: Pick<PrimaryLink, 'call'>): RemoteControl {
+  return {
+    list: async () => {
+      const r = await link.call<RemoteThreads>('remoteThreads.list', { forTools: true });
+      return { runners: r?.runners ?? [], threads: r?.threads ?? [], ...(r?.order ? { order: r.order } : {}) };
+    },
+    call: (threadId, method, params) => link.call(method, { threadId, ...params }),
+  };
+}
+
 // What the agent tools drive (threadbear-mcp.ts's ThreadControl): this
 // runner's own threads directly, the rest wherever they are.
 // What main.ts gives the router for other runners: cross-runner.ts's start.
@@ -720,6 +739,7 @@ export function phoneCommands(runner: Runner, remote?: Pick<Peers, 'owns' | 'cal
     interrupt: (id) => at(id, 'threads.interrupt', {}, () => runner.interrupt(id, { byMike: true })),
     quickAsk: (p) => runner.quickAsk(p),
     pressButton: (id, buttonId) => at(id, 'buttons.press', { buttonId }, () => runner.pressButton(id, buttonId)),
+    threadCommands: (id) => at(id, 'threads.commands', {}, () => runner.threadCommands(id)),
   };
 }
 
