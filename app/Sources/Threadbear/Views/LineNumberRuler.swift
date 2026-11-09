@@ -30,7 +30,7 @@ final class LineNumberRuler: NSRulerView {
 
     override func drawHashMarksAndLabels(in rect: NSRect) {
         guard let textView, let layout = textView.layoutManager, let container = textView.textContainer else { return }
-        NSColor.windowBackgroundColor.setFill()
+        Theme.blackSurface.setFill()
         bounds.fill()
         let text = textView.string as NSString
         let font = NSFont.monospacedDigitSystemFont(ofSize: TypeScale.scaled(11), weight: .regular)

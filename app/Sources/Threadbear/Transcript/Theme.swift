@@ -291,8 +291,8 @@ enum Theme {
                                    light: NSColor(srgbRed: 0.1, green: 0.55, blue: 0.22, alpha: 1))
     static let removedText = dynamic(dark: NSColor(srgbRed: 1, green: 0.45, blue: 0.45, alpha: 1),
                                      light: NSColor(srgbRed: 0.8, green: 0.15, blue: 0.15, alpha: 1))
-    // Jason's dark look: black conversations, headers, Threads, Runners
-    // and Highlights, with lighter Stone rails. From his
+    // Jason's dark look: black conversations, headers and all dock panels,
+    // with lighter Stone rails. From his
     // Superset "Neon Noir" theme its cyan as the accent and its yellow for
     // Needs you and anything running. Light mode keeps the system's colours.
     private static func srgb(_ hex: UInt32) -> NSColor {

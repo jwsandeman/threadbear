@@ -304,7 +304,7 @@ struct RootView: View {
         var o = DockOptions()
         o.headerHeight = PaneHeader<EmptyView, EmptyView>.height
         o.titleSize = TypeScale.label
-        o.panelBackground = Color(nsColor: Theme.sidebarFill)
+        o.panelBackground = Color(nsColor: Theme.blackSurface)
         o.headerBackground = Color(nsColor: Theme.blackSurface)
         // The traffic lights take 78 points from the left edge; the
         // activity bar under them has the first of those.

@@ -1457,9 +1457,10 @@ unless you pick one for it alone: Settings (⌘,) > General > Appearance has
 Same as the Mac, Light and Dark. It changes straight away and stays picked
 the next time the app opens.
 
-In dark mode, conversations, title and tab bars, the Threads list, Runners
-and Highlights use black, with cyan-tinted user message bubbles and outer
-icon rails in the lighter Stone shade.
+In dark mode, conversations, title and tab bars, and all dock panel backgrounds
+use black, including Patches, Updates, Usage and Files. User message bubbles
+are cyan-tinted. Only the narrow outer icon rails, with Settings and Threads
+on the left and Highlights and Files on the right, use the lighter Stone shade.
 
 ### A ding when a thread is done
 
