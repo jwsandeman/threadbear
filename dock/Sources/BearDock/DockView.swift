@@ -735,12 +735,11 @@ private struct TabItem: View {
             RoundedRectangle(cornerRadius: 6)
                 .fill(Color.primary.opacity(selected && !single ? 0.07 : (hovering ? 0.04 : 0)))
         )
-        // Full titles: the empty bar beside them gives way first. A panel
-        // on its own still shortens a title (a long file name in the
-        // pane) that wouldn't fit beside its buttons: the bar grew past
-        // the panel and took the content with it, clipped at the edge.
-        .fixedSize(horizontal: !single, vertical: false)
-        .layoutPriority(single ? 1 : 0)
+        // Full titles: the empty bar beside them gives way first, then the
+        // other tabs' titles shorten, then the showing one's. Never wider
+        // than the group: a bar that grew past its panel took the content
+        // with it, over the icon rail beside it.
+        .layoutPriority(selected ? 2 : 1)
         .contentShape(Rectangle())
         .onHover { hovering = $0 }
         .onTapGesture { controller.select(panel) }
