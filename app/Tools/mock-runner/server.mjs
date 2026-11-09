@@ -501,8 +501,41 @@ async function dispatch(client, method, p) {
       }
       return {
         runnerVersion, protocol: 1, accounts: publicAccounts(),
-        defaults: oldRunner ? { ...defaults, poolId: undefined } : defaults, ...(oldRunner ? {} : { clis, updates, pools }),
+        defaults: oldRunner ? { ...defaults, poolId: undefined } : defaults, ...(oldRunner ? {} : { clis, updates, pools, experiments: ['moveToRunner'] }),
       };
+    // Moving a thread to another runner (docs/protocol.md): a guess from
+    // "that runner", and a move that only marks the row, for the app's
+    // Move to menu and sheet.
+    case 'threads.movePreview': {
+      await sleep(500);
+      const runner = runners.concat(MORE_RUNNERS).find((r) => r.id === p.runnerId);
+      const home = runner?.name === 'bruce' ? '/Users/bruce' : '/home/mike';
+      return {
+        cwd: p.cwd || `${home}/dev/me/threadbear-threads/slot-4`,
+        accountId: p.accountId || 'claude-main',
+        accounts: [{ id: 'claude-main', provider: 'claude', title: 'Claude', email: 'mike.cann@gmail.com' }, { id: 'claude-1', provider: 'claude', title: 'Claude', email: 'mike@gangbusters.io' }],
+        leftBehind: ['2 files git ignores (.env.local, app/.build)'],
+        problems: p.cwd && !String(p.cwd).startsWith(home) ? [`There's no folder ${p.cwd} on ${runner?.name ?? 'it'}.`] : [],
+        worktree: true,
+      };
+    }
+    case 'threads.move': {
+      const t = threads.get(p.threadId);
+      const runner = runners.concat(MORE_RUNNERS).find((r) => r.id === p.runnerId);
+      if (t) {
+        t.summary.moving = { moveId: 'mock-move', to: p.runnerId, toName: runner?.name ?? p.runnerId, state: 'ready' };
+        broadcastSummary(p.threadId);
+      }
+      return { moveId: 'mock-move' };
+    }
+    case 'threads.moveCancel': {
+      const t = threads.get(p.threadId);
+      if (t?.summary.moving) {
+        t.summary.moving = { ...t.summary.moving, state: 'cancelled' };
+        broadcastSummary(p.threadId);
+      }
+      return {};
+    }
     case 'files.read':
       // Slow enough on bruce that the app's loading state shows.
       if (client.as) await sleep(400);

@@ -660,7 +660,11 @@ phone names must be one that has heartbeated (or `"any"`), else
   after a day, so the phone should ask again rather than expect them to
   stay.
 - `phone:registerDevice({ token, apnsToken, environment: "sandbox" |
-  "production" })`. `apnsToken` is the device token in hex. A phone token
+  "production", pushKey?, platform? })`. `apnsToken` is the device token in hex.
+  `platform: "android"` (API 66) says it is instead the phone's Firebase token
+  (letters, digits and `_ - :`); the row keeps the name and gets a `platform`,
+  and its pushes go through the relay to Firebase, even from a backend with its
+  own Apple key. An iPhone sends no platform. A phone token
   keeps at most 5 registrations; a new one past that replaces its oldest.
   Revoking a token takes effect in that one small write (its phones get no
   more pushes at once, `devices:targets`); their rows are deleted after, 100

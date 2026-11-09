@@ -85,7 +85,7 @@ export const threadFields = {
         options: v.optional(v.array(v.string())),
         // What each option does if Mike picks it (end_turn's { label, does }),
         // one per option: the Mac's relay card draws the answers as rows with
-        // these under them, as it does for its own runner's threads. Since API 61.
+        // these under them, as it does for its own runner's threads. Since API 64.
         optionNotes: v.optional(v.array(v.string())),
         suggested: v.optional(v.number()),
         links: v.optional(v.array(v.object({ title: v.string(), url: v.string() }))),
@@ -158,6 +158,9 @@ export const threadFields = {
 // (archived). A starred thread that's snoozed stays in "inbox", as Starred
 // is at the top of the phone's inbox.
 export const views = ['inbox', 'hibernating', 'den'] as const;
+
+// A move's states, in order (docs/protocol.md, "Moving a thread to another runner").
+export const moveStates = ['asking', 'ready', 'packing', 'unpacking', 'claimed', 'done', 'failed', 'cancelled'] as const;
 
 export default defineSchema({
   // One row per runner (the Mac, Tinker Desk later), written every minute.
@@ -300,8 +303,12 @@ export default defineSchema({
     // What was uploaded with it: the hour's allowance counts these, which
     // stay a day whatever happens to the file.
     bytes: v.optional(v.number()),
+    // A move's chunk (moves.ts moveChunkUrl): outside the runner's picture
+    // allowances, bounded by the move instead, and gone when it ends.
+    moveId: v.optional(v.string()),
   })
     .index('by_hash', ['ticketHash'])
+    .index('by_move', ['moveId'])
     .index('by_runner_issued', ['runnerId', 'issuedAt'])
     .index('by_issued', ['issuedAt']),
 
@@ -476,6 +483,35 @@ export default defineSchema({
     .index('by_state_done', ['state', 'doneAt'])
     // pruneOld: ones no runner took in COMMAND_KEEP_MS, by when they were made.
     .index('by_state_created', ['state', 'createdAt']),
+
+  // A thread moving from one runner to another (docs/protocol.md, "Moving a
+  // thread to another runner", API 64). Only the owner key starts one; each
+  // step is the runner whose turn it is (moves.ts), and the switch itself
+  // (moveClaim) is the one mutation where the thread changes hands.
+  threadMoves: defineTable({
+    moveId: v.string(),
+    threadId: v.string(),
+    from: v.string(),
+    to: v.string(),
+    state: v.union(...moveStates.map((x) => v.literal(x))),
+    cwd: v.optional(v.string()), // what Mike picked; absent, T chooses
+    accountId: v.optional(v.string()),
+    info: v.optional(v.any()), // S's description of the thread (moveInfo), JSON at most 16 KB
+    plan: v.optional(v.any()), // T's answer (moveReady), JSON at most 16 KB
+    key: v.optional(v.string()), // T's sealing key, raw X25519 base64
+    chunks: v.optional(v.array(v.id('_storage'))),
+    sha256: v.optional(v.string()),
+    bytes: v.optional(v.number()),
+    note: v.optional(v.string()),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+    frozenAt: v.optional(v.number()),
+  })
+    .index('by_moveId', ['moveId'])
+    .index('by_thread', ['threadId', 'createdAt'])
+    .index('by_from', ['from', 'updatedAt'])
+    .index('by_to', ['to', 'updatedAt'])
+    .index('by_state', ['state', 'updatedAt']),
 
   // A runner on a runner key asking for a new thread on another runner
   // (docs/protocol.md, "Asking another runner"). It can't queue work there
@@ -873,6 +909,9 @@ export default defineSchema({
     // The phone's own key for encrypting what goes through the push relay
     // (API 4): base64 of 32 bytes, made on the phone and sent only here.
     pushKey: v.optional(v.string()),
+    // "android" (API 66): apnsToken is the phone's Firebase token, and a push
+    // goes through the relay to Firebase. Absent: an Apple token.
+    platform: v.optional(v.literal('android')),
   })
     .index('by_apnsToken', ['apnsToken'])
     // A token's phones: at most MAX_DEVICES_PER_TOKEN (phone:registerDevice),

@@ -112,7 +112,7 @@ const PERSISTED: Record<string, (e: Obj) => string | null> = {
   'action.run': (e) =>
     isStr(e.actionId) && isStr(e.patch) && isStr(e.title) && isStr(e.command) && typeof e.ok === 'boolean' &&
     (e.exitCode === undefined || isNum(e.exitCode)) && isStr(e.text) && typeof e.truncated === 'boolean' && isNum(e.durationMs) &&
-    (e.trigger === undefined || e.trigger === 'turn.end' || e.trigger === 'worktree.setup')
+    (e.trigger === undefined || e.trigger === 'turn.end' || e.trigger === 'worktree.setup' || e.trigger === 'worktree.teardown')
       ? null
       : 'actionId, patch, title, command, ok, exitCode?, text, truncated, durationMs, trigger?',
   'thread.rewound': (e) =>

@@ -834,9 +834,29 @@ struct ThreadRowView: View {
 
     @ViewBuilder
     private func trailing(_ look: ThreadRowLook) -> some View {
-        // Every login in its pool is out of room; it carries on by itself.
-        // Says so over whatever the turn that ran dry left (often Failed).
-        if mode != .hibernating, let waiting = thread.waitingForRoom, !thread.isArchived {
+        // On its way to another runner (AppModel+Moves), over anything
+        // else: until it lands, nothing it says here will last. A failed
+        // move says so for a minute, with the runner's note in the tip.
+        if let moving = thread.moving {
+            if moving.ended {
+                Text(moving.state == "cancelled" ? "Move cancelled" : "Couldn't move")
+                    .font(.system(size: TypeScale.sidebarMeta, weight: .medium))
+                    .foregroundStyle(moving.state == "cancelled" ? Color.secondary : Color(nsColor: Theme.failed))
+                    .lineLimit(1)
+                    .tip(moving.line)
+            } else {
+                HStack(alignment: .firstTextBaseline, spacing: zoomed(5)) {
+                    SpinnerMark(color: .secondaryLabelColor)
+                        .frame(width: zoomed(12), height: zoomed(12))
+                        .alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] + zoomed(4) }
+                    Text("Moving to \(moving.toName)").lineLimit(1).truncationMode(.tail)
+                }
+                .font(.system(size: TypeScale.sidebarMeta, weight: .medium))
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: zoomed(140), alignment: .trailing)
+                .tip(moving.line + ". Messages sent meanwhile go with it.")
+            }
+        } else if mode != .hibernating, let waiting = thread.waitingForRoom, !thread.isArchived {
             Text(Pools.waitingLine(waiting, now: app.now))
                 .font(.system(size: TypeScale.sidebarMeta))
                 .foregroundStyle(SidebarMetrics.faint)
@@ -1194,6 +1214,36 @@ struct ThreadMenu: View {
         // aren't in them.
         if app.projectsSupported, !thread.isRemote {
             ThreadProjectsMenu(thread: thread)
+        }
+        if app.canMoveThreads {
+            ThreadMoveMenu(thread: thread)
+        }
+    }
+}
+
+/// "Move to ▸": Mike's other runners, offline ones greyed with "offline",
+/// each opening the Move sheet (docs/move-plan.md). While a move is going,
+/// Cancel Move instead.
+struct ThreadMoveMenu: View {
+    @Environment(AppModel.self) private var app
+    let thread: ThreadSummary
+
+    var body: some View {
+        if let moving = thread.moving, !moving.ended {
+            Button("Cancel Move", systemImage: "xmark.circle") { app.cancelMove(thread.id) }
+                .disabled(app.isBusy(BusyKey.moveThread(thread.id)))
+        } else {
+            let targets = app.moveTargets(for: thread)
+            if !targets.isEmpty {
+                IconMenu("Move to", systemImage: "arrow.right.square") {
+                    ForEach(targets) { runner in
+                        Button(runner.online ? runner.name : "\(runner.name), offline", systemImage: runner.icon ?? "desktopcomputer") {
+                            app.openMove(thread.id, to: runner)
+                        }
+                        .disabled(!runner.online)
+                    }
+                }
+            }
         }
     }
 }

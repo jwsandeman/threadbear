@@ -20,6 +20,9 @@ export default {
     setup: "./scripts/setup.sh",
     // Run by `tb land` before main moves. Optional; a failure stops it.
     check: "./check.sh --quick",
+    // Run in the worktree's root when the thread is archived or deleted,
+    // before the cleanup. Optional. Held to the same trust rules as setup.
+    teardown: "./scripts/teardown.sh",
   },
   // actions, panels, hooks as before
 };
@@ -106,6 +109,35 @@ says what would land.
 
 ## Cleaning up
 
+elie-h's fork, approved 9 Nov 2026: a repo whose setup makes something
+outside the folder (a Convex deployment per worktree, say) needs it gone
+when the thread is done, and lands through squashed GitHub PRs, which git
+never counts as merged, so nothing below would ever clean it up. So the
+patch's `teardown`, if it has one, runs first, in the worktree's root, on
+every archive and delete, landed or not, and for a worktree kept as a
+spare too (what the thread made is its own). It's the worktree's own copy
+of the patch that's read, as the thread's branch has it then, and only
+when that copy (with the scripts it names, as they are there) is trusted,
+as for `setup`; otherwise a note says it didn't run and why, so a teardown
+changed on the branch needs trusting like any other patch change. Its
+output goes in the transcript as an `action.run` event (`trigger:
+"worktree.teardown"`); a deleted thread has no transcript, so it gets a
+notice only if the teardown didn't run or failed. It has the action
+timeout, and a failure is shown but never stops the cleanup. It only runs
+while the folder is still a checkout of the thread's branch (see below on
+reused slots).
+
+It's part of the cleanup, so everything that waits for the cleanup (a
+handover, a message sent meanwhile, an action pressed) waits for it too. It
+runs once per archive (`tornDownAt` in the record): a delete after the
+archive, or the next runner picking up a cleanup that was owed, doesn't run
+it again. A thread brought back to a worktree that stayed carries on there
+as before, and its next turn says, to Mike and the agent, that the teardown
+ran, so whatever setup made may be gone and setup may need running again
+(it isn't run again by itself: setups are written for a fresh worktree).
+Archived again, it tears down again. Since a runner stopping partway runs
+it again next time, a teardown should be safe to run twice.
+
 When a thread with a worktree is archived or deleted: if its branch is
 merged into main (or has no commits of its own), the worktree is removed
 (`git worktree remove`, `--force` only for untracked files) and the branch
@@ -161,6 +193,8 @@ With `keep`:
   isn't: two at once both succeed.) Then `git reset --hard`, `git clean -ffdx` with the kept folders
   left out (an old thread's `node_modules` goes, its build cache stays),
   and `git checkout -b thread/<id8> main`. Setup runs as for a new one.
+- A patch's `teardown` runs before the worktree is set aside, as for one
+  that's removed: what the thread made is its own, not the next thread's.
 - The record keeps `keep`, and `spare: true` once it's set aside. A
   spare's thread, unarchived, moves to the main checkout even though the
   folder is still there: it's another thread's now. So does any thread

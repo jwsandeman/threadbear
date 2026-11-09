@@ -1,4 +1,5 @@
 // WebSocket JSON-RPC 2.0 server at ws://127.0.0.1:<port>/rpc.
+import { EXPERIMENTS, experimentOn } from './experiments.ts';
 import http from 'node:http';
 import crypto from 'node:crypto';
 import type { Duplex } from 'node:stream';
@@ -502,7 +503,11 @@ export class RpcServer {
           this.opts.appHello?.({ commit: build.commit, short: build.short, tree: build.tree });
         }
         const updates = this.opts.updates?.();
-        return updates ? { ...r.hello(), updates } : r.hello();
+        // The experiments on here, for the app to show what's theirs (the
+        // Move to menu). Read at each hello: a switch takes effect on the
+        // app's next connect.
+        const experiments = EXPERIMENTS.filter((x) => experimentOn(r.cfg.home, x.id)).map((x) => x.id);
+        return { ...r.hello(), ...(updates ? { updates } : {}), experiments };
       }
       case 'threads.list': {
         const include = p.include === undefined ? undefined : stringArray(p, 'include');

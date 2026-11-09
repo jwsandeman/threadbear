@@ -1078,6 +1078,23 @@ export class Relay {
     return done.result;
   }
 
+  /**
+   * The Move sheet (threads.movePreview): the runner that has a thread
+   * describes it (`moves.describe`), and a move's target says where it
+   * would go (`moves.preview`). Both only plan; nothing starts.
+   */
+  async describeForMove(threadId: string): Promise<unknown> {
+    const t = this.find(threadId);
+    if (!t) throw new RpcError(ErrorCode.badParams, 'No such thread on another runner.');
+    const done = await this.command(t.runnerId, threadId, 'call', { method: 'moves.describe', params: {} }, { done: true, ms: CALL_MS });
+    return done.result;
+  }
+
+  async previewMove(runnerId: string, params: { info: unknown; cwd?: string; accountId?: string }): Promise<unknown> {
+    const done = await this.command(runnerId, undefined, 'call', { method: 'moves.preview', params }, { done: true, ms: CALL_MS });
+    return done.result;
+  }
+
   /** Another runner's logins for the new-thread pickers, from the backend's accounts rows. */
   async logins(runnerId: string): Promise<{ accounts: unknown[]; pools: unknown[]; defaults: Record<string, unknown> }> {
     const rows = (await this.read('relay:remoteAccounts', { runnerId })) as { id: string; provider: string; runnerId?: string }[];

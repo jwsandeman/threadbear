@@ -591,7 +591,8 @@ enum Automation {
             // as a real click would go, without moving the pointer.
             if let tip = c["tip"] as? String {
                 // {"settings": true}: in the Settings window (open it with `settings`).
-                guard let window = c["settings"] as? Bool == true ? SettingsWindow.current : mainWindow, let content = window.contentView,
+                // A sheet over the window (the Move sheet) takes the click first.
+                guard let window = c["settings"] as? Bool == true ? SettingsWindow.current : (mainWindow?.attachedSheet ?? mainWindow), let content = window.contentView,
                       let anchor = all(TipAnchorView.self, in: content).last(where: { $0.text == tip && !$0.isHiddenOrHasHiddenAncestor })
                 else { return "error no control with the tip \(tip)" }
                 let center = anchor.convert(NSPoint(x: anchor.bounds.midX, y: anchor.bounds.midY), to: nil)
@@ -651,6 +652,17 @@ enum Automation {
             let target = target(c, app)
             guard let id = target.id else { return target.error }
             app.archive(id)
+            return "ok \(id)"
+        case "move":
+            // Opens the Move sheet for a thread and a runner (by name), as
+            // Move to ▸ that runner in its menu does.
+            let target = target(c, app)
+            guard let id = target.id else { return target.error }
+            let want = (c["runner"] as? String ?? "").lowercased()
+            guard let thread = app.threads[id], let runner = app.moveTargets(for: thread).first(where: { $0.name.lowercased() == want || $0.id == want }) else {
+                return "error no runner \(want) to move it to"
+            }
+            app.openMove(id, to: runner)
             return "ok \(id)"
         case "star", "unstar":
             let target = target(c, app)

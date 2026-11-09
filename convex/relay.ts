@@ -108,7 +108,20 @@ const KINDS = ['send', 'respond', 'update', 'create', 'interrupt', 'call', 'shar
 type Kind = (typeof KINDS)[number];
 // Methods a `call` may run on the other runner, and nothing else: answers
 // with no file contents or tool output in them (step 4 brings those, scrubbed).
-export const CALLS = new Set(['files.list']);
+// moves.describe and moves.preview (API 65) are the Mac's Move sheet
+// (threads.movePreview): plans only, nothing starts.
+export const CALLS = new Set(['files.list', 'moves.describe', 'moves.preview']);
+// A moves.preview's thread description: only these fields, each a short
+// string (or worktree and schedules), so nothing else sits in the row.
+const MOVE_INFO_STRINGS = ['title', 'cwd', 'home', 'provider', 'accountId', 'email', 'model', 'effort', 'permissionMode', 'origin', 'repoTop', 'subdir', 'sessionId'];
+function moveInfoArg(raw: unknown): Record<string, unknown> {
+  const o = raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
+  const out: Record<string, unknown> = {};
+  for (const k of MOVE_INFO_STRINGS) if (typeof o[k] === 'string' && (o[k] as string).length <= 2000) out[k] = o[k];
+  if (typeof o.worktree === 'boolean') out.worktree = o.worktree;
+  if (typeof o.schedules === 'number' && Number.isFinite(o.schedules)) out.schedules = o.schedules;
+  return out;
+}
 
 function str(x: unknown): string | undefined {
   return typeof x === 'string' ? x : undefined;
@@ -168,7 +181,14 @@ export function commandArgs(kind: Kind, raw: unknown): Record<string, unknown> {
       if (!CALLS.has(String(a.method))) throw bad(`only ${[...CALLS].join(', ')} can be asked of another runner`);
       // Only what the one allowed call reads: anything else in here would sit in
       // the row, under field names scrubbing skips.
-      out = { method: a.method, params: typeof (a.params as { path?: unknown } | undefined)?.path === 'string' ? { path: (a.params as { path: string }).path } : {} };
+      if (a.method === 'moves.preview') {
+        const p = (a.params && typeof a.params === 'object' ? a.params : {}) as Record<string, unknown>;
+        out = { method: a.method, params: { info: moveInfoArg(p.info), ...(typeof p.cwd === 'string' ? { cwd: p.cwd } : {}), ...(typeof p.accountId === 'string' ? { accountId: p.accountId } : {}) } };
+      } else if (a.method === 'moves.describe') {
+        out = { method: a.method, params: {} };
+      } else {
+        out = { method: a.method, params: typeof (a.params as { path?: unknown } | undefined)?.path === 'string' ? { path: (a.params as { path: string }).path } : {} };
+      }
       break;
     case 'share':
       if (a.access !== 'off' && a.access !== 'link') throw bad('access is "off" or "link"');

@@ -414,6 +414,25 @@ test('one phone token keeps at most a few registrations, and only real-looking o
   assert.equal(s.rows('devices').filter((d) => d.tokenId === s.tokenId).length, 5);
 });
 
+test('an Android phone registers with its Firebase token, and an Apple token is still hex only', async () => {
+  const s = await setup();
+  const firebase = 'fXyZ1234567890abcdef:APA91bHexample_token-with-dashes_0123456789abcdefghij';
+  await call(s.ctx, phone.registerDevice, { token: TOKEN, apnsToken: firebase, environment: 'production', platform: 'android', pushKey: 'A'.repeat(43) + '=' });
+  assert.equal(s.rows('devices').length, 1);
+  assert.equal(s.rows('devices')[0].platform, 'android');
+  const targets = await call(s.ctx, devices.targets, {});
+  assert.deepEqual(targets.map((t: any) => [t.apnsToken, t.platform]), [[firebase, 'android']]);
+  // An iPhone sends no platform: its token is hex, and this is not
+  assert.equal(await outcome(call(s.ctx, phone.registerDevice, { token: TOKEN, apnsToken: firebase, environment: 'production' })), 'invalid');
+  // And a Firebase token has to look like one
+  assert.equal(await outcome(call(s.ctx, phone.registerDevice, { token: TOKEN, apnsToken: 'short', environment: 'production', platform: 'android' })), 'invalid');
+  assert.equal(await outcome(call(s.ctx, phone.registerDevice, { token: TOKEN, apnsToken: 'has spaces in it '.repeat(3), environment: 'production', platform: 'android' })), 'invalid');
+  assert.equal(await outcome(call(s.ctx, phone.registerDevice, { token: TOKEN, apnsToken: 'a'.repeat(5000), environment: 'production', platform: 'android' })), 'invalid');
+  // An iPhone's row has no platform at all, so older readers see what they always did
+  await call(s.ctx, phone.registerDevice, { token: TOKEN, apnsToken: apns(7), environment: 'production' });
+  assert.equal(s.rows('devices').find((d) => d.apnsToken === apns(7))?.platform, undefined);
+});
+
 test('revoking a token with a flood of registrations commits at once, and they go in batches', async () => {
   const s = await setup();
   // Rows a token made before the cap, straight in the table: far more than one mutation may read.

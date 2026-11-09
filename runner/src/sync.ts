@@ -11,6 +11,7 @@
 // key the deployment's RUNNER_KEY was set to (`npx convex env set`).
 // THREADBEAR_SYNC=off turns it off whatever runner.json says, which
 // check.sh sets so no test runner ever writes to the real project.
+import { moveInfoFrom, type MoveInfo, type MovePreview, type MoveRow, type MovesBackend } from './moves.ts';
 import { START_CARD } from './cross-runner.ts';
 import { asPushFailing, pushFailingText, type PushFailing } from './push-failing.ts';
 import { wakeNote } from './wake-note.ts';
@@ -129,7 +130,7 @@ export type SyncConfig = {
 // lower one means its backend hasn't been deployed since this runner was:
 // said in runner.status, tb status and the log rather than stopping, since
 // the runner only adds to what it sends while the number stays the same.
-export const BACKEND_API_VERSION = 63;
+export const BACKEND_API_VERSION = 66;
 // From this one sync:sharedThreads lists a runner's rows shared by link, which
 // it checks against its own threads on every start and every
 // SHARE_RECONCILE_MS (reconcileShares).
@@ -263,6 +264,8 @@ export const LINKS_API_VERSION = 28;
 export const INDEX_SINCE_API_VERSION = 29;
 // sync:runnerOrder and sync:setRunnerOrder, for the Mac's Settings > Runners.
 export const RUNNER_ORDER_API_VERSION = 58;
+// Moving a thread to another runner (convex/moves.ts).
+export const MOVES_API_VERSION = 64;
 // Only the projects that changed go up (sync:upsertProjects), after the
 // whole list once per start.
 export const PROJECTS_DIFF_API_VERSION = 30;
@@ -546,6 +549,9 @@ export type CommandHost = {
   pressButton?: (threadId: string, buttonId: string) => unknown;
   // The phone's slash command palette (API 62): threads.commands.
   threadCommands?: (threadId: string) => unknown;
+  // The Mac's Move sheet (`moves.describe` and `moves.preview` calls).
+  moveDescribe?: (threadId: string) => Promise<MoveInfo>;
+  movePreview?: (p: { info: MoveInfo; cwd?: string; accountId?: string }) => Promise<MovePreview>;
 };
 
 export type SyncDeps = {
@@ -729,6 +735,19 @@ export function convexDownloader(fetchFn: typeof fetch = fetch): Download {
     if (bytes.byteLength > MAX_PHONE_IMAGE_BYTES) throw new Error('too big');
     return bytes;
   };
+}
+
+// A moving thread's chunk, from file storage: at most a runner key's
+// upload, as a chunk is one (src/move-pack.ts).
+const MOVE_CHUNK_MAX = 10 * 1024 * 1024;
+async function moveDownload(url: string, fetchFn: typeof fetch = fetch): Promise<Buffer> {
+  const problem = credentialUrlProblem(url);
+  if (problem) throw new Error(`The chunk's URL ${problem}.`);
+  const res = await fetchFn(url, { redirect: 'error', signal: AbortSignal.timeout(5 * 60_000) });
+  if (!res.ok) throw new Error(`Couldn't download the moved thread: HTTP ${res.status}`);
+  const bytes = Buffer.from(await res.arrayBuffer());
+  if (bytes.length > MOVE_CHUNK_MAX) throw new Error("A chunk of the moved thread is bigger than one can be.");
+  return bytes;
 }
 
 // The Convex client's WebSocket subscription, for the phone's commands:
@@ -1581,6 +1600,29 @@ export class ConvexSync {
   // key files and reads back its own.
   ownerKey(): boolean {
     return Boolean(this.deps.key) && !this.deps.key!.startsWith('tbr_');
+  }
+
+  // The backend's side of moving threads (src/moves.ts), once it has it.
+  movesBackend(): MovesBackend | undefined {
+    if (!this.running || !this.subscriber || (this.backendApiVersion ?? 0) < MOVES_API_VERSION) return undefined;
+    const key = this.deps.key;
+    const subscriber = this.subscriber;
+    return {
+      watch: (onMoves, onError) => subscriber.subscribe('moves:moves', { key, runnerId: this.runnerId }, (value) => onMoves(Array.isArray(value) ? (value as MoveRow[]) : []), onError),
+      call: (fn, args) => this.post(fn === 'moveChunks' ? 'query' : 'mutation', `moves:${fn}`, { key, ...args }),
+      upload: (url, bytes) => this.upload(url, bytes, 'application/octet-stream'),
+      download: (url) => moveDownload(url),
+    };
+  }
+
+  // Starting and cancelling a move: the main Mac's runner only.
+  async startMove(p: { threadId: string; to: string; cwd?: string; accountId?: string }): Promise<string> {
+    const r = (await this.backend('mutation', 'moves:startMove', { key: this.deps.key, ...p })) as { moveId: string };
+    return r.moveId;
+  }
+
+  async cancelMove(moveId: string): Promise<void> {
+    await this.backend('mutation', 'moves:cancelMove', { key: this.deps.key, moveId });
   }
 
   async fileRequest(p: { requestId: string; threadId: string; target: string; request: RunnerRequestInput }): Promise<void> {
@@ -3919,8 +3961,20 @@ export class ConvexSync {
         // Only what relay.ts CALLS allows, checked again here: the backend
         // isn't trusted to have checked, and nothing here may answer with
         // file contents or tool output (step 4 brings those, scrubbed).
-        if (a.method !== 'files.list') throw new Error(`${String(a.method)} can't be asked of this runner`);
         const params = a.params && typeof a.params === 'object' ? (a.params as Record<string, unknown>) : {};
+        // The Mac's Move sheet (threads.movePreview): this runner's thread
+        // described, or, as the target, where it would go. Both only plan.
+        if (a.method === 'moves.describe') {
+          if (!host.moveDescribe) throw new Error("This runner can't move threads.");
+          return { result: await host.moveDescribe(needThread()) };
+        }
+        if (a.method === 'moves.preview') {
+          if (!host.movePreview) throw new Error("This runner can't move threads.");
+          const info = moveInfoFrom(params.info);
+          if (!info) throw new Error("The move preview didn't say what thread it's for.");
+          return { result: await host.movePreview({ info, ...(typeof params.cwd === 'string' && params.cwd ? { cwd: params.cwd } : {}), ...(typeof params.accountId === 'string' && params.accountId ? { accountId: params.accountId } : {}) }) };
+        }
+        if (a.method !== 'files.list') throw new Error(`${String(a.method)} can't be asked of this runner`);
         const list = listFolderFor({ path: params.path });
         return { result: { ...list, entries: list.entries.slice(0, CALL_ENTRIES), truncated: list.truncated || list.entries.length > CALL_ENTRIES } };
       }

@@ -850,6 +850,7 @@ class ClaudeSession implements AgentSession {
         name,
         title: code ? `${title} (${codeWriteNote(code)})` : title,
         input: card.input,
+        wholeInput: input,
         // "Always allow" would defeat a tool that's meant to ask every time.
         canAlwaysAllow: !plan && !code && !o.suppressAlwaysAllowRule && !this.deps.alwaysAsk?.has(name),
         signal: o.signal,

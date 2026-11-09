@@ -1,18 +1,18 @@
 {
   "claude": {
     "instructions": 2733,
-    "tools": 34959,
-    "total": 37692
+    "tools": 35290,
+    "total": 38023
   },
   "codex": {
     "instructions": 2158,
-    "tools": 35058,
-    "total": 37216
+    "tools": 35389,
+    "total": 37547
   },
   "omp": {
     "instructions": 1935,
-    "tools": 35058,
-    "total": 36993
+    "tools": 35389,
+    "total": 37324
   },
   "worktreeInstructions": 498,
   "perTool": {
@@ -29,7 +29,7 @@
     "list_projects": 474,
     "list_schedules": 379,
     "list_threads": 734,
-    "move_thread": 1149,
+    "move_thread": 1480,
     "pin": 1120,
     "pocket": 1420,
     "read_project": 379,

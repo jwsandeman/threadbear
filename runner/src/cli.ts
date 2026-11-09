@@ -19,6 +19,8 @@ import { runnerKeysCommand } from './runner-keys.ts';
 
 const OPTIONS = {
   cwd: { type: 'string' },
+  // tb move <id> --to <runner> --preview (moving a thread to another machine).
+  preview: { type: 'boolean' },
   account: { type: 'string' },
   pool: { type: 'string' },
   model: { type: 'string' },
@@ -80,10 +82,11 @@ const OPTIONS = {
 
 const HELP = `tb: talk to the Threadbear runner
 
-  tb new "text" [--cwd DIR] [--pool ID | --account ID] [--model M] [--effort L] [--ask | --auto | --plan] [--image FILE]... [--wait]
+  tb new "text" [--cwd DIR] [--pool ID | --account ID] [--model M] [--effort L] [--ask | --auto | --plan | --full] [--image FILE]... [--wait]
                 [--from NAME] [--why WORDS] [--icon SYMBOL]
                                   --pool runs it on a pool (the login with room, moving when
-                                  one runs dry); --account pins it to one login. --from says a
+                                  one runs dry); --account pins it to one login. With no mode
+                                  it's runner.json's defaults.permissionMode, else full. --from says a
                                   tool started it, --why says why in a few words and --icon is
                                   an SF Symbol: the row shows them under the title
   tb send <threadId> "text" [--image FILE]... [--wait]
@@ -98,6 +101,11 @@ const HELP = `tb: talk to the Threadbear runner
   tb snooze <threadId> <ISO time or 30m, 2h, 1d, or restart>
   tb archive <threadId>      tb unarchive <threadId>
   tb move <threadId> <folder>
+  tb move <threadId> --to <runner> [--cwd DIR] [--account ID] [--preview]
+                                  moves the thread whole to another of your machines
+                                  (the moveToRunner experiment; asked of the main Mac's
+                                  runner). --preview says where it would go and what
+                                  stops it, without moving
   tb delete <threadId>
   tb accounts                     the available harness accounts (* new threads start on it)
   tb accounts <account> [--json]  that account's models and its default
@@ -108,7 +116,7 @@ const HELP = `tb: talk to the Threadbear runner
   tb show-panel <threadId> <panel> [--json]  opens a panel when the user looks at that thread
   tb run <threadId> <actionId>    run one: a command's output is printed and goes into the thread
   tb schedule "text" (--at WHEN | --cron "0 9 * * 1-5") [--tz ZONE] [--title T]
-              [--thread ID | --cwd DIR [--account ID | --pool ID] [--model M] [--effort L] [--ask | --auto]]
+              [--thread ID | --cwd DIR [--account ID | --pool ID] [--model M] [--effort L] [--ask | --auto | --full]]
                                   sends the text later: once (--at 30m, 2h, 1d, tomorrow
                                   or an ISO time) or on a cron; to a thread with --thread,
                                   otherwise to a new thread each time
@@ -166,7 +174,7 @@ ${DEV_HELP}`;
 // The flags each command reads. Any other is refused rather than ignored:
 // `tb events <id> --from 3` used to print every event as if it had worked.
 const COMMAND_FLAGS: Record<string, string[]> = {
-  new: ['cwd', 'account', 'pool', 'model', 'effort', 'ask', 'auto', 'plan', 'image', 'wait', 'json', 'from', 'why', 'icon'],
+  new: ['cwd', 'account', 'pool', 'model', 'effort', 'ask', 'auto', 'plan', 'full', 'image', 'wait', 'json', 'from', 'why', 'icon'],
   send: ['image', 'wait', 'json'],
   list: ['snoozed', 'archived', 'all', 'json'],
   search: ['json'],
@@ -178,11 +186,11 @@ const COMMAND_FLAGS: Record<string, string[]> = {
   snooze: [],
   archive: [],
   unarchive: [],
-  move: [],
+  move: ['to', 'cwd', 'account', 'preview', 'json'],
   delete: [],
   accounts: ['json'],
   pools: ['json'],
-  schedule: ['at', 'cron', 'tz', 'title', 'thread', 'cwd', 'account', 'pool', 'model', 'effort', 'ask', 'auto', 'json'],
+  schedule: ['at', 'cron', 'tz', 'title', 'thread', 'cwd', 'account', 'pool', 'model', 'effort', 'ask', 'auto', 'full', 'json'],
   schedules: ['json', 'text', 'title', 'at', 'cron', 'tz', 'cwd', 'account', 'pool', 'model', 'effort', 'ask', 'auto', 'full'],
   projects: ['json', 'archived'],
   librarian: ['json'],
@@ -363,9 +371,12 @@ async function run(client: RunnerClient, cmd: string, args: string[], f: Flags):
       if (f.pool) params.poolId = f.pool;
       if (f.model) params.model = f.model;
       if (f.effort) params.effort = f.effort;
+      if ([f.ask, f.auto, f.plan, f.full].filter(Boolean).length > 1) throw new Error('Give one of --ask, --auto, --plan and --full.');
       if (f.ask) params.permissionMode = 'ask';
       else if (f.auto) params.permissionMode = 'auto';
       else if (f.plan) params.permissionMode = 'plan';
+      // With none the runner's default, which may not be full.
+      else if (f.full) params.permissionMode = 'full';
       const startedBy = startedByFlags(f, process.env.THREADBEAR_THREAD_ID);
       if (startedBy) params.startedBy = startedBy;
       const r = await client.call<{ thread: ThreadSummary; turnId: string }>('threads.create', params);
@@ -430,6 +441,7 @@ async function run(client: RunnerClient, cmd: string, args: string[], f: Flags):
     }
     case 'move': {
       const id = await resolveId(client, args[0]);
+      if (typeof f.to === 'string') return moveToRunner(client, id, f);
       if (!args[1]) throw new Error('folder required');
       const r = await client.call<{ thread: ThreadSummary }>('threads.update', { threadId: id, cwd: path.resolve(args[1]) });
       console.log(`moved to ${r.thread.cwd} (from the next message)`);
@@ -595,8 +607,10 @@ async function run(client: RunnerClient, cmd: string, args: string[], f: Flags):
         if (f.pool) params.poolId = f.pool;
         if (f.model) params.model = f.model;
         if (f.effort) params.effort = f.effort;
+        if ([f.ask, f.auto, f.full].filter(Boolean).length > 1) throw new Error('Give one of --ask, --auto and --full.');
         if (f.ask) params.permissionMode = 'ask';
         else if (f.auto) params.permissionMode = 'auto';
+        else if (f.full) params.permissionMode = 'full';
       }
       // A schedule an agent makes from a thread says which one.
       if (process.env.THREADBEAR_THREAD_ID) params.createdBy = process.env.THREADBEAR_THREAD_ID;
@@ -823,6 +837,33 @@ async function resolveApproval(client: RunnerClient, threadId: string, prefix: s
   if (hits.length === 1) return hits[0];
   if (hits.length > 1) throw new Error(`${prefix} matches ${hits.length} open approvals`);
   return prefix;
+}
+
+// tb move --to: the runner by name or id (runners.list), then
+// threads.movePreview or threads.move on this runner.
+async function moveToRunner(client: RunnerClient, threadId: string, f: Flags): Promise<number> {
+  const want = String(f.to).toLowerCase();
+  const { runners } = await client.call<{ runners: { id: string; name: string; online: boolean; isSelf?: boolean }[] }>('runners.list', {});
+  // Its id, its name, or a word of its name only it has ("cloud" for "Hetzner Cloud").
+  const partly = runners.filter((r) => r.name.toLowerCase().includes(want));
+  const runner = runners.find((r) => r.id === f.to) ?? runners.find((r) => r.name.toLowerCase() === want) ?? (partly.length === 1 ? partly[0] : undefined);
+  if (!runner) throw new Error(`No runner called ${String(f.to)}. There are: ${runners.map((r) => r.name).join(', ')}.`);
+  const params: Record<string, unknown> = { threadId, runnerId: runner.id };
+  if (typeof f.cwd === 'string') params.cwd = f.cwd;
+  if (typeof f.account === 'string') params.accountId = f.account;
+  if (f.preview) {
+    const p = await client.call<{ cwd?: string; accountId?: string; leftBehind: string[]; problems: string[]; worktree?: boolean; clone?: string }>('threads.movePreview', params);
+    if (f.json) console.log(JSON.stringify(p, null, 2));
+    else {
+      if (p.cwd) console.log(`${p.worktree ? 'A new worktree in' : 'In'} ${p.cwd}${p.clone ? ` (cloned to ${p.clone} first)` : ''}, on ${p.accountId}`);
+      for (const l of p.leftBehind) console.log(`Won't come: ${l}`);
+      for (const l of p.problems) console.log(`Can't move: ${l}`);
+    }
+    return p.problems.length ? 1 : 0;
+  }
+  const r = await client.call<{ moveId: string }>('threads.move', params);
+  console.log(`moving to ${runner.name} (move ${r.moveId}); it goes once its turn ends`);
+  return 0;
 }
 
 function parseWhen(s: string): string {

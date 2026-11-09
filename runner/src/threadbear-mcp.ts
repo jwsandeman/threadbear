@@ -84,6 +84,9 @@ export type PocketControl = Pick<ConvexSync, 'savePocketCard' | 'removePocketCar
 export type RemoteControl = {
   list: () => Promise<RemoteThreads>;
   call: (threadId: string, method: string, params: Record<string, unknown>) => Promise<unknown>;
+  // move_thread with a runner: the whole thread to another machine, asked
+  // of the main Mac's runner (threads.move). Answers what to tell the agent.
+  move?: (p: { threadId: string; runner: string; cwd?: string; accountId?: string }) => Promise<string>;
 };
 
 export type ScheduleControl = Async<Scheduler, 'create' | 'list' | 'find' | 'update' | 'delete'>;
@@ -1820,15 +1823,31 @@ export function buildThreadbearTools(
     ),
     tool(
       'move_thread',
-      "Moves a thread to another working folder (and optionally another account). For this thread the move happens when the current turn ends: the next message starts the CLI in the new folder and, on the same account, resumes the whole conversation there; on a new account it starts fresh with a short summary. Pass `then` to have this thread carry on by itself straight after the move, with that text as its next message; without it, the thread waits for the user.",
+      "Moves a thread to another working folder (and optionally another account). For this thread the move happens when the current turn ends: the next message starts the CLI in the new folder and, on the same account, resumes the whole conversation there; on a new account it starts fresh with a short summary. Pass `then` to have this thread carry on by itself straight after the move, with that text as its next message; without it, the thread waits for the user. With `runner`, the whole thread moves to another of the user's machines instead (folder and account then name ones there, and default to that machine's guess).",
       {
-        folder: z.string().describe("The new folder. ~ works; relative paths are from this thread's current folder."),
+        folder: z.string().optional().describe("The new folder. ~ works; relative paths are from this thread's current folder. Needed unless `runner` is given."),
+        runner: z.string().optional().describe("Another machine's runner (name or id, as list_threads shows them): moves the thread there whole, once its turn ends."),
         ...thisOrOther,
         account: z.string().optional().describe('Also move to this account (id or email). Another provider starts fresh with a summary, on that provider\'s default model.'),
         then: z.string().optional().describe('For this thread: what to do next once moved, sent as the next message.'),
       },
-      handle(async ({ folder: f, threadId, id: alias, account: acc, then }, extra) => {
+      handle(async ({ folder: f, runner: to, threadId, id: alias, account: acc, then }, extra) => {
         const id = await resolve(threadId ?? alias);
+        if (to?.trim()) {
+          const mover = opts.remote?.()?.move;
+          if (!mover) throw new Error("Moving a thread to another machine needs the main Mac's runner, connected to Threadbear's backend, with the moveToRunner experiment on.");
+          if (then?.trim()) throw new Error('`then` only goes with a folder move. Send the message after: it waits and moves with the thread.');
+          // It runs on another machine from then on: always the user's call
+          // from a thread with less than full access.
+          const caller = await restricted();
+          if (caller) {
+            const t = id === selfId ? undefined : await accessOf(id);
+            const name = threadName(id, t?.title ?? '');
+            await confirm('move_thread', [`Move ${name} to the runner ${to.trim()}: it carries on there, on that machine`], { threadId: id, runner: to.trim(), ...(f ? { folder: f } : {}), ...(acc ? { account: acc } : {}) }, extra?.signal);
+          }
+          return mover({ threadId: id, runner: to.trim(), ...(f?.trim() ? { cwd: f.trim() } : {}), ...(acc?.trim() ? { accountId: acc.trim() } : {}) });
+        }
+        if (!f?.trim()) throw new Error('folder is required (or runner, to move it to another machine).');
         // Raising access (above). A thread with more access than this one
         // reads the new folder's instructions from its next turn, `then` is
         // a message to it, and a schedule's check that sends to it runs in

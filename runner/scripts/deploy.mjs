@@ -10,7 +10,7 @@ import path from 'node:path';
 import { parseArgs } from 'node:util';
 import { pointCurrent, readCurrentLink, readState, releaseExists, writeState } from '../launch.mjs';
 import { connectRpc } from './rpc-client.mjs';
-import { Fail, smokeTimedOut, step, unitTests } from './deploy-steps.mjs';
+import { Fail, SLEPT_EXIT, SleptThrough, checkSlept, sleepCount, smokeHello, smokeTimedOut, step, unitTests } from './deploy-steps.mjs';
 // THREADBARE_* was the old name for these variables (config.ts, adoptOldNames).
 for (const [k, v] of Object.entries(process.env)) {
   const name = k.startsWith('THREADBARE_') ? 'THREADBEAR_' + k.slice(11) : undefined;
@@ -805,6 +805,7 @@ async function smoke(c, id) {
   const killNow = () => kill('SIGKILL');
   cleanups.push(killNow);
   const started = Date.now();
+  const sleepsBefore = sleepCount();
   let problem = null;
   try {
     let port = null;
@@ -817,8 +818,13 @@ async function smoke(c, id) {
       port = /listening on (\d+)/.exec(fs.readFileSync(out, 'utf8'))?.[1];
       if (!port) await sleep(100);
     }
-    const p = await probe(home);
-    if (p.state !== 'up') throw new Error(`hello on port ${port} got no answer`);
+    const p = await smokeHello({
+      probe: () => probe(home),
+      waited: () => Date.now() - started,
+      load: () => os.loadavg()[0] / os.cpus().length,
+      exited: () => exited,
+      sleep,
+    });
     if (releaseOf(p.version) !== id) throw new Error(`it says it is ${p.version || 'no version'}, not ${id}`);
   } catch (e) {
     problem = e.message;
@@ -832,6 +838,7 @@ async function smoke(c, id) {
     say('failed');
     console.error(`Output:\n${tail(out)}\nRunner log:\n${tail(path.join(tmp, 'runner.log'))}`);
     fs.rmSync(tmp, { recursive: true, force: true });
+    checkSlept(sleepsBefore, sleepCount(), `the smoke test (${problem}); current is unchanged`);
     throw new Fail(`The smoke test failed: ${problem}. current is unchanged.`);
   }
   fs.rmSync(tmp, { recursive: true, force: true });
@@ -1455,6 +1462,6 @@ main(process.argv.slice(2)).then(
   (code) => process.exit(code),
   (e) => {
     console.error(e instanceof Fail ? e.message : (e?.stack ?? String(e)));
-    process.exit(1);
+    process.exit(e instanceof SleptThrough ? SLEPT_EXIT : 1);
   },
 );

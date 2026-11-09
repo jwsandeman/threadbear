@@ -7,7 +7,7 @@ import { tmpDir } from '../helpers/fakes.ts';
 import { FakeClock } from '../../src/clock.ts';
 import type { UpdateFailure } from '../../src/fix-update.ts';
 import { nullLogger } from '../../src/log.ts';
-import { CHECK_INTERVAL_MS, FIRST_CHECK_MS, SOON_MS, RunnerUpdater, launcherDiffers, launchAgentBehind, launcherSourcesHash, appOfExecutable, updateDir, watchMainRef, decideUpdate, failedAlready, releaseTreeAt, syncClone, updateFilePath, type UpdateDeps } from '../../src/update.ts';
+import { CHECK_INTERVAL_MS, FIRST_CHECK_MS, MAX_SLEPT_TRIES, SOON_MS, RunnerUpdater, runDeploy, launcherDiffers, launchAgentBehind, launcherSourcesHash, appOfExecutable, updateDir, watchMainRef, decideUpdate, failedAlready, releaseTreeAt, syncClone, updateFilePath, type UpdateDeps } from '../../src/update.ts';
 import type { ReleaseJson } from '../../src/release.ts';
 import { patiently } from '../helpers/patience.ts';
 
@@ -120,7 +120,7 @@ type Harness = {
   deploys: number;
   follows: string[];
   main: { commit: string; short: string; subject: string; tree: string; buildTree?: string };
-  deployResult: { ok: true; id: string } | { ok: false; error: string; transient?: boolean };
+  deployResult: { ok: true; id: string } | { ok: false; error: string; transient?: boolean; slept?: boolean };
   backendDeploys: string[];
   backendResult: { ok: boolean; error?: string };
   pending: boolean;
@@ -502,4 +502,40 @@ test('a failed backend deploy holds the runner back until main changes', async (
   await h.u.check();
   assert.deepEqual(h.backendDeploys, ['c2', 'c3']);
   assert.equal(h.deploys, 1);
+});
+
+// deploy.mjs's exit for a step the Mac slept through (SleptThrough), so the
+// build is tried again later, not marked failed. By exit code, not by words in
+// the log, as a failing test can print anything (Codex, 9 Nov).
+test('a build that failed while the Mac slept is tried again later, and words in the log are not enough', async () => {
+  const root = tmpDir();
+  fs.mkdirSync(path.join(root, 'scripts'));
+  const stepsUrl = new URL('../../scripts/deploy-steps.mjs', import.meta.url).href;
+  fs.writeFileSync(path.join(root, 'scripts', 'deploy.mjs'), `import { SLEPT_EXIT, SleptThrough, checkSlept } from ${JSON.stringify(stepsUrl)};\ntry { checkSlept(1, 2, 'Unit tests'); } catch (e) { console.error(e.message); process.exit(e instanceof SleptThrough ? SLEPT_EXIT : 1); }\n`);
+  const result = await runDeploy(root, root, path.join(root, 'build.log'), root);
+  assert.equal(!result.ok && result.transient && result.slept, true);
+  fs.writeFileSync(path.join(root, 'scripts', 'deploy.mjs'), "console.log(\"The Mac slept during Unit tests, so it's tried again later\"); console.error(\"The Mac slept during Unit tests, so it's tried again later\"); process.exit(1);\n");
+  const broken = await runDeploy(root, root, path.join(root, 'build.log'), root);
+  assert.equal(!broken.ok && broken.transient, false);
+});
+
+test('a commit the Mac slept through every build of is marked failed after a few tries', async () => {
+  const failures: UpdateFailure[] = [];
+  const h = harness({}, { onFailed: (f) => (failures.push(f), true) });
+  h.deployResult = { ok: false, error: "The Mac slept during Unit tests, so it's tried again later", transient: true, slept: true };
+  h.u.start();
+  h.main = { ...h.main, buildTree: 'B1' };
+  await h.u.check();
+  // A commit that changes only a test has a count of its own.
+  h.main = { ...h.main, commit: 'c3', short: 'c3', subject: 'Fix a test', buildTree: 'B2' };
+  for (let i = 1; i < MAX_SLEPT_TRIES; i++) {
+    await h.u.check();
+    assert.equal(h.u.status().state, 'idle', `try ${i}`);
+  }
+  assert.equal(failures.length, 0);
+  await h.u.check();
+  assert.equal(h.deploys, MAX_SLEPT_TRIES + 1);
+  assert.equal(h.u.status().state, 'failed');
+  assert.equal(failures.length, 1);
+  assert.match(failures[0]!.error, /slept through all 3 tries at this commit/);
 });

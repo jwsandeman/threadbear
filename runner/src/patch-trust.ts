@@ -928,6 +928,9 @@ function patchRoles(patch: AstNode, give: (n: AstNode, role: 'data' | 'worktree'
     if (PATCH_FIELDS.has(name)) list(value).forEach((v) => give(v, 'data'));
     else if (name === 'worktree' && value.type === 'ObjectExpression') {
       for (const [k, v] of fields(value)) {
+        // Not `teardown`: it runs in the thread's worktree as the agent left
+        // it, as the thread is archived, so what it reaches counts as code
+        // like any other command's.
         if (k === 'setup' || k === 'check') give(v, 'worktree');
         else if (k === 'keep') list(v).forEach((e) => give(e, 'data'));
       }

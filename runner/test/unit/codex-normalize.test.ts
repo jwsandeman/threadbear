@@ -21,7 +21,7 @@ import type { AdapterOutput } from '../../src/adapters/types.ts';
 import { checkEvent } from '../helpers/protocol-check.ts';
 import { tmpDir } from '../helpers/fakes.ts';
 import { makePng } from '../helpers/png.ts';
-import { TINY_PNG_B64, leaks, sanitizeRecords, toNdjson, type Rec } from '../../scripts/sanitize-codex-recording.ts';
+import { TINY_PNG_B64, leaks, localNames, sanitizeRecords, toNdjson, type Rec } from '../../scripts/sanitize-codex-recording.ts';
 
 const FIX = path.join(import.meta.dirname, '..', 'fixtures', 'codex');
 
@@ -680,6 +680,19 @@ test('the sanitiser rewrites temp folders, swaps base64, drops the account id, a
   assert.ok(leaks('{"host":"Bobs-Mac"}', [], ['bobs-mac']).length);
   assert.ok(leaks('{"x":"/home/vision/a"}', [], ['vision']).length);
   assert.deepEqual(leaks('{"revision":"r1"}', [], ['vision']), []);
+});
+
+// On GitHub's machines the user is "runner", a word the fixtures hold in their
+// own text, so the check read it as a leak there.
+test("a machine's generic user name is not a private one, and a person's still is", () => {
+  assert.deepEqual(localNames('runner', 'runnervm1a2b3c'), ['runnervm1a2b3c']);
+  assert.deepEqual(localNames('root', 'localhost'), []);
+  assert.deepEqual(localNames('Runner', 'ci.local'), [], 'any case, and a host too short to mean anything');
+  assert.deepEqual(localNames('mike', 'Mikes-MacBook-Pro.local'), ['mike', 'Mikes-MacBook-Pro']);
+  assert.deepEqual(localNames('', 'Bobs-Mac.lan'), ['Bobs-Mac'], 'no user name to check for');
+  // And a fixture that talks about the runner is clean there, but not with a real name given
+  assert.deepEqual(leaks('{"x":"the runner restarts"}', [], localNames('runner', 'runnervm1a2b3c')), []);
+  assert.ok(leaks('{"x":"the mike restarts"}', [], localNames('mike', 'ci')).length);
 });
 
 test('the committed Codex fixtures hold nothing private', () => {

@@ -175,6 +175,10 @@ export type ToolApprovalRequest = {
   name: string;
   title: string;
   input: Record<string, unknown>;
+  // The call's input as the CLI gave it, when `input` (what the card shows)
+  // may have had parts cut short: the card reviewer reads this, as an allow
+  // runs all of it (runner/card-review.ts).
+  wholeInput?: Record<string, unknown>;
   canAlwaysAllow: boolean;
   signal: AbortSignal;
   // The agent's other calls waiting behind this one (docs/protocol.md,

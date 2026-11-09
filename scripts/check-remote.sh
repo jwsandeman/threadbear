@@ -66,6 +66,8 @@ if [ "${1:-}" = "--on-host" ]; then
     -mmin +720 -exec rm -rf {} + 2>/dev/null
   # A checkout's mirror that hasn't sent a run for a week (a removed worktree).
   find "$base/mirror" -mindepth 1 -maxdepth 1 -type d -mtime +7 -exec rm -rf {} + 2>/dev/null
+  # Folders this run makes are private whatever the host's umask (see probe).
+  umask 022
   mkdir -p "$TMPDIR"
   mv "$base/runs/$id" "$src" || { echo "The copy for run $id isn't on $(hostname -s)." >&2; exit 1; }
   # A failed check keeps its logs in $TMPDIR; they move aside for this
@@ -349,7 +351,10 @@ host_is_low() {
 # first that can, which then waits for its lock. Two checks can both see a host
 # free, so a run there takes the lock without waiting (exit 75 if it can't),
 # and the one that lost chooses again; after three goes it waits in line.
-probe='mkdir -p ~/'"$BASE_REL"'/runs && cd ~/'"$BASE_REL"' && pwd && uname -s && if [ "$(uname -s)" = Darwin ]; then /usr/bin/lockf -t 0 lock true 2>/dev/null && echo free || echo busy; else flock -n lock true 2>/dev/null && echo free || echo busy; fi && '"$free_cmd"
+# The copy's folders are made private: a host whose umask is 002 (the cloud
+# box) left them group-writable, and the private-dir tests (ios/scripts/
+# private-dir.mjs) refuse a folder under one of those (9 Nov).
+probe='mkdir -p ~/'"$BASE_REL"'/runs && chmod go-w ~/'"$BASE_REL"' ~/'"$BASE_REL"'/runs && cd ~/'"$BASE_REL"' && pwd && uname -s && if [ "$(uname -s)" = Darwin ]; then /usr/bin/lockf -t 0 lock true 2>/dev/null && echo free || echo busy; else flock -n lock true 2>/dev/null && echo free || echo busy; fi && '"$free_cmd"
 # Hosts with no room, as "<host> has <n> GiB free": those this choosing passed
 # over, and those whose copy failed for lack of it, which aren't asked again.
 LOW="" LOW_COPY=""
@@ -544,7 +549,7 @@ while :; do
     # By content (-c), not size and time: an edit that keeps both would
     # otherwise leave the mirror's old copy in the run.
     copy_it() {
-      "${SSH[@]}" "$HOST" "mkdir -p '$mirror' '$remote_run' && touch '$mirror'" \
+      "${SSH[@]}" "$HOST" "umask 022 && mkdir -p '$mirror' '$remote_run' && touch '$mirror'" \
         && rsync -azc --from0 --files-from="$files" -e "${SSH[*]}" "$ROOT/" "$HOST:$mirror/" \
         && rsync -a -e "${SSH[*]}" "$files" "$HOST:$remote_run.files" \
         && "${SSH[@]}" "$HOST" "rsync -a --from0 --files-from='$remote_run.files' '$mirror/' '$remote_run/' && rm -f '$remote_run.files'" \

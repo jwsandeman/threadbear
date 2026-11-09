@@ -51,7 +51,8 @@ extension AppModel {
         }
         let gone = next.values.filter { $0.isRemote && !listed.contains($0.id) && !liveRemote.contains($0.id) && !madeRemote.contains($0.id) }.map(\.id)
         if next != threads { threads = next }
-        for id in gone { forget(id) }
+        // A thread that moved off another runner stays, as its new one's.
+        for id in gone where !movedAway(id) { forget(id) }
         threadCountMayHaveChanged()
     }
 
@@ -394,14 +395,14 @@ extension AppModel {
                 }
                 var made = made0
                 if drafts["new"] == draft { drafts["new"] = nil }
-                // The runner, folder, "Ask before edits" and picks were for
+                // The runner, folder, a picked mode and picks were for
                 // this thread; the next starts on the defaults again,
                 // the default runner's included (applyDefaultRunner below).
                 newThreadRunnerId = nil
                 newThreadRunnerPicked = false
                 newThreadRunnerProblem = nil
                 newThreadCwd = nil
-                newThreadPermission = .full
+                newThreadPermissionPick = nil
                 newThreadAccount = nil
                 newThreadPool = nil
                 newThreadProvider = nil
@@ -498,7 +499,7 @@ extension AppModel {
         case .threadDeleted(let threadId):
             guard threads[threadId]?.runnerId == runnerId else { return }
             liveRemote.remove(threadId)
-            forget(threadId)
+            if !movedAway(threadId) { forget(threadId) }
         // Its own logins, for the pickers on its threads.
         case .accountsUpdated(let list):
             remoteLogins[runnerId]?.accounts = list

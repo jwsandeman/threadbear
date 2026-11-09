@@ -292,13 +292,14 @@ extension AppModel {
                     // In a pool the runner picked the login; that's the one
                     // that counts as used.
                     rememberLastAccount(request.poolId == nil ? account : thread.accountId)
-                    // The folder, "Ask before edits" and a picked account
-                    // or pool were for this thread; the next one starts
-                    // from the defaults again, on whichever account then
-                    // has the most room. The model and effort stick.
+                    // The folder, a picked mode and a picked account or
+                    // pool were for this thread; the next one starts from
+                    // the defaults again (the runner's mode), on whichever
+                    // account then has the most room. The model and effort
+                    // stick.
                     newThreadCwd = nil
                     newThreadProjectId = nil
-                    newThreadPermission = .full
+                    newThreadPermissionPick = nil
                     newThreadAccount = nil
                     newThreadPool = nil
                     newThreadProvider = nil

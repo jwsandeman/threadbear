@@ -40,7 +40,9 @@ export type IndexRow = {
 
 // What the Mac app gets (docs/protocol.md, "Other runners' threads").
 export type RemoteRunner = { id: string; name: string; icon?: string; online: boolean; lastSeenAt: string; rpcUrl?: string; tokenFile?: string };
-export type RemoteThread = IndexRow & { runnerId: string };
+// `moving`: set by the main Mac's runner for a move it knows of (main.ts
+// remoteMoving), never by the backend's rows.
+export type RemoteThread = IndexRow & { runnerId: string; moving?: import('./moves.ts').ThreadMoving };
 // `order`: Mike's runner order (backend API 58), every runner's id, this
 // one's too, for the app's Settings > Runners. Left out before it's heard.
 export type RemoteThreads = { runners: RemoteRunner[]; threads: RemoteThread[]; order?: string[] };

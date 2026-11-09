@@ -208,6 +208,12 @@ extension AppModel {
         } else {
             state.cwd = schedule.cwd ?? defaults.cwd
         }
+        // Shown so they can be changed; only the model and effort are sent
+        // back (ScheduleEditor's model rows), so the login stays as it was.
+        state.accountId = schedule.accountId
+        state.poolId = schedule.poolId
+        state.model = schedule.model
+        state.effort = schedule.effort
         scheduleEditor = state
         loadRunners()
     }
@@ -221,9 +227,14 @@ extension AppModel {
         do {
             let saved: Schedule
             if let id = state.scheduleId {
+                // A new thread each time on this Mac: its model and effort
+                // too (nil goes back to the default). Another Mac's logins
+                // aren't this one's, and a thread's schedule uses the thread's.
+                let ownModel = state.threadId == nil && !state.isAway
                 saved = try await client.updateSchedule(id, ScheduleUpdate(
                     title: title.isEmpty ? nil : title, text: text, when: state.when,
-                    cwd: state.threadId == nil ? state.cwd.trimmingCharacters(in: .whitespacesAndNewlines) : nil
+                    cwd: state.threadId == nil ? state.cwd.trimmingCharacters(in: .whitespacesAndNewlines) : nil,
+                    model: ownModel ? .some(state.model) : .none, effort: ownModel ? .some(state.effort) : .none
                 ))
             } else if state.isAway && state.threadId == nil {
                 // Its folder is sent as typed and checked on that Mac when

@@ -30,6 +30,15 @@ export type WorktreeRecord = {
   // Set aside as a spare (with removedAt): the folder is still there, but
   // it's another thread's now, or will be.
   spare?: boolean;
+  // The patch that asked for the worktree, relative to `path`: its copy
+  // there is where the teardown is read from. Absent in records from before
+  // 9 Nov, which look for it from the thread's folder.
+  patchFile?: string;
+  // When the patch's teardown last ran (it runs as the cleanup starts). Each
+  // archive clears it, so it runs once per archive: a delete or the next
+  // runner picking the cleanup up again doesn't run it twice. The thread's
+  // next turn in the worktree clears it too, saying the teardown ran.
+  tornDownAt?: string;
 };
 
 export const MAIN = 'main';
@@ -160,11 +169,12 @@ async function makeWorktreeNow(opts: { cwd: string; threadId: string; patch: Wor
   }
   const base = await gitOut(mainCheckout, ['rev-parse', MAIN]);
   if (!base) return { ok: false, reason: `couldn't read ${MAIN} in ${mainCheckout}` };
+  const patchFile = path.relative(top, realpath(opts.patch.file));
   const done = (where: string): MadeWorktree => ({
     ok: true,
-    worktree: { repo, mainCheckout, path: where, branch, base, ...(keep ? { keep } : {}) },
+    worktree: { repo, mainCheckout, path: where, branch, base, ...(keep ? { keep } : {}), patchFile },
     cwd: sameSubfolder(opts.cwd, top, where),
-    patchFile: path.join(where, path.relative(top, realpath(opts.patch.file))),
+    patchFile: path.join(where, patchFile),
   });
 
   if (keep) {
@@ -560,6 +570,16 @@ export async function worktreeGone(w: WorktreeRecord): Promise<false | 'gone' | 
   if (!checkouts) return false;
   const here = realpath(w.path);
   return checkouts.some((c) => realpath(c.path) === here && c.branch === w.branch) ? false : 'taken';
+}
+
+// Whether the worktree's folder is still a checkout of its own branch, so
+// what runs there (its teardown) runs in the thread's work, not in a reused
+// slot that's another thread's now.
+export async function stillCheckedOut(w: WorktreeRecord): Promise<boolean> {
+  if (!isDir(w.path)) return false;
+  const checkouts = await listCheckouts(w.mainCheckout);
+  const here = realpath(w.path);
+  return Boolean(checkouts?.some((c) => realpath(c.path) === here && c.branch === w.branch));
 }
 
 // When its thread is archived or deleted: a worktree whose branch is all

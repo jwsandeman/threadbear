@@ -371,7 +371,16 @@ final class AppModel {
     /// kept across launches: a Codex model is no use to a Claude thread.
     private(set) var lastModels: [String: String] = AppModel.loadMemory(AppModel.lastModelKey)
     private(set) var lastEfforts: [String: String] = AppModel.loadMemory(AppModel.lastEffortKey)
-    var newThreadPermission: PermissionMode = .full
+    /// The mode picked in the new-thread composer, for that draft only.
+    /// Nil: the runner's default (`newThreadPermission`).
+    var newThreadPermissionPick: PermissionMode?
+    /// The mode the next new thread starts on: the one picked, else its
+    /// runner's `defaults.permissionMode` (Auto on a new install), else Full
+    /// access, for a runner that has none, predates it, or hasn't said yet.
+    var newThreadPermission: PermissionMode {
+        get { newThreadPermissionPick ?? newThreadLogins?.defaults.permissionMode ?? .full }
+        set { newThreadPermissionPick = newValue }
+    }
     /// OMP has no Plan first mode; a draft switched from it keeps asking before edits.
     var newThreadPermissionMode: PermissionMode {
         newThreadProviderId == "omp" && newThreadPermission == .plan ? .ask : newThreadPermission
@@ -409,6 +418,10 @@ final class AppModel {
     /// Empty from a runner before step 6, or before it answers: then
     /// there's no choice to offer and every schedule is this runner's.
     var runners: [RunnerInfo] = []
+    /// The experiments on for this Mac's runner, from its hello.
+    var experiments: Set<String> = []
+    /// The Move sheet, while it's open.
+    var moveRequest: MoveRequest?
     /// Other runners, from this one (docs/protocol.md, "Other runners'
     /// threads"): their names, icons, whether they're online and how to
     /// reach them. Their threads are in `threads`, marked with `runnerId`

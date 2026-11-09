@@ -342,14 +342,14 @@ extension Automation {
         let dx = number(c["dx"]) ?? 0
         let steps = max(1, Int(number(c["steps"]) ?? 8))
         let fresh = row.swipe.phase == .idle
-        if fresh { post(RowSwipeEvents.event(dx: 0, phase: .began)) }
+        if fresh { post(RowSwipeEvents.event(dx: 0, phase: .began, content: true)) }
         for _ in 0..<steps {
-            post(RowSwipeEvents.event(dx: dx / Double(steps), phase: .changed))
+            post(RowSwipeEvents.event(dx: dx / Double(steps), phase: .changed, content: true))
             try? await Task.sleep(for: .milliseconds(16))
         }
         let along = "offset \(Int(row.offset)) armed \(row.swipe.armed)"
         guard c["lift"] as? Bool ?? true else { return "ok \(along)" }
-        post(RowSwipeEvents.event(dx: 0, phase: .ended))
+        post(RowSwipeEvents.event(dx: 0, phase: .ended, content: true))
         try? await Task.sleep(for: .milliseconds(500))
         app.hoverOverride = nil
         return "ok \(along), let go: \(app.threads[id]?.isArchived == true ? "archived" : "not archived")"

@@ -23,6 +23,8 @@ function fakeIo(runs: Run[]) {
     say: (s: string) => said.push(s),
     write: (s: string) => said.push(s),
     error: () => {},
+    // No sleeps, rather than pmset's real count, unless a test says.
+    slept: () => 0,
     spawn: (cmd: string, args: string[], opts: { stdio: [unknown, number, number] }) => {
       calls.push({ cmd, args });
       const r = runs.shift();
@@ -125,4 +127,53 @@ test("step: a long step name doesn't make a log file name the file system refuse
       return true;
     },
   );
+});
+
+// Its hello was asked once, and on a busy Mac the handshake after a release
+// said it was listening timed out and failed a healthy one (a fork's, 8 Nov).
+test('the smoke test asks for hello again within the wait it had to start', async () => {
+  let now = 0;
+  let asked = 0;
+  const p = await steps.smokeHello({
+    probe: async () => { now += 7_000; return ++asked < 3 ? { state: asked === 1 ? 'unknown' : 'down' } : { state: 'up', version: 'v' }; },
+    waited: () => now, load: () => 0.5, exited: () => null, sleep: async () => { now += 250; },
+  });
+  assert.equal(p.version, 'v');
+  assert.equal(asked, 3);
+});
+
+test('the smoke test stops asking for hello when the release exits or its wait runs out', async () => {
+  const io = { probe: async () => ({ state: 'unknown' }), waited: () => 91_000, load: () => 0.5, exited: () => null, sleep: async () => {} };
+  await assert.rejects(steps.smokeHello(io), /hello got no answer after 91 s/);
+  await assert.rejects(steps.smokeHello({ ...io, exited: () => ({ code: 1, signal: null }) }), /it exited \(1\) before hello/);
+  // Overloaded, it keeps asking past 90 s, up to the same ten minutes.
+  let asked = 0;
+  const up = await steps.smokeHello({ ...io, load: () => 5, probe: async () => (++asked === 1 ? { state: 'unknown' } : { state: 'up' }) });
+  assert.equal(up.state, 'up');
+  await assert.rejects(steps.smokeHello({ ...io, waited: () => 600_001, load: () => 5 }), /hello got no answer after 600 s/);
+});
+
+// A Mac that sleeps mid-build stops the tests' clocks but not the wall
+// clock's, so a step that failed across a sleep says nothing about the code.
+// It isn't rerun (the rerun would be a second guess at the same thing) and
+// update.ts tries the commit again later rather than marking it failed.
+test('a step that failed while the Mac slept through it is tried again later, not taken as a failure', () => {
+  const { io, calls } = fakeIo([{ status: 1, output: 'test at test/unit/upstream.test.ts:227:1\n' }]);
+  let n = 4;
+  assert.throws(
+    () => steps.unitTests(c, {}, { ...io, slept: () => n++ }),
+    (e: Error) => e instanceof steps.SleptThrough && /^The Mac slept during Unit tests \(npm exited with 1; the output is in \S+\), so it's tried again later$/.test(e.message),
+  );
+  assert.equal(calls.length, 1, 'no rerun');
+});
+
+test("a step that failed with no sleep, or where the sleep count can't be read, is a failure as before", () => {
+  for (const slept of [() => 4, () => undefined]) {
+    const { io } = fakeIo([{ status: 1 }]);
+    assert.throws(() => steps.step('Typecheck', c.npm, [], {}, { ...io, slept }), (e: Error) => e instanceof steps.StepFailed && /npm exited with 1/.test(e.message));
+  }
+  // And a step that passed across a sleep passed.
+  const { io } = fakeIo([{ status: 0 }]);
+  let n = 0;
+  steps.step('Typecheck', c.npm, [], {}, { ...io, slept: () => n++ });
 });

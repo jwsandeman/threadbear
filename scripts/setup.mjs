@@ -34,7 +34,8 @@
 //   can do anything to the deployment. Its key comes from the first Mac:
 //   tb runner add <name> --ssh <this Mac> (docs/protocol.md, "Runner keys").
 //   6. runner.json: where the runner mirrors to, and the default folder for
-//      new threads (~/ThreadbearThreads, made here, unless --cwd; Settings changes it)
+//      new threads (~/ThreadbearThreads, made here, unless --cwd; Settings changes it).
+//      One this makes also starts new threads on Auto (defaults.permissionMode)
 //   7. the backend and the website, deployed
 //   8. the runner (its LaunchAgent, with Threadbear Runner.app as the
 //      program, so macOS's privacy prompts name it) and the Mac app, built
@@ -608,6 +609,10 @@ async function selfHostedBackend() {
 
 async function runnerJson(url, site) {
   say('6. runner.json');
+  // Only a runner.json this makes: one already there is an install from
+  // before, whose threads have started on Full access all along (unset
+  // means full), and it keeps that.
+  const fresh = !fs.existsSync(runnerJsonPath);
   const json = readJson(runnerJsonPath);
   const name = v.name ?? json.sync?.name ?? os.hostname().split('.')[0];
   // Not asked: it's in the Mac app's Settings, and each new thread can pick
@@ -626,11 +631,15 @@ async function runnerJson(url, site) {
   }
   const cwdPath = cwd.replace(/^~(?=$|\/)/, os.homedir());
   if (!dry && !fs.existsSync(cwdPath)) fs.mkdirSync(cwdPath, { recursive: true });
-  const next = { ...json, sync: { ...json.sync, ...(url ? { url } : {}), ...(site ? { site } : {}), name }, defaults: { ...json.defaults, cwd } };
+  // A new install's threads start on Auto: a safety check approves or
+  // blocks each action (Claude only; on Codex it's Ask before edits).
+  // Picking Full access in the composer, or "full" here, changes it.
+  const mode = fresh ? { permissionMode: 'auto' } : {};
+  const next = { ...json, sync: { ...json.sync, ...(url ? { url } : {}), ...(site ? { site } : {}), name }, defaults: { ...mode, ...json.defaults, cwd } };
   if (JSON.stringify(next) === JSON.stringify(json)) return ok(`${runnerJsonPath} as it was`);
-  if (dry) return todo(`write ${runnerJsonPath}: sync.url ${url ?? '(the new deployment)'}${site ? `, sync.site ${site}` : ''}, sync.name ${name}, defaults.cwd ${cwd}`);
+  if (dry) return todo(`write ${runnerJsonPath}: sync.url ${url ?? '(the new deployment)'}${site ? `, sync.site ${site}` : ''}, sync.name ${name}, defaults.cwd ${cwd}${fresh ? ', defaults.permissionMode auto' : ''}`);
   writeJson(runnerJsonPath, next);
-  ok(`mirrors to ${url} as ${name}; new threads start in ${cwd}`);
+  ok(`mirrors to ${url} as ${name}; new threads start in ${cwd}${fresh ? ', on Auto' : ''}`);
 }
 
 function backend() {

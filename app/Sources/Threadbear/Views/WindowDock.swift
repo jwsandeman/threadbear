@@ -264,6 +264,10 @@ struct RootView: View {
         .sheet(item: $app.scheduleEditor) { state in
             ScheduleEditor(state: state)
         }
+        // Move to ▸ a runner (AppModel+Moves).
+        .sheet(item: $app.moveRequest) { request in
+            MoveSheet(request: request)
+        }
         // The automation's `settings` opens the Settings window; only a
         // SwiftUI view can (AppKit's showSettingsWindow: does nothing now).
         .onChange(of: app.settingsRequest) { openSettings() }

@@ -289,4 +289,20 @@
 //    weren't queued, and sync:pruneFiles any left after a day. A runner
 //    sends pictures to another runner only from 63: an older backend would
 //    drop them and send the words alone.
-export const API_VERSION = 63;
+// 64: moving a thread to another runner (docs/protocol.md, "Moving a thread
+//    to another runner"; convex/moves.ts). The threadMoves table, startMove
+//    and cancelMove for the main Mac, moves and each step for the move's
+//    own runners, and move chunks through /runner/upload outside a runner
+//    key's picture allowances. An older runner never starts one or watches
+//    its moves, so a move to or from it fails when nobody answers.
+// 65: relay:queueCommand's `call` takes moves.describe (to the runner that
+//    has the thread) and moves.preview (to a move's target, with the
+//    thread's description), for the Mac's Move sheet (threads.movePreview).
+//    Both only plan. An older backend refuses them, and the sheet says so.
+// 66: phone:registerDevice takes `platform: "android"`, for a phone whose
+//    token is a Firebase one (apnsToken keeps its name), and devices:targets
+//    carries it. A push for such a phone goes through the push relay to
+//    Firebase, whatever Apple key the backend has (docs/push-relay.md). An
+//    older backend refuses the argument, so an Android phone registers only
+//    with a backend of 66 or later.
+export const API_VERSION = 66;

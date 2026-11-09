@@ -545,6 +545,30 @@ public extension RPCClient {
     /// The runners a schedule can be put on, this one first. A runner from
     /// before step 6 answers -32601, which means just itself: no choice to
     /// offer, so an empty list.
+    /// The Move sheet's guess (docs/protocol.md, "Moving a thread to
+    /// another runner"): where the thread would run on `runnerId` and on
+    /// which login, or, with `cwd` and `accountId`, whether those will do.
+    /// The target answers through Convex, so allow it time.
+    func movePreview(threadId: String, runnerId: String, cwd: String? = nil, accountId: String? = nil) async throws -> MovePreview {
+        var params: [String: JSONValue] = ["threadId": .string(threadId), "runnerId": .string(runnerId)]
+        if let cwd, !cwd.isEmpty { params["cwd"] = .string(cwd) }
+        if let accountId, !accountId.isEmpty { params["accountId"] = .string(accountId) }
+        return try await call("threads.movePreview", .object(params), as: MovePreview.self, timeout: .seconds(75))
+    }
+
+    /// Starts the move. It goes once the thread's turn ends; the row's
+    /// `moving` says how it's getting on.
+    func moveThread(threadId: String, runnerId: String, cwd: String?, accountId: String?) async throws {
+        var params: [String: JSONValue] = ["threadId": .string(threadId), "runnerId": .string(runnerId)]
+        if let cwd, !cwd.isEmpty { params["cwd"] = .string(cwd) }
+        if let accountId, !accountId.isEmpty { params["accountId"] = .string(accountId) }
+        _ = try await call("threads.move", .object(params), as: EmptyResult.self, timeout: .seconds(30))
+    }
+
+    func cancelMove(threadId: String) async throws {
+        _ = try await call("threads.moveCancel", .object(["threadId": .string(threadId)]), as: EmptyResult.self, timeout: .seconds(30))
+    }
+
     func listRunners() async throws -> [RunnerInfo] {
         do {
             return try await call("runners.list", .object([:]), as: RunnersResult.self).runners
@@ -673,13 +697,19 @@ public struct ScheduleUpdate: Sendable, Hashable {
     public var when: ScheduleWhen?
     public var paused: Bool?
     public var cwd: String?
+    /// Left out: unchanged. `.some(nil)`: back to the default (sent as null).
+    public var model: String??
+    public var effort: String??
 
-    public init(title: String? = nil, text: String? = nil, when: ScheduleWhen? = nil, paused: Bool? = nil, cwd: String? = nil) {
+    public init(title: String? = nil, text: String? = nil, when: ScheduleWhen? = nil, paused: Bool? = nil, cwd: String? = nil,
+                model: String?? = .none, effort: String?? = .none) {
         self.title = title
         self.text = text
         self.when = when
         self.paused = paused
         self.cwd = cwd
+        self.model = model
+        self.effort = effort
     }
 
     public var params: [String: JSONValue] {
@@ -688,6 +718,8 @@ public struct ScheduleUpdate: Sendable, Hashable {
         if let text { params["text"] = .string(text) }
         if let paused { params["paused"] = .bool(paused) }
         if let cwd { params["cwd"] = .string(cwd) }
+        if case .some(let model) = model { params["model"] = model.map(JSONValue.string) ?? .null }
+        if case .some(let effort) = effort { params["effort"] = effort.map(JSONValue.string) ?? .null }
         return params
     }
 }

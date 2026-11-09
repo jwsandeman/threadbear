@@ -89,6 +89,20 @@ function harness(): Harness {
   return makeHarness(undefined, {}, { actionShell: ['/bin/sh', '-c'], actionTimeoutMs: 10_000 });
 }
 
+// Puts a git ahead of the real one on PATH that takes half a second over
+// `worktree remove`, until the function it returns is called. Tests that
+// look at a cleanup while git is still removing the folder need it: on a
+// fast disk the removal finished before they looked (SeeThruHead's fork,
+// 7 Nov).
+function slowWorktreeRemoval(): () => void {
+  const realGit = sh('/', 'command -v git');
+  const bin = tmpDir('tb-slow-git-');
+  fs.writeFileSync(path.join(bin, 'git'), `#!/bin/sh\ncase " $* " in *" worktree remove "*) sleep 0.5 ;; esac\nexec '${realGit}' "$@"\n`, { mode: 0o755 });
+  const before = process.env.PATH;
+  process.env.PATH = `${bin}${path.delimiter}${before}`;
+  return () => { process.env.PATH = before; };
+}
+
 // --------------------------------------------------------------- patches
 
 test('a patch can carry worktree with setup and check; anything malformed is the file\'s error', () => {
@@ -98,12 +112,14 @@ test('a patch can carry worktree with setup and check; anything malformed is the
   assert.deepEqual(ok.actions, []);
   assert.deepEqual(readPatchModule('w', 'project', '/x/w.ts', { worktree: {} }).worktree, {});
   assert.deepEqual(readPatchModule('k', 'project', '/x/k.ts', { worktree: { keep: ['app/.build', 'dock/.build'] } }).worktree, { keep: ['app/.build', 'dock/.build'] });
+  assert.deepEqual(readPatchModule('t', 'project', '/x/t.ts', { worktree: { teardown: './scripts/teardown.sh' } }).worktree, { teardown: './scripts/teardown.sh' });
   assert.equal(readPatchModule('a', 'project', '/x/a.ts', { actions: [] }).worktree, undefined, 'none unless asked for');
   for (const [worktree, error] of [
     [[], 'worktree should be an object with setup and/or check.'],
     [true, 'worktree should be an object with setup and/or check.'],
     [{ setup: 3 }, 'worktree.setup should be a command.'],
     [{ check: '  ' }, 'worktree.check should be a command.'],
+    [{ teardown: 5 }, 'worktree.teardown should be a command.'],
     [{ keep: 'app/.build' }, 'worktree.keep should be a list of folders inside the repo, like "app/.build".'],
     [{ keep: [] }, 'worktree.keep should be a list of folders inside the repo, like "app/.build".'],
     [{ keep: ['/abs/.build'] }, 'worktree.keep should be a list of folders inside the repo, like "app/.build".'],
@@ -177,7 +193,7 @@ test('a new thread in an opted-in repo gets its own worktree, cwd, setup run, br
   assert.match(land.command ?? '', /\/bin\/tb'? land$/);
   assert.ok(h.runner.get(thread.id).patches?.some((p) => p.id === 'worktree' && p.source === 'builtin'));
   const rec = h.store.load(thread.id);
-  assert.deepEqual(rec?.worktree, { repo: 'proj', mainCheckout: main, path: wt, branch: `thread/${id8}`, base: sh(main, 'git rev-parse main') });
+  assert.deepEqual(rec?.worktree, { repo: 'proj', mainCheckout: main, path: wt, branch: `thread/${id8}`, base: sh(main, 'git rev-parse main'), patchFile: '.threadbear/patches/checks.ts' });
   assert.equal(rec?.worktreePending, undefined);
 });
 
@@ -979,6 +995,172 @@ test('deleting a thread removes a landed worktree; an unlanded one stays, with a
   assert.ok(fs.existsSync(b.w.path));
 });
 
+// -------------------------------------------------------------- teardown
+
+// A teardown that writes where it ran, and "there" while the worktree's
+// files still are, to a log outside the repo.
+const TEARDOWN = (log: string, then = '') => PATCH(`{ teardown: "echo $PWD $(test -f runner/a.ts && echo there) >> ${log}${then}" }`);
+const lines = (log: string) => (fs.existsSync(log) ? fs.readFileSync(log, 'utf8').trim().split('\n') : []);
+const teardowns = (h: Harness, id: string) => h.events(id).filter((e) => e.type === 'action.run' && e.trigger === 'worktree.teardown');
+
+test('archiving runs the teardown in the worktree root before the cleanup, landed or not', async () => {
+  const log = path.join(fs.realpathSync(tmpDir('tb-td-')), 'log');
+  const { main } = makeRepo(TEARDOWN(log));
+  const h = harness();
+  const kept = await threadWithWorktree(h, main);
+  commit(kept.w.path, { 'runner/b.ts': '2\n' }, 'Not landed');
+  h.runner.update({ threadId: kept.id, archived: true });
+  await until(() => notes(h, kept.id).some((n) => n.includes(' stay: ')), 'the cleanup');
+  const [run] = teardowns(h, kept.id);
+  assert.equal(run?.title, 'Tear down the worktree');
+  assert.equal(run?.patch, 'checks');
+  assert.equal(run?.actionId, 'checks.worktree-teardown');
+  assert.equal(run?.ok, true);
+  assert.equal(run?.turnId, undefined);
+  assert.match(run?.command ?? '', /^echo \$PWD/);
+  assert.ok(fs.existsSync(kept.w.path), 'the unlanded worktree stays');
+  assert.deepEqual(checkSequence(h.events(kept.id)), []);
+
+  const landed = await threadWithWorktree(h, main);
+  h.runner.update({ threadId: landed.id, archived: true });
+  await until(() => notes(h, landed.id).some((n) => n.startsWith('Removed')), 'the cleanup');
+  const events = h.events(landed.id);
+  const ran = events.findIndex((e) => e.type === 'action.run' && e.trigger === 'worktree.teardown');
+  const removed = events.findIndex((e) => e.type === 'system.note' && String(e.text).startsWith('Removed'));
+  assert.ok(ran >= 0 && ran < removed, 'the teardown comes before the cleanup');
+  assert.ok(!fs.existsSync(landed.w.path));
+  assert.deepEqual(lines(log), [`${kept.w.path} there`, `${landed.w.path} there`], 'each ran in its worktree root while its files were there');
+});
+
+test('deleting a thread runs its teardown before the worktree goes; a failing one says so in a notice', async () => {
+  const dir = fs.realpathSync(tmpDir('tb-td-'));
+  const { main } = makeRepo(TEARDOWN(path.join(dir, 'log')));
+  const h = harness();
+  const a = await threadWithWorktree(h, main);
+  h.runner.delete(a.id);
+  await until(() => !fs.existsSync(a.w.path), 'the worktree to go');
+  assert.deepEqual(lines(path.join(dir, 'log')), [`${a.w.path} there`]);
+  assert.equal(h.notes.some((n) => n.method === 'runner.notice'), false, 'nothing to say when it worked');
+
+  const failing = makeRepo(TEARDOWN(path.join(dir, 'log2'), '; echo it broke; exit 3'));
+  const h2 = harness();
+  const b = await threadWithWorktree(h2, failing.main);
+  h2.runner.delete(b.id);
+  await until(() => h2.notes.some((n) => n.method === 'runner.notice'), 'the notice');
+  const notice = h2.notes.find((n) => n.method === 'runner.notice') as { params: { message: string } };
+  assert.match(notice.params.message, /^"Go" was deleted, but its worktree's teardown \(echo \$PWD .*\) failed \(exit code 3\): it broke$/);
+  await until(() => !fs.existsSync(b.w.path), 'the worktree to go anyway');
+  assert.deepEqual(lines(path.join(dir, 'log2')), [`${b.w.path} there`]);
+});
+
+test('a failing teardown is shown and the cleanup still happens', async () => {
+  const dir = fs.realpathSync(tmpDir('tb-td-'));
+  const { main } = makeRepo(TEARDOWN(path.join(dir, 'log'), '; echo no deployment to remove; exit 3'));
+  const h = harness();
+  const { id, w } = await threadWithWorktree(h, main);
+  h.runner.update({ threadId: id, archived: true });
+  await until(() => notes(h, id).some((n) => n.startsWith('Removed')), 'the cleanup');
+  const [run] = teardowns(h, id);
+  assert.equal(run?.ok, false);
+  assert.equal(run?.exitCode, 3);
+  assert.match(run?.text ?? '', /no deployment to remove/);
+  assert.ok(!fs.existsSync(w.path));
+  assert.equal(sh(main, `git branch --list ${w.branch}`), '');
+});
+
+test("an untrusted teardown doesn't run, and says so; a trusted one runs its hashed script", async () => {
+  const dir = fs.realpathSync(tmpDir('tb-td-'));
+  const log = path.join(dir, 'log');
+  const { main } = makeRepo(PATCH(`{ teardown: "./teardown.sh" }`));
+  commit(main, { 'teardown.sh': `#!/bin/sh\necho "torn down $PWD" >> ${log}\n` }, 'teardown');
+  fs.chmodSync(path.join(main, 'teardown.sh'), 0o755);
+  sh(main, 'git add -A && git commit -qm modes');
+  const trust = new PatchTrust();
+  trust.trustCurrent([path.join(main, '.threadbear/patches/checks.ts')]);
+  const h = makeHarness(undefined, {}, { actionShell: ['/bin/sh', '-c'], actionTimeoutMs: 10_000, patchTrust: trust });
+
+  const a = await threadWithWorktree(h, main);
+  h.runner.update({ threadId: a.id, archived: true });
+  await until(() => notes(h, a.id).some((n) => n.startsWith('Removed')), 'the cleanup');
+  assert.equal(teardowns(h, a.id)[0]?.command, './teardown.sh');
+  assert.deepEqual(lines(log), [`torn down ${a.w.path}`], 'from the worktree, which is the patch\'s folder');
+
+  // A commit on the branch changes what the teardown runs: that's a patch
+  // version nobody trusted, so it never runs by itself.
+  const b = await threadWithWorktree(h, main);
+  commit(b.w.path, { 'teardown.sh': `#!/bin/sh\necho evil >> ${log}\n` }, 'Change the teardown');
+  h.runner.update({ threadId: b.id, archived: true });
+  await until(() => notes(h, b.id).some((n) => n.includes(' stay: ')), 'the cleanup');
+  assert.equal(teardowns(h, b.id).length, 0);
+  assert.ok(
+    notes(h, b.id).includes("Didn't run the worktree's teardown: its copy of the checks patch isn't a version you've trusted. Trust it in Patches, then run the teardown yourself if you want it."),
+    notes(h, b.id).join('\n'),
+  );
+  assert.deepEqual(lines(log), [`torn down ${a.w.path}`]);
+});
+
+test('the teardown runs once per archive: a delete after it skips it, and a thread brought back is told and tears down again', async () => {
+  const dir = fs.realpathSync(tmpDir('tb-td-'));
+  const log = path.join(dir, 'log');
+  const { main } = makeRepo(TEARDOWN(log));
+  const h = harness();
+  const { id, w } = await threadWithWorktree(h, main);
+  commit(w.path, { 'runner/b.ts': '2\n' }, 'Not landed');
+  h.runner.update({ threadId: id, archived: true });
+  await until(() => notes(h, id).some((n) => n.includes(' stay: ')), 'the cleanup');
+  assert.equal(lines(log).length, 1);
+  assert.ok(h.store.load(id)?.worktree?.tornDownAt, 'remembered, so a runner picking the cleanup up again skips it');
+
+  // Brought back: on in its worktree, told what the teardown may have taken.
+  h.runner.send(id, 'More please');
+  await until(() => h.adapter.sessions.length === 2, 'a new CLI');
+  assert.equal(h.adapter.last.opts.cwd, path.join(w.path, 'runner'));
+  assert.ok(notes(h, id).includes("This thread's worktree was torn down when it was archived (its patch's teardown ran), so anything its setup made outside the folder may be gone. It carries on in the worktree."));
+  assert.match(h.adapter.last.sent.at(-1)!.text, /\[Threadbear\] Your worktree's teardown ran when this thread was archived/);
+  assert.equal(h.store.load(id)?.worktree?.tornDownAt, undefined);
+  h.adapter.last.init();
+  h.adapter.last.result();
+
+  h.runner.update({ threadId: id, archived: true });
+  await until(() => notes(h, id).filter((n) => n.includes(' stay: ')).length === 2, 'the second cleanup');
+  assert.equal(lines(log).length, 2, 'archived again: torn down again');
+  h.runner.delete(id);
+  await until(() => h.notes.some((n) => n.method === 'runner.notice'), "the notice that the worktree stays");
+  assert.equal(lines(log).length, 2, 'already torn down for this archive');
+});
+
+test('with keep, the teardown still runs before the worktree is kept as a spare', async () => {
+  const dir = fs.realpathSync(tmpDir('tb-td-'));
+  const log = path.join(dir, 'log');
+  const { main } = makeRepo(PATCH(`{ teardown: "echo $PWD $(test -f runner/a.ts && echo there) >> ${log}", keep: ["app/.build"] }`));
+  const h = harness();
+  const { id, w } = await threadWithWorktree(h, main);
+  h.runner.update({ threadId: id, archived: true });
+  await until(() => notes(h, id).some((n) => n.includes('for the next thread')), 'the cleanup');
+  assert.equal(teardowns(h, id).length, 1);
+  assert.deepEqual(lines(log), [`${w.path} there`]);
+  assert.match(sh(main, 'git worktree list --porcelain'), /locked threadbear spare/);
+});
+
+test('a handover waits for a running teardown as part of the cleanup', async () => {
+  const dir = fs.realpathSync(tmpDir('tb-td-'));
+  const log = path.join(dir, 'log');
+  const { main } = makeRepo(PATCH(`{ teardown: "sleep 0.4; echo $PWD >> ${log}" }`));
+  const h = harness();
+  const { id, w } = await threadWithWorktree(h, main);
+  h.runner.update({ threadId: id, archived: true });
+  const rt = (h.runner as any).threads.get(id).rt;
+  await until(() => rt.archivePending === false, 'the cleanup to start');
+  assert.ok(rt.cleaning, 'the teardown counts as the cleanup');
+  const handed: string[] = [];
+  await h.runner.beginDrain([], { onHandedOver: (t) => handed.push(t) });
+  await until(() => handed.includes(id), 'the handover');
+  assert.deepEqual(lines(log), [w.path]);
+  const saved = JSON.parse(fs.readFileSync(path.join(h.home, 'threads', id, 'thread.json'), 'utf8'));
+  assert.ok(saved.worktree.removedAt, 'saved once the cleanup after it finished');
+  assert.equal(teardowns(h, id).length, 1);
+});
+
 // ---------------------------------------------------------------- spares
 
 const KEEP = PATCH(`{ setup: "touch .setup-ran", keep: ["app/.build"] }`);
@@ -1066,14 +1248,19 @@ test('a handover waits for an archived thread\'s worktree cleanup, so the saved 
   const { main } = makeRepo();
   const h = harness();
   const { id, w } = await threadWithWorktree(h, main);
-  h.runner.update({ threadId: id, archived: true });
-  const rt = (h.runner as any).threads.get(id).rt;
-  // The CLI has gone and the cleanup has started, but git hasn't finished.
-  await until(() => rt.archivePending === false, 'the cleanup to start');
-  assert.ok(fs.existsSync(w.path), 'still removing');
-  const handed: string[] = [];
-  await h.runner.beginDrain([], { onHandedOver: (t) => handed.push(t) });
-  await until(() => handed.includes(id), 'the handover');
+  const restore = slowWorktreeRemoval();
+  try {
+    h.runner.update({ threadId: id, archived: true });
+    const rt = (h.runner as any).threads.get(id).rt;
+    // The CLI has gone and the cleanup has started, but git hasn't finished.
+    await until(() => rt.archivePending === false, 'the cleanup to start');
+    assert.ok(fs.existsSync(w.path), 'still removing');
+    const handed: string[] = [];
+    await h.runner.beginDrain([], { onHandedOver: (t) => handed.push(t) });
+    await until(() => handed.includes(id), 'the handover');
+  } finally {
+    restore();
+  }
   assert.equal(h.runner.has(id), false);
   const saved = JSON.parse(fs.readFileSync(path.join(h.home, 'threads', id, 'thread.json'), 'utf8'));
   assert.ok(saved.worktree.removedAt, 'removedAt was saved');
@@ -1138,12 +1325,17 @@ test('a message sent while the archive cleanup runs waits for it, then starts in
   const { main } = makeRepo();
   const h = harness();
   const { id, w } = await threadWithWorktree(h, main);
-  h.runner.update({ threadId: id, archived: true });
-  const rt = (h.runner as any).threads.get(id).rt;
-  await until(() => rt.archivePending === false, 'the cleanup to start');
-  assert.ok(fs.existsSync(w.path), 'still removing');
-  h.runner.send(id, 'More please');
-  await until(() => h.adapter.sessions.length === 2, 'a new CLI');
+  const restore = slowWorktreeRemoval();
+  try {
+    h.runner.update({ threadId: id, archived: true });
+    const rt = (h.runner as any).threads.get(id).rt;
+    await until(() => rt.archivePending === false, 'the cleanup to start');
+    assert.ok(fs.existsSync(w.path), 'still removing');
+    h.runner.send(id, 'More please');
+    await until(() => h.adapter.sessions.length === 2, 'a new CLI');
+  } finally {
+    restore();
+  }
   assert.equal(h.adapter.last.opts.cwd, path.join(main, 'runner'), 'not the folder being removed');
   assert.ok(!fs.existsSync(w.path));
 });
@@ -1152,12 +1344,18 @@ test('a thread deleted while a handover waits for its cleanup stays deleted', as
   const { main } = makeRepo();
   const h = harness();
   const { id } = await threadWithWorktree(h, main);
-  h.runner.update({ threadId: id, archived: true });
-  const rt = (h.runner as any).threads.get(id).rt;
-  await until(() => rt.archivePending === false, 'the cleanup to start');
-  const drained = h.runner.beginDrain([], { onHandedOver: () => undefined });
-  h.runner.delete(id);
-  await drained;
+  // So the delete really lands while the handover waits on git.
+  const restore = slowWorktreeRemoval();
+  try {
+    h.runner.update({ threadId: id, archived: true });
+    const rt = (h.runner as any).threads.get(id).rt;
+    await until(() => rt.archivePending === false, 'the cleanup to start');
+    const drained = h.runner.beginDrain([], { onHandedOver: () => undefined });
+    h.runner.delete(id);
+    await drained;
+  } finally {
+    restore();
+  }
   assert.ok(!fs.existsSync(path.join(h.home, 'threads', id)), 'not saved back');
 });
 

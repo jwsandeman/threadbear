@@ -51,7 +51,9 @@ File references are where to look.
   `shared-pools.json`, the last pools your Convex backend had, which every
   runner shares, so one starts with them while the backend can't be reached,
   and `shortcuts.json`, the keyboard shortcuts you've changed in Settings >
-  Keyboard, which the app reads and writes and never sends anywhere, and
+  Keyboard, which the app reads and writes and never sends anywhere,
+  `schedule-runs/`, schedule runs your Convex backend hasn't been told
+  of yet, a file each, kept only until it has, and
   with the standing instructions experiment on, `instructions.md`, which every
   agent is given, and `instructions.sig`, which says Settings saved it). In `secrets/`, `asked/` holds the answers you
   type into an agent's secret card, one owner-only file each with a small
@@ -122,7 +124,10 @@ File references are where to look.
   and redeploy your backend, so whatever reaches your `main` runs, with no
   signature check; only Mike's release tags are signed (below). Turn it
   off for both with `followMain: false` in `runner.json` (ask any thread
-  to; it left Settings on 2 Nov).
+  to; it left Settings on 2 Nov). Around each step of the runner's build
+  it reads macOS's sleep count (`pmset -g stats`, which changes nothing),
+  so a step that failed while the Mac slept is tried again later (up to
+  three times for the same commit) rather than taken as a broken main.
 - **Schedule checks** (`runner/src/schedule-check.ts`, experiment
   `scheduleChecks`, off by default): a schedule's check command runs in
   `/bin/sh` before each run, as you, for at most a minute (or up to five,
@@ -153,8 +158,11 @@ File references are where to look.
   `runner/bring-in.json` in the data folder.
 - **CLI updates** (`runner/src/updates/`): every hour it checks for new
   Claude Code and Codex versions and installs them. If you don't point it
-  at your own Codex, it installs one into the data folder.
-  `THREADBEAR_CLI_UPDATES=off` stops this.
+  at your own Codex, it installs one into the data folder. It also runs
+  any update commands you list under `cliUpdates.extra` in `runner.json`
+  (none unless you add them), once a day each, and keeps when each last
+  ran in `extra-updates.json` in the data folder.
+  `THREADBEAR_CLI_UPDATES=off` stops all of this.
 - **Small model calls** (`runner/src/models/`): thread titles, filing
   threads into projects (the librarian, every 5 minutes) and similar jobs
   send short excerpts of your threads to `claude -p` on your own logins.
@@ -170,6 +178,15 @@ File references are where to look.
   own copy) and deleted threads after 30 days in the trash. Archived
   threads keep their pictures unless you set `"archivedMediaDays": <days>`
   in `runner.json`.
+- **Moving threads** (the `moveToRunner` experiment, off by default;
+  `runner/src/moves.ts`): watches your Convex deployment for threads you've
+  moved to or from this machine. One moving away is packed (its folder,
+  its Claude transcript, its worktree's git work), sealed to the other
+  machine's key, uploaded in pieces and deleted from the deployment once
+  it lands; this machine keeps its old copy in `moved/` in the data folder
+  for a week. One arriving is unpacked in `moves/` first, and may make a
+  worktree for it, write its transcript into a login's Claude folder, and
+  `git clone` its repo from `origin` if this machine has no copy.
 - **Presence** (`runner/src/presence.ts`): reads how long the keyboard and
   mouse have been idle (`ioreg`), so your phone knows whether you're at
   the Mac.
@@ -238,13 +255,13 @@ The full configuration and provider behavior are described in
 
 | Service | Whose | What goes there |
 |---|---|---|
-| Your Convex deployment | yours | Thread titles and status, all message text (each message cut at 8,000 characters), one line per tool call, projects, schedules, your logins' emails and usage, whether you're at the Mac, whether this machine is low on memory or disk, and the pictures you paste into a message, up to 10 MB each, so your own website can show them. Those go up as they are, in your deployment's file storage: unlike text, nothing can scrub a secret out of a picture, so a screenshot of something sensitive goes too. `"sync": { "pastedPictures": false }` in `runner.json` keeps them on this Mac. While someone has the website's Runners view open, this machine's CPU, memory and disk use, its processor model, operating system and time since it started, every 10 seconds; with nobody looking, none of that is sent. Photos you send from the phone, and pictures you send from the Mac app to a thread on another of your Macs, deleted once that Mac has fetched them. Pictures and videos agents put in their replies or pin, at most 10 MB each, for the phone to show. Other images only for threads you share by link. Other tool output and files stay on the Mac. Text has known secrets taken out first: see below. |
+| Your Convex deployment | yours | Thread titles and status, all message text (each message cut at 8,000 characters), one line per tool call, projects, schedules, your logins' emails and usage, whether you're at the Mac, whether this machine is low on memory or disk, and the pictures you paste into a message, up to 10 MB each, so your own website can show them. Those go up as they are, in your deployment's file storage: unlike text, nothing can scrub a secret out of a picture, so a screenshot of something sensitive goes too. `"sync": { "pastedPictures": false }` in `runner.json` keeps them on this Mac. While someone has the website's Runners view open, this machine's CPU, memory and disk use, its processor model, operating system and time since it started, every 10 seconds; with nobody looking, none of that is sent. Photos you send from the phone, and pictures you send from the Mac app to a thread on another of your Macs, deleted once that Mac has fetched them. Pictures and videos agents put in their replies or pin, at most 10 MB each, for the phone to show. Other images only for threads you share by link. Other tool output and files stay on the Mac, unless you move a thread to another of your machines (the `moveToRunner` experiment): then the whole thread, sealed so only that machine can open it, goes through for as long as the move takes. Text has known secrets taken out first: see below. |
 | Convex (the Convex panel) | yours | Only for a thread in a Convex project, when its Convex panel opens: the runner's Convex CLI asks api.convex.dev for the project's deployments and a deploy key, the runner asks the deployment whether a kept key still works (`/api/check_admin_key`), and the panel loads Convex's embedded dashboard (dashboard-embedded.convex.dev) with that key. Sign in to Convex goes to auth.convex.dev. (`runner/src/convex-keys.ts`) |
 | Your other Macs, over ssh | yours | Only when you run `tb runner add <name> --ssh <host>` or `tb runner check --ssh <host>` on your first Mac: it reads that Mac's Threadbear `runner.json`, writes its id and the deployment's address there if it hasn't them, writes its new key into that Mac's `secrets/convex-key`, and looks whether that Mac has a deploy key, Convex panel keys or a Convex login (names only, never a key), through your own ssh setup with agent and port forwarding off (`runner/src/runner-keys.ts`). `tb runner audit` asks this Mac's runner for its threads' last seqs and your deployment for what the main key made. `tb runner rotate-owner` sets env vars on your deployment with your deploy key, and, if you give it a Convex team access token for that run (`CONVEX_TEAM_TOKEN`, never kept), asks api.convex.dev for the deployment's deploy keys (their names and dates) before it rotates. |
 | GitHub | Mike's repo | Release tags fetched every 6 hours; the fork at setup |
 | downloads.claude.ai, registry.npmjs.org | Anthropic, npm | CLI version checks and installs; `npm ci` |
-| Anthropic, OpenAI | yours | Your threads, through the official CLIs on your own logins. With the `labReview` experiment on (off by default), a thread's code change, with your message and the agent's reply, goes to your other provider's CLI as a review thread, as if you'd started one. After a turn fails because the API couldn't be reached, the runner itself opens (and straight away closes) a connection to api.anthropic.com or chatgpt.com on port 443, at most once a minute, until one opens and the thread carries on. Nothing is sent over it (`runner/src/net-probe.ts`). |
-| Mike's push relay | Mike's | Only when a paired iPhone gets a notification. It's sent from your Convex deployment, not the Mac. The text is encrypted for the phone; the relay sees the device token and thread id (`convex/push.ts`, `docs/push-relay.md`). The first time, your deployment registers with it, giving its own address; the relay keeps that address and checks it by posting a one-time code back to your deployment's `/relay/verify` (`convex/http.ts`). |
+| Anthropic, OpenAI | yours | Your threads, through the official CLIs on your own logins. With the `cardReviewer` experiment on (off by default), an approval card in a thread on Auto, with the thread's first and latest messages, goes to Opus through the same CLI so it can decide in your place. With the `labReview` experiment on (off by default), a thread's code change, with your message and the agent's reply, goes to your other provider's CLI as a review thread, as if you'd started one. After a turn fails because the API couldn't be reached, the runner itself opens (and straight away closes) a connection to api.anthropic.com or chatgpt.com on port 443, at most once a minute, until one opens and the thread carries on. Nothing is sent over it (`runner/src/net-probe.ts`). |
+| Mike's push relay | Mike's | Only when a paired iPhone or Android phone gets a notification (an Android phone's goes on to Google's Firebase Cloud Messaging, from the relay). It's sent from your Convex deployment, not the Mac. The text is encrypted for the phone; the relay sees the device token and thread id (`convex/push.ts`, `docs/push-relay.md`). The first time, your deployment registers with it, giving its own address; the relay keeps that address and checks it by posting a one-time code back to your deployment's `/relay/verify` (`convex/http.ts`). |
 | A Connectors gateway | whoever runs it | Only if one is set in `runner.json` or `~/.claude.json`. Its `/health` every few minutes (and once more at the end of a turn where a call to one of its services failed, to see if it needs signing in), and for a project with a Notion page, a Notion read or two every 5 minutes for its task board (`runner/src/notion-tasks.ts`), signed with the header the `headersHelper` command in that `connectors` entry prints, which it runs for each read |
 | Sentry | Mike's | Nothing from your copy. Only a copy whose `origin` is Mike's own repo reports errors or uploads the app's debug symbols (`runner/src/sentry.ts`, `app/Sources/Threadbear/CrashReporting.swift`, `app/build-app.sh`). The App Store iPhone app sends anonymous crash reports. |
 

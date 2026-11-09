@@ -990,23 +990,32 @@ export const loadEarlier = mutation({
 // An APNs device token as the phone sends it: hex (32 bytes today; Apple
 // says it can grow, so up to 100).
 const APNS_TOKEN = /^[0-9a-fA-F]{16,200}$/;
+// A Firebase registration token, as an Android phone sends it (platform
+// 'android'): letters, digits, "_", "-" and ":". About 160 characters today;
+// Firebase promises no length, so there is room.
+const FCM_TOKEN = /^[A-Za-z0-9_:-]{20,4096}$/;
 export const MAX_DEVICES_PER_TOKEN = 5;
 
 export const registerDevice = mutation({
   // pushKey (API 4): the phone's own key for what goes through the push
   // relay, base64 of 32 bytes. Kept from an earlier registration if left out.
-  args: { token: v.string(), apnsToken: v.string(), environment: v.union(v.literal('sandbox'), v.literal('production')), pushKey: v.optional(v.string()) },
+  // platform (API 66): "android" when apnsToken is the phone's Firebase token,
+  // not an Apple one (the field keeps its name; the table is indexed by it).
+  // Left out, as every iPhone does, it is an Apple token.
+  args: { token: v.string(), apnsToken: v.string(), environment: v.union(v.literal('sandbox'), v.literal('production')), pushKey: v.optional(v.string()), platform: v.optional(v.literal('android')) },
   returns: v.null(),
-  handler: async (ctx, { token, apnsToken, environment, pushKey }) => {
+  handler: async (ctx, { token, apnsToken, environment, pushKey, platform }) => {
     if (pushKey !== undefined && !/^[A-Za-z0-9+/]{43}=$/.test(pushKey)) throw new ConvexError({ kind: 'invalid', message: 'pushKey must be base64 of 32 bytes' });
-    if (!APNS_TOKEN.test(apnsToken)) throw new ConvexError({ kind: 'invalid', message: 'apnsToken must be the device token in hex' });
+    if (platform === 'android') {
+      if (!FCM_TOKEN.test(apnsToken)) throw new ConvexError({ kind: 'invalid', message: 'apnsToken must be the phone\'s Firebase token' });
+    } else if (!APNS_TOKEN.test(apnsToken)) throw new ConvexError({ kind: 'invalid', message: 'apnsToken must be the device token in hex' });
     const t = await checkPhoneToken(ctx, token);
     const existing = await ctx.db
       .query('devices')
       .withIndex('by_apnsToken', (q) => q.eq('apnsToken', apnsToken))
       .unique();
     const key = pushKey ?? existing?.pushKey;
-    const row = { apnsToken, environment, tokenName: t.name, tokenId: t.id, updatedAt: Date.now(), ...(existing?.notify ? { notify: existing.notify } : {}), ...(key ? { pushKey: key } : {}) };
+    const row = { apnsToken, environment, tokenName: t.name, tokenId: t.id, updatedAt: Date.now(), ...(existing?.notify ? { notify: existing.notify } : {}), ...(key ? { pushKey: key } : {}), ...(platform ? { platform } : {}) };
     // A phone token's oldest registrations give way to a new one (or one it
     // takes over from another token), so a token holds at most
     // MAX_DEVICES_PER_TOKEN rows: a phone reinstalled gets a new APNs token,

@@ -2,13 +2,14 @@ import fs from 'node:fs';
 import { readSandbox, type SandboxConfig } from './sandbox.ts';
 import os from 'node:os';
 import path from 'node:path';
+import { extraUpdatesFrom, type ExtraUpdate } from './updates/extra.ts';
 import crypto from 'node:crypto';
 import { atomicWriteFileSync } from './fsutil.ts';
 import { RELEASE } from './release.ts';
 import { gatewayBase, gatewayUrlFrom } from './connectors.ts';
 import { credentialUrlProblem } from './secure-url.ts';
 import { findGatewayClient } from './notion-tasks.ts';
-import { CLI_POLICIES, isEffortLevel, isProvider, type CliPolicy, type EffortLevel, type Provider } from './protocol.ts';
+import { CLI_POLICIES, isEffortLevel, isProvider, type CliPolicy, type EffortLevel, type PermissionMode, type Provider } from './protocol.ts';
 
 // <package version>+<release id>, or +source when run from a checkout.
 export const RUNNER_VERSION = RELEASE.version;
@@ -36,8 +37,10 @@ export type CliUpdatesConfig = {
   codex: CliPolicy;
   checkMinutes: number;
   keepCodexVersions: number; // Codex copies kept under <home>/tools/codex
+  // Other CLIs' update commands, run daily (updates/extra.ts). None by default.
+  extra?: ExtraUpdate[];
 };
-export const DEFAULT_CLI_UPDATES: CliUpdatesConfig = { claude: 'auto', codex: 'auto', checkMinutes: 60, keepCodexVersions: 2 };
+export const DEFAULT_CLI_UPDATES: CliUpdatesConfig = { claude: 'auto', codex: 'auto', checkMinutes: 60, keepCodexVersions: 2, extra: [] };
 
 // Everything that differs between the real install and a test lives here, so
 // tests can point THREADBEAR_HOME and THREADBEAR_PORT somewhere harmless and
@@ -65,6 +68,11 @@ export type Config = {
     model?: string;
     models?: Partial<Record<Provider, string>>;
     efforts?: Partial<Record<Provider, EffortLevel>>;
+    // The mode a thread that names none starts on (the phone, the website,
+    // tb new, a schedule without one) and the app's composer starts on.
+    // Unset is full, so an install from before it changes nothing; setup
+    // writes "auto" into a new install's runner.json (scripts/setup.mjs).
+    permissionMode?: DefaultMode;
   };
   // Where accounts are discovered. Tests can narrow these.
   claudeMainDir: string;
@@ -147,6 +155,7 @@ export type RunnerJson = {
     model?: string;
     models?: Partial<Record<Provider, string>>;
     efforts?: Partial<Record<Provider, EffortLevel>>;
+    permissionMode?: DefaultMode;
   };
   claudePath?: string;
   idleMinutes?: number;
@@ -190,6 +199,14 @@ export type RunnerJson = {
   // ~/.claude.json; url "" or enabled: false turns the panel's polling off.
   connectors?: { url?: string; enabled?: boolean; headersHelper?: string };
 };
+
+// What defaults.permissionMode may be. Not Plan first: that waits for Mike
+// to approve a plan, so a thread nobody's watching (a schedule, one from
+// the phone) would only sit there.
+export type DefaultMode = Exclude<PermissionMode, 'plan'>;
+export function defaultModeOf(v: unknown): DefaultMode | undefined {
+  return v === 'full' || v === 'ask' || v === 'auto' ? v : undefined;
+}
 
 export function defaultHome(): string {
   return path.join(os.homedir(), 'Library', 'Application Support', 'Threadbear');
@@ -265,6 +282,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       model: nonEmpty(json.defaults?.model),
       ...(models ? { models } : {}),
       ...(efforts ? { efforts } : {}),
+      ...((m) => (m ? { permissionMode: m } : {}))(defaultModeOf(json.defaults?.permissionMode)),
     },
     claudeMainDir: expandHome(env.THREADBEAR_CLAUDE_MAIN_DIR || '~/.claude'),
     claudeMainJson: expandHome(env.THREADBEAR_CLAUDE_MAIN_JSON || '~/.claude.json'),
@@ -395,6 +413,7 @@ function cliUpdatesConfig(raw: Partial<CliUpdatesConfig> | undefined, envValue: 
     checkMinutes: count(raw?.checkMinutes, DEFAULT_CLI_UPDATES.checkMinutes, 1),
     // Fewer than 2 would leave nothing for "Go back".
     keepCodexVersions: count(raw?.keepCodexVersions, DEFAULT_CLI_UPDATES.keepCodexVersions, 2),
+    extra: extraUpdatesFrom(raw?.extra, envValue),
   };
 }
 

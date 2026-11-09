@@ -179,9 +179,11 @@ Hetzner cloud server with 8 GB. Do this as an ordinary user with sudo, not root.
    folder to the same place here (`~/Library/Application Support/Threadbear`;
    the folders keep their macOS names on Linux, so every path in these docs
    is the same) with `scp`, never by printing it, and `chmod 600` it. Then
-   write `runner.json` there: `port` 8797, and `sync` with `url` (the Mac's
+   write `runner.json` there: `port` 8797, `sync` with `url` (the Mac's
    `sync.url`), `name` (what the sidebar calls this machine) and `rpcUrl`
-   (`wss://<tailnet name>:8798/rpc`).
+   (`wss://<tailnet name>:8798/rpc`), and `defaults` with `permissionMode`
+   `"auto"`, as setup gives a new Mac (threads that name no mode start on
+   Auto).
 7. **Install:** `runner/scripts/install-runner.sh`. On Linux it writes a
    systemd user service, `~/.config/systemd/user/com.mikerosoft.threadbear.runner.service`,
    in place of the LaunchAgent. Turn on lingering once, or it stops when

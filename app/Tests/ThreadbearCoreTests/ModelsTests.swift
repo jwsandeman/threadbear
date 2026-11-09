@@ -246,6 +246,23 @@ final class ModelsTests: XCTestCase {
         XCTAssertNil(try JSONDecoder().decode(ThreadSummary.self, from: Data(#"{"id":"x","contextWindow":"big"}"#.utf8)).contextWindow)
     }
 
+    /// The runner's default mode for new threads: by its name, with Plan
+    /// first and a mode this app doesn't know as none (Full access), never
+    /// as Full access said outright.
+    func testHelloDefaultPermissionMode() throws {
+        func mode(_ raw: String) throws -> PermissionMode? {
+            let json = #"{"cwd":"/w","accountId":"claude-3","permissionMode":\#(raw)}"#
+            return try JSONDecoder().decode(RunnerDefaults.self, from: Data(json.utf8)).permissionMode
+        }
+        XCTAssertEqual(try mode(#""auto""#), .auto)
+        XCTAssertEqual(try mode(#""ask""#), .ask)
+        XCTAssertEqual(try mode(#""full""#), .full)
+        XCTAssertNil(try mode(#""plan""#))
+        XCTAssertNil(try mode(#""yolo""#))
+        XCTAssertNil(try mode("7"))
+        XCTAssertNil(try JSONDecoder().decode(RunnerDefaults.self, from: Data(#"{"cwd":"/w","accountId":"a"}"#.utf8)).permissionMode)
+    }
+
     func testHelloWithPerProviderDefaultsAndCLIs() throws {
         let json = """
         {"runnerVersion":"0.2.0+r9","protocol":1,"accounts":[{"id":"claude-3"},{"id":"codex-main","provider":"codex"}],

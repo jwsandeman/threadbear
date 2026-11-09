@@ -161,6 +161,9 @@ export type RunnerDefaults = {
   model?: string;
   models?: Partial<Record<Provider, string>>;
   efforts?: Partial<Record<Provider, EffortLevel>>;
+  // The mode a threads.create with none starts on (runner.json's
+  // defaults.permissionMode). Absent: full.
+  permissionMode?: Exclude<PermissionMode, 'plan'>;
 };
 
 export type ThreadStatus = 'idle' | 'starting' | 'running' | 'waiting' | 'error' | 'stopped';
@@ -256,6 +259,9 @@ export type ThreadSummary = {
   // (docs/protocol.md, "Sharing"). Absent until it's first shared; "off"
   // keeps the link for when it's shared again.
   share?: ThreadShare;
+  // Moving to another runner (docs/protocol.md, "Moving a thread to another
+  // runner"): while it goes, and for a minute after it fails, with why.
+  moving?: { moveId: string; to: string; toName: string; state: string; note?: string };
   sample?: true; // one of the tour's sample threads (threads.samples): made up, never sent to
   // What's still open on the done card of its last turn (experiment
   // looseEnds; docs/protocol.md, "Loose ends"): seq is that card's
@@ -783,7 +789,7 @@ export type EventBody =
       text: string;
       truncated: boolean;
       durationMs: number;
-      trigger?: HookTrigger | 'worktree.setup'; // set when a hook or a new worktree's setup ran it, absent for a chip or tb run
+      trigger?: HookTrigger | 'worktree.setup' | 'worktree.teardown'; // set when a hook, a new worktree's setup or an archived one's teardown ran it, absent for a chip or tb run
     }
   // Mike edited the message at fromSeq (docs/protocol.md, "Editing a
   // message"): fromSeq..toSeq are gone from the conversation. Outside any turn.

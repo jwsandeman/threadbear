@@ -206,7 +206,8 @@ export const newThreadsPart = {
       accountId,
       ...(poolId ? { poolId } : {}),
       provider: account.provider,
-      permissionMode: params.permissionMode ?? 'full',
+      // None named: runner.json's default (a new install's is auto), else full.
+      permissionMode: params.permissionMode ?? this.cfg.defaults.permissionMode ?? 'full',
       ...(sandboxed ? { confined: true as const } : {}),
       status: 'idle',
       createdAt: now,

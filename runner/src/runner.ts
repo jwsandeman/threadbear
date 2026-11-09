@@ -131,6 +131,8 @@ import { worktreesPart, type WorktreesPart } from './runner/worktrees.ts';
 import { networkPart, type NetworkPart } from './runner/network.ts';
 import { poolsPart, type PoolsPart } from './runner/pools.ts';
 import { handoversPart, type HandoversPart } from './runner/handovers.ts';
+import { movesPart, type MovesPart } from './runner/moves.ts';
+import type { ThreadMoving } from './moves.ts';
 import { stoppedWorkPart, type StoppedWorkPart } from './runner/stopped-work.ts';
 import { projectsHostPart, type ProjectsHostPart } from './runner/projects-host.ts';
 import { approvalsPart, settleDeclined, type ApprovalsPart, type SecretAnswer } from './runner/approvals.ts';
@@ -345,6 +347,8 @@ export type Turn = {
 };
 
 type Runtime = {
+  // On its way to another runner (runner/moves.ts): no turn starts.
+  moving?: ThreadMoving;
   session?: AgentSession;
   generation: number;
   closing?: Promise<void>;
@@ -410,6 +414,12 @@ type Runtime = {
   taskEndedInTurn?: boolean;
   activeAt: number; // last turn start or end, for picking which CLI to release
   approvals: Map<string, PendingApproval>;
+  // Calls the card reviewer is deciding on (runner/card-review.ts), which
+  // have no card yet: Stop, the turn ending or Mike writing settles them as
+  // it would a card. `main`: the agent's own call, not a subagent's.
+  // `stale`: a subagent's, which Mike wrote during: its verdict was made
+  // without his message, so it goes to him as a card.
+  reviews?: Map<string, { main: boolean; cancel: (a: ToolApprovalAnswer) => void; stale?: boolean }>;
   idleTimer?: TimerHandle;
   releaseWhenIdle: boolean;
   inProgress: Map<string, InProgressItem>;
@@ -596,7 +606,7 @@ export const UNTIL_RESTART = '9999-12-31T00:00:00.000Z';
 export const NO_WAKE_TIME = UNTIL_RESTART;
 
 // Parts of the Runner that live in runner/ (see each file's top).
-export interface Runner extends LooseEndsPart, LabReviewPart, NewThreadsPart, HibernationPart, TitlesPart, HighlightsPart, PatchesPart, EditingPart, ClisPart, ReviewsPart, ButtonsPart, ApprovalsPart, ProjectsHostPart, StoppedWorkPart, HandoversPart, PoolsPart, NetworkPart, WorktreesPart, CommandsPart {}
+export interface Runner extends LooseEndsPart, LabReviewPart, NewThreadsPart, HibernationPart, TitlesPart, HighlightsPart, PatchesPart, EditingPart, ClisPart, ReviewsPart, ButtonsPart, ApprovalsPart, ProjectsHostPart, StoppedWorkPart, HandoversPart, PoolsPart, NetworkPart, WorktreesPart, CommandsPart, MovesPart {}
 export class Runner {
   // While main.ts is still starting up: waking a thread for its waits
   // (reconcileWaits) would start a CLI whose tools aren't ready, so they
@@ -645,6 +655,8 @@ export class Runner {
   // as often as the folders are (claudePatchInfo).
   claudeChecks = new Map<string, { at: number; verdict: ClaudeVerdict }>();
   threads = new Map<string, ThreadState>();
+  // Other runners' names by id, for what a move says (main.ts sets it).
+  runnerNames?: (runnerId: string) => string | undefined;
   listeners = new Set<(n: Notification) => void>();
   dirty = new Set<string>();
   flushScheduled = false;
@@ -1196,6 +1208,8 @@ export class Runner {
     if (claudeModel) defaults.model = claudeModel;
     if (this.cfg.defaults.models) defaults.models = { ...this.cfg.defaults.models };
     if (this.cfg.defaults.efforts) defaults.efforts = { ...this.cfg.defaults.efforts };
+    // The app's composer starts a new thread on it.
+    if (this.cfg.defaults.permissionMode) defaults.permissionMode = this.cfg.defaults.permissionMode;
     const out: ReturnType<Runner['hello']> = { runnerVersion: RUNNER_VERSION, protocol: PROTOCOL_VERSION, accounts, pools, defaults };
     const clis = this.cliList();
     if (clis) out.clis = clis;
@@ -1461,6 +1475,14 @@ export class Runner {
         settleDeclined(pending, 'deny', WROTE_INSTEAD);
       }
     }
+    // The same for a call the card reviewer is still deciding on: he may be
+    // taking it back, and the reviewer read the thread before he wrote.
+    if (rt.reviews?.size && fromMike(text, opts)) {
+      for (const r of [...rt.reviews.values()]) {
+        if (r.main) r.cancel({ decision: 'deny', message: WROTE_INSTEAD });
+        else r.stale = true;
+      }
+    }
     // A slash command waits for the turn to end rather than going into it:
     // a CLI runs one only as a message of its own, and the runner's own
     // change settings for the next turn.
@@ -1472,7 +1494,8 @@ export class Runner {
       this.steer(st, msg);
       return rt.turn.turnId;
     }
-    if (rt.turn || rec.queue.length || this.draining || rt.editing) {
+    // Moving to another runner (runner/moves.ts): it waits, and goes with the thread.
+    if (rt.turn || rec.queue.length || this.draining || rt.editing || rt.moving) {
       // Behind a running turn, or behind messages that couldn't start
       // earlier: they go first. On a draining runner a thread with no turn
       // is usually about to move across, and the message goes with it
@@ -1657,7 +1680,7 @@ export class Runner {
       if (rt.turn?.turnId !== msg.turnId) return; // interrupted during setup
     }
     if (!rt.session) {
-      const left = this.leaveRemovedWorktree(st, msg.turnId);
+      const left = this.leaveRemovedWorktree(st, msg.turnId) ?? this.tellTornDown(st, msg.turnId);
       if (left) text = `${left}\n\n${text}`;
     }
     if (!rt.session) {
@@ -2866,7 +2889,12 @@ export class Runner {
     // first, then released, so that can take a moment. Resuming unarchives.
     if (archiving) {
       rt.archivePending = true;
-      if (rec.worktree && !rec.worktree.removedAt) rec.worktree.cleanupOwed = true;
+      if (rec.worktree && !rec.worktree.removedAt) {
+        rec.worktree.cleanupOwed = true;
+        // Each archive tears down again: a thread brought back may have
+        // made its things again since the last one.
+        delete rec.worktree.tornDownAt;
+      }
       this.archiveWhenGone(st);
     }
     rec.updatedAt = this.isoNow();
@@ -2894,6 +2922,7 @@ export class Runner {
       settleDeclined(p, 'expired', 'The thread was deleted.');
     }
     rt.approvals.clear();
+    for (const r of [...(rt.reviews?.values() ?? [])]) r.cancel({ decision: 'expired', message: 'The thread was deleted.' });
     const session = rt.session;
     rt.session = undefined;
     const ended = session?.end({ hard: true }).catch((e: unknown) => this.log.warn('stopping a deleted thread failed', { threadId, error: String(e) }));
@@ -3015,7 +3044,7 @@ export class Runner {
   // Starts the next queued message if nothing is running. Returns true if
   // one started. One that can't be written (disk full) stays at the front.
   kickQueue(st: ThreadState): boolean {
-    if (st.rt.turn || st.rec.queue.length === 0 || this.stopping || st.rt.editing) return false;
+    if (st.rt.turn || st.rec.queue.length === 0 || this.stopping || st.rt.editing || st.rt.moving) return false;
     // A draining runner hands a thread over with its queue rather than
     // start another turn on the old release; the primary starts it. Not if
     // background work is holding the thread here: that can be half an hour
@@ -3276,6 +3305,7 @@ export class Runner {
     if (rec.share) s.share = { access: rec.share.access === 'link' ? 'link' : 'off', slug: rec.share.slug, updatedAt: rec.share.updatedAt };
     // Only for the card it was checked for: a new turn's card waits for its own.
     if (rec.looseEnds && this.looseEndsCard(st) === rec.looseEnds.seq) s.looseEnds = { seq: rec.looseEnds.seq, ends: rec.looseEnds.ends.map((e) => ({ ...e })), at: rec.looseEnds.at };
+    if (rt.moving) s.moving = { ...rt.moving };
     return s;
   }
 
@@ -3482,7 +3512,16 @@ export class Runner {
   // archived has been dealt with, so that gets a new one.
   noticeOnMac(threadId: string | undefined, title: string, text: string): string {
     let st = threadId ? this.threads.get(threadId) : undefined;
-    if (!st || st.rt.deleted || st.rec.archivedAt) st = this.makeThread({ text, title, worktree: false, origin: 'runner', startedBy: { kind: 'runner', label: 'Threadbear' } }).st;
+    if (!st || st.rt.deleted || st.rec.archivedAt) st = this.makeThread({
+      text,
+      title,
+      worktree: false,
+      origin: 'runner',
+      // The runner's own, so not the default for new threads: Mike answering
+      // it runs as it always has.
+      permissionMode: 'full',
+      startedBy: { kind: 'runner', label: 'Threadbear' },
+    }).st;
     st.rec.forceUnread = true;
     st.rec.preview = oneLine(text, LIMITS.previewChars);
     this.emit(st, { type: 'system.note', text });
@@ -3503,7 +3542,7 @@ export class Runner {
 
 // The Runner's other methods live in parts under runner/, one area each;
 // they go onto its prototype here, as the class's own methods would be.
-for (const part of [looseEndsPart, labReviewPart, newThreadsPart, hibernationPart, titlesPart, highlightsPart, patchesPart, editingPart, clisPart, reviewsPart, buttonsPart, approvalsPart, projectsHostPart, stoppedWorkPart, handoversPart, poolsPart, networkPart, worktreesPart, commandsPart]) {
+for (const part of [looseEndsPart, labReviewPart, newThreadsPart, hibernationPart, titlesPart, highlightsPart, patchesPart, editingPart, clisPart, reviewsPart, buttonsPart, approvalsPart, projectsHostPart, stoppedWorkPart, handoversPart, poolsPart, networkPart, worktreesPart, commandsPart, movesPart]) {
   for (const [key, d] of Object.entries(Object.getOwnPropertyDescriptors(part))) {
     Object.defineProperty(Runner.prototype, key, { ...d, enumerable: false });
   }

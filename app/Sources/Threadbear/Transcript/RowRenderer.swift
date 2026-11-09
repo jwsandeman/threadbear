@@ -1732,16 +1732,10 @@ enum RowRenderer {
         ]
         output.append(symbol("checkmark", label: "Done", font: title, attributes: titleAttributes, color: .systemGreen))
         output.append(NSAttributedString(string: " Done", attributes: titleAttributes))
-        // The runner checked and found nothing left (protocol "Loose
-        // ends"): said beside Done, so Archive reads as safe without
-        // asking the agent first (the nightly retro, 6 Nov).
+        // Loose ends (protocol "Loose ends") only show when something's
+        // left. Nothing left used to say "Nothing left open" beside Done;
+        // Mike cut it (9 Nov), as Done on its own already says that.
         let ends = card.isOpen ? card.looseEnds : nil
-        if let ends, !ends.contains(where: { !$0.isBooked }) {
-            let small = Theme.smallFont
-            output.append(NSAttributedString(string: "\u{00A0}\u{00A0}\u{00A0}Nothing left open", attributes: [
-                .font: small, .foregroundColor: NSColor.secondaryLabelColor, .paragraphStyle: lineStyle, .baselineOffset: Theme.baselineOffset(height, font: small),
-            ]))
-        }
         output.append(NSAttributedString(string: "\t", attributes: titleAttributes))
         output.append(NSAttributedString(string: "\u{00A0}\u{00A0}\u{00A0}Archive\u{00A0}\u{00A0}\u{00A0}", attributes: [
             .font: button, .foregroundColor: AskButtonStyle.plain.textColor, .paragraphStyle: lineStyle, .baselineOffset: buttonOffset,

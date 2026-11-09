@@ -41,6 +41,7 @@ extension AppModel {
                 clis = hello.clis
                 clisSupported = hello.clis.isEmpty ? nil : true
                 runnerUpdates = hello.updates
+                experiments = hello.experiments
                 // An older runner sends no pools; the app then works as it
                 // did before them.
                 pools = hello.pools ?? []
@@ -138,7 +139,8 @@ extension AppModel {
                 if case .reviewUpdated(let review) = event.payload { receiveReview(review, threadId: threadId) }
                 if case .buttonUpdated(let button) = event.payload { ReplyButtons.shared.receive(button, threadId: threadId) }
             case .threadDeleted(let threadId):
-                forget(threadId)
+                // A thread that moved away stays, as the other runner's.
+                if !movedAway(threadId) { forget(threadId) }
             case .accountsUpdated(let list):
                 // The runner learned something (its model lists, a
                 // default it saw a turn run on, new usage): replaces
