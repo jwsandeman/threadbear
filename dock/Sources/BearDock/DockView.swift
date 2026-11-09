@@ -474,10 +474,30 @@ struct GroupHeader: View {
                     .contextMenu { PanelMenu(panel: group.selected, tabbed: false) }
                     // Its full width before the empty bar beside it gets any.
                     .layoutPriority(1)
+            } else if single {
+                TabItem(panel: group.selected, selected: true, single: true)
             } else {
-                ForEach(group.panels, id: \.self) { panel in
-                    TabItem(panel: panel, selected: panel == group.selected, single: single)
+                // Full-width tabs must not make the whole group wider than
+                // its split. Keep the panel's buttons outside the scrolling
+                // strip, and keep the selected tab in view when it changes.
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 2) { tabs }
+                    ScrollViewReader { scroller in
+                        ScrollView(.horizontal) {
+                            HStack(spacing: 2) { tabs }
+                        }
+                        .scrollIndicators(.hidden)
+                        .onChange(of: group.selected, initial: true) { _, panel in
+                            scroller.scrollTo(panel)
+                        }
+                        .onScrollGeometryChange(for: TabStripSize.self) {
+                            TabStripSize(viewport: $0.containerSize.width, content: $0.contentSize.width)
+                        } action: { _, _ in
+                            scroller.scrollTo(group.selected, anchor: .trailing)
+                        }
+                    }
                 }
+                .layoutPriority(1)
             }
             BarSpace(panel: group.selected, tabbed: !single)
                 .onGeometryChange(for: CGFloat.self) { $0.frame(in: .named(DockSpace.name)).minX } action: { controller.barSpaceStarts[group.id] = $0 }
@@ -504,6 +524,18 @@ struct GroupHeader: View {
             controller.bars[group.id] = nil
             controller.barSpaceStarts[group.id] = nil
         }
+    }
+
+    private var tabs: some View {
+        ForEach(group.panels, id: \.self) { panel in
+            TabItem(panel: panel, selected: panel == group.selected, single: false)
+                .id(panel)
+        }
+    }
+
+    private struct TabStripSize: Equatable {
+        var viewport: CGFloat
+        var content: CGFloat
     }
 }
 
@@ -735,11 +767,12 @@ private struct TabItem: View {
             RoundedRectangle(cornerRadius: 6)
                 .fill(Color.primary.opacity(selected && !single ? 0.07 : (hovering ? 0.04 : 0)))
         )
-        // Full titles: the empty bar beside them gives way first, then the
-        // other tabs' titles shorten, then the showing one's. Never wider
-        // than the group: a bar that grew past its panel took the content
-        // with it, over the icon rail beside it.
-        .layoutPriority(selected ? 2 : 1)
+        // Full titles: the empty bar beside them gives way first. A panel
+        // on its own still shortens a title (a long file name in the
+        // pane) that wouldn't fit beside its buttons: the bar grew past
+        // the panel and took the content with it, clipped at the edge.
+        .fixedSize(horizontal: !single, vertical: false)
+        .layoutPriority(single ? 1 : 0)
         .contentShape(Rectangle())
         .onHover { hovering = $0 }
         .onTapGesture { controller.select(panel) }

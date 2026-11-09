@@ -576,6 +576,10 @@ panel has a bar along its top with its title, and panels that share a
 space show as tabs in it. To begin with there are three side by side:
 the list, the thread and Highlights.
 
+When the tabs don't fit, scroll sideways along the tab bar to reach the
+others. The selected tab comes into view, and the panel's toolbar buttons
+stay visible without covering the outer icon rails.
+
 To move a panel, press and hold on it for a moment, then drag. That works
 anywhere on the panel: its title, one of its tabs, the empty part of its
 bar or its background. On a title or tab a plain drag works too. A quick drag on the empty part of a
