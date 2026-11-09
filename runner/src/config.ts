@@ -34,10 +34,11 @@ export const DEFAULT_POOL_FOLDERS: Record<string, string[]> = {};
 export type CliUpdatesConfig = {
   claude: CliPolicy;
   codex: CliPolicy;
+  omp: CliPolicy;
   checkMinutes: number;
   keepCodexVersions: number; // Codex copies kept under <home>/tools/codex
 };
-export const DEFAULT_CLI_UPDATES: CliUpdatesConfig = { claude: 'auto', codex: 'auto', checkMinutes: 60, keepCodexVersions: 2 };
+export const DEFAULT_CLI_UPDATES: CliUpdatesConfig = { claude: 'auto', codex: 'auto', omp: 'auto', checkMinutes: 60, keepCodexVersions: 2 };
 
 // Everything that differs between the real install and a test lives here, so
 // tests can point THREADBEAR_HOME and THREADBEAR_PORT somewhere harmless and
@@ -392,6 +393,7 @@ function cliUpdatesConfig(raw: Partial<CliUpdatesConfig> | undefined, envValue: 
   return {
     claude: off ? 'off' : policy(raw?.claude, DEFAULT_CLI_UPDATES.claude),
     codex: off ? 'off' : policy(raw?.codex, DEFAULT_CLI_UPDATES.codex),
+    omp: off ? 'off' : policy(raw?.omp, DEFAULT_CLI_UPDATES.omp),
     checkMinutes: count(raw?.checkMinutes, DEFAULT_CLI_UPDATES.checkMinutes, 1),
     // Fewer than 2 would leave nothing for "Go back".
     keepCodexVersions: count(raw?.keepCodexVersions, DEFAULT_CLI_UPDATES.keepCodexVersions, 2),

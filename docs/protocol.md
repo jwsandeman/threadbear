@@ -148,7 +148,8 @@ type CliStatus = {
   provider: Provider
   path: string          // the binary new sessions start
   managedBy: "threadbear" | "cli" | "none" // Codex: Threadbear's own copies;
-                        // Claude: its own installer; "none": codexPath set by
+                        // Claude, Oh My Pi: their own updaters (`claude
+                        // update`, `omp update`); "none": codexPath set by
                         // hand, never updated
   installedVersion?: string // what new sessions start on
   latestVersion?: string

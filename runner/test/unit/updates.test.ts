@@ -105,7 +105,7 @@ function setup(o: { latest?: Partial<Record<Provider, string>>; env?: NodeJS.Pro
   fs.mkdirSync(path.join(home, 'run'), { recursive: true });
   const claude = fakeClaude(root);
   const npm = fakeNpm(root);
-  const cfg = testConfig(home, { claudePath: claude.claudePath, claudeMainDir: path.join(root, 'claude-main'), cliUpdates: { claude: 'auto', codex: 'auto', checkMinutes: 60, keepCodexVersions: 2 }, ...o.cfg });
+  const cfg = testConfig(home, { claudePath: claude.claudePath, claudeMainDir: path.join(root, 'claude-main'), cliUpdates: { claude: 'auto', codex: 'auto', omp: 'auto', checkMinutes: 60, keepCodexVersions: 2 }, ...o.cfg });
   const latest = { claude: '2.1.311', codex: '0.165.0', ...o.latest };
   const fetched: string[] = [];
   const fetchText = async (url: string) => {
@@ -494,23 +494,104 @@ test('compareVersions orders releases and pre-releases', () => {
 });
 
 
-test('OMP is externally managed and never falls through to a Codex check or install', async () => {
+// R/bin/omp: --version prints omp/<R/omp-version>; `update --check` offers
+// R/omp-latest; `update` installs it, unless R/omp-brew says Homebrew
+// keeps it up to date (exit 0, nothing changes), as the real one does.
+function fakeOmp(root: string): { ompPath: string; calls: () => string[] } {
+  const ompPath = path.join(root, 'bin', 'omp');
+  fs.writeFileSync(path.join(root, 'omp-version'), '18.12.6\n');
+  fs.writeFileSync(path.join(root, 'omp-latest'), '18.18.2\n');
+  script(
+    ompPath,
+    `echo "$*" >> "${root}/omp-calls"
+v=$(cat "${root}/omp-version"); latest=$(cat "${root}/omp-latest")
+case "$1" in
+  --version) echo "omp/$v";;
+  update)
+    [ "$NO_COLOR" = 1 ] || { echo "colours on" >&2; exit 3; }
+    if [ -f "${root}/omp-brew" ]; then echo "omp is installed and kept up to date by brew; update it from brew."; exit 0; fi
+    echo "Current version: $v"
+    if [ "$v" = "$latest" ]; then echo "✔ Already up to date"; exit 0; fi
+    echo "New version available: $latest"
+    [ "$2" = "--check" ] && exit 0
+    echo "$latest" > "${root}/omp-version"
+    echo "Restart omp to use the new version";;
+esac`,
+  );
+  return { ompPath, calls: () => (fs.existsSync(path.join(root, 'omp-calls')) ? fs.readFileSync(path.join(root, 'omp-calls'), 'utf8').split('\n').filter(Boolean) : []) };
+}
+
+function ompSetup(policy: 'auto' | 'notify' = 'notify') {
   const t = setup();
-  assert.equal(t.u.list().some(c => c.provider === 'omp'), false);
+  const omp = fakeOmp(t.root);
   fs.writeFileSync(path.join(t.home, 'runner.json'), JSON.stringify({ experiments: { ohMyPi: true } }));
-  t.cfg.ompPath = path.join(t.root, 'bin', 'omp');
-  script(t.cfg.ompPath, 'exit 0');
-  const status = of(t.u.list(), 'omp');
-  assert.equal(status.path, t.cfg.ompPath);
-  assert.equal(status.managedBy, 'none');
-  assert.equal(status.policy, 'off');
-  t.u.setPolicy('omp', 'auto');
+  t.cfg.ompPath = omp.ompPath;
+  t.cfg.cliUpdates.omp = policy;
+  return { ...t, omp };
+}
+
+test('omp: listed only with its experiment on; a check finds it behind with omp update --check', async () => {
+  const off = setup();
+  assert.equal(off.u.list().some((c) => c.provider === 'omp'), false);
+  off.u.check();
+  await off.u.settled();
+
+  const t = ompSetup();
   t.u.check('omp');
-  t.u.update('omp', { force: true });
   await t.u.settled();
-  assert.deepEqual(t.fetched, []);
+  const s = of(t.u.list(), 'omp');
+  assert.deepEqual([s.path, s.managedBy, s.policy, s.installedVersion, s.latestVersion, s.status], [t.omp.ompPath, 'cli', 'notify', '18.12.6', '18.18.2', 'behind']);
+  assert.ok(t.omp.calls().includes('update --check'));
+  assert.ok(!t.omp.calls().includes('update'), 'notify only reports');
+  assert.deepEqual(t.fetched.filter((u) => u.includes('codex')), [], 'never falls through to a Codex lookup');
+});
+
+test('omp: update() runs omp update, then releases idle Oh My Pi sessions', async () => {
+  const t = ompSetup();
+  t.u.check('omp');
+  await t.u.settled();
+  assert.equal(of(t.u.update('omp'), 'omp').update?.state, 'running');
+  await t.u.settled();
+  const s = of(t.u.list(), 'omp');
+  assert.deepEqual([s.installedVersion, s.status, s.update?.state], ['18.18.2', 'current', 'succeeded']);
+  assert.deepEqual(t.hooks.released, [['omp', '18.18.2']]);
   assert.deepEqual(t.npm.installs(), []);
   assert.equal(t.claude.calls(), 0);
-  assert.equal(of(t.u.list(), 'omp').policy, 'off');
-  assert.match(of(t.u.list(), 'omp').update?.message ?? '', /installed separately/);
+  assert.ok(new UpdateHistory(t.home).entries().some((e) => e.provider === 'omp' && e.action === 'update' && e.ok && e.version === '18.18.2'));
+  // Up to date now: the next check says so.
+  t.u.check('omp');
+  await t.u.settled();
+  assert.equal(of(t.u.list(), 'omp').latestVersion, '18.18.2');
+});
+
+test('omp: with policy auto, the scheduled check installs by itself', async () => {
+  const t = ompSetup('auto');
+  t.u.start();
+  t.clock.advance(60_000);
+  await t.u.settled();
+  t.u.stop();
+  assert.equal(of(t.u.list(), 'omp').installedVersion, '18.18.2');
+});
+
+test('omp: an install Homebrew keeps up to date fails with its own words and changes nothing', async () => {
+  const t = ompSetup();
+  fs.writeFileSync(path.join(t.root, 'omp-brew'), '');
+  t.u.update('omp');
+  await t.u.settled();
+  const s = of(t.u.list(), 'omp');
+  assert.equal(s.installedVersion, '18.12.6');
+  assert.equal(s.update?.state, 'failed');
+  assert.match(s.update?.message ?? '', /kept up to date by brew/);
+  assert.deepEqual(t.hooks.released, []);
+});
+
+test('omp: the policy chosen in the app persists; THREADBEAR_CLI_UPDATES=off wins', async () => {
+  const t = ompSetup('auto');
+  t.u.setPolicy('omp', 'off');
+  assert.equal(of(t.make().list(), 'omp').policy, 'off', 'kept in updates.json');
+  const off = setup({ env: { PATH: '/usr/bin:/bin', THREADBEAR_CLI_UPDATES: 'off' } });
+  fs.writeFileSync(path.join(off.home, 'runner.json'), JSON.stringify({ experiments: { ohMyPi: true } }));
+  off.cfg.ompPath = fakeOmp(off.root).ompPath;
+  off.u.setPolicy('omp', 'auto');
+  assert.equal(of(off.u.list(), 'omp').policy, 'off');
 });
