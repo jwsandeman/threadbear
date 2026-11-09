@@ -202,6 +202,7 @@ private struct Ghost: View {
             }
             .padding(.horizontal, 14)
             .frame(height: options.headerHeight)
+            .background(options.headerBackground ?? options.panelBackground)
             .overlay(alignment: .bottom) { Rectangle().fill(Color.primary.opacity(0.07)).frame(height: 1) }
             content.view(panel)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)

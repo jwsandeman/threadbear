@@ -53,6 +53,8 @@ public struct DockOptions {
     public var titleSize: CGFloat = 12
     /// The fill behind panels and their title bars; content can supply its own.
     public var panelBackground = Color(nsColor: .windowBackgroundColor)
+    /// A separate title/tab bar fill. Nil follows the panel background.
+    public var headerBackground: Color? = nil
     /// In a window without a title bar: room left at the start of the
     /// top-left panel's bar for the traffic lights. 0 with a title bar.
     public var trafficLights: CGFloat = 0
@@ -492,6 +494,7 @@ struct GroupHeader: View {
                 WindowSpace().frame(width: leading)
             }
         }
+        .background(options.headerBackground ?? options.panelBackground)
         .overlay(alignment: .bottom) {
             Rectangle().fill(Color.primary.opacity(0.07)).frame(height: 1)
         }
@@ -895,6 +898,7 @@ private struct CornerBar: View {
             Color.clear.frame(width: 12)
         }
         .frame(height: options.headerHeight)
+        .background(options.headerBackground ?? options.panelBackground)
     }
 }
 

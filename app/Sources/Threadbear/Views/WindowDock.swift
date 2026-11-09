@@ -141,7 +141,7 @@ enum WindowDock {
         let owner = app.selectedThread.flatMap { $0.panels.contains { $0.id == panel } ? $0 : nil }
             ?? app.threadOwning(panel: panel)
         guard let owner, let hit = owner.panels.first(where: { $0.id == panel }) else { return nil }
-        return AnyView(PanelOriginBadge(panel: hit, thread: owner, app: app, side: 10))
+        return AnyView(PanelOriginBadge(panel: hit, thread: owner, app: app, side: 10, background: Theme.blackSurface))
     }
 
     @MainActor
@@ -301,6 +301,7 @@ struct RootView: View {
         o.headerHeight = PaneHeader<EmptyView, EmptyView>.height
         o.titleSize = TypeScale.label
         o.panelBackground = Color(nsColor: Theme.sidebarFill)
+        o.headerBackground = Color(nsColor: Theme.blackSurface)
         // The traffic lights take 78 points from the left edge; the
         // activity bar under them has the first of those.
         o.trafficLights = max(0, 78 - ActivityBar.width)
@@ -359,13 +360,15 @@ struct RootView: View {
                 switch panel {
                 case WindowDock.threads: AnyView(SidebarView()
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .background(Color(nsColor: Theme.canvas))
+                    .background(Color(nsColor: Theme.blackSurface))
                     .tourTarget(.threads, withBar: true))
                 case WindowDock.usage: AnyView(UsagePanel().tourTarget(.panel("usage"), withBar: true))
                 case WindowDock.updates: AnyView(UpdatesPanel().tourTarget(.panel("updates"), withBar: true))
                 case WindowDock.setup: AnyView(SetupPanel().tourTarget(.setupPanel, withBar: true))
                 case WindowDock.connectors: AnyView(ConnectorsPanel().tourTarget(.panel("connectors"), withBar: true))
-                case WindowDock.runners: AnyView(RunnersPanel())
+                case WindowDock.runners: AnyView(RunnersPanel()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(Color(nsColor: Theme.blackSurface)))
                 case WindowDock.main: AnyView(DetailView()
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .background(Color(nsColor: Theme.canvas))
@@ -376,7 +379,7 @@ struct RootView: View {
                         .background(Color(nsColor: Theme.canvas)))
                 case PaneSection.highlightsId: AnyView(DockPane(section: .highlights)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .background(Color(nsColor: Theme.canvas))
+                    .background(Color(nsColor: Theme.blackSurface))
                     .tourTarget(.highlights, withBar: true))
                 default: AnyView(DockPane(section: PaneSection(id: panel)))
                 }

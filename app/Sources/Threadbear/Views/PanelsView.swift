@@ -298,12 +298,14 @@ struct PanelOriginBadge: View {
     var projectTitle = ""
     /// The circle's width before zoom: 13 on the rail, smaller on a tab.
     var side: CGFloat = 13
+    let background: NSColor
 
-    init(panel: Panel, thread: ThreadSummary, app: AppModel, side: CGFloat = 13) {
+    init(panel: Panel, thread: ThreadSummary, app: AppModel, side: CGFloat = 13, background: NSColor = Theme.sidebarFill) {
         origin = PanelOrigin.of(panel, in: thread)
         if case .project(let id) = origin { project = app.project(id) } else { project = nil }
         projectTitle = Self.projectTitle(origin, thread: thread, app: app) ?? ""
         self.side = side
+        self.background = background
     }
 
     static func projectTitle(_ origin: PanelOrigin, thread: ThreadSummary, app: AppModel) -> String? {
@@ -322,7 +324,7 @@ struct PanelOriginBadge: View {
             }
         }
         .frame(width: zoomed(side), height: zoomed(side))
-        .background(Color(nsColor: Theme.sidebarFill), in: Circle())
+        .background(Color(nsColor: background), in: Circle())
         .overlay(Circle().strokeBorder(.separator, lineWidth: 0.5))
         .offset(x: zoomed(side * 2 / 13), y: zoomed(side / 13))
         .allowsHitTesting(false)

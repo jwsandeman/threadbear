@@ -74,6 +74,10 @@ something else).
 The feel lives in a few constants at the top of `DockController`
 (`edgeBand`, `windowBand`, `ghostWidth`, the springs).
 
+`DockOptions.panelBackground` sets the base fill. Set `headerBackground`
+to give title and tab bars a different fill; nil follows the panel fill.
+It applies to docked bars, floating panels and the dragged panel's header.
+
 For screenshots without touching the mouse, `BEARDOCK_FREEZE` holds a drag
 of Highlights mid-air: `edge`, `compass`, `compass-left`, `window`, or any of
 those with `+drop` to let go.

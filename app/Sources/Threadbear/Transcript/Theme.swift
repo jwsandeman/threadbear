@@ -214,7 +214,7 @@ enum Theme {
     static let switchThumb = dynamic(dark: NSColor(white: 1, alpha: 0.16), light: NSColor(white: 1, alpha: 1))
     /// codeBackground over the transcript, as one solid colour, for a fade
     /// that has to end in it (RichPalette's bg is the same).
-    static let codeBackgroundOpaque = dynamic(dark: NSColor(srgbRed: 0x1b / 255, green: 0x1c / 255, blue: 0x1f / 255, alpha: 1),
+    static let codeBackgroundOpaque = dynamic(dark: NSColor(srgbRed: 0x0b / 255, green: 0x0b / 255, blue: 0x0b / 255, alpha: 1),
                                               light: NSColor(srgbRed: 0xf7 / 255, green: 0xf7 / 255, blue: 0xf7 / 255, alpha: 1))
     static let hairline = dynamic(dark: NSColor(white: 1, alpha: 0.1), light: NSColor(white: 0, alpha: 0.1))
 
@@ -235,10 +235,10 @@ enum Theme {
     /// where thin grey glyphs on white read lighter than their colour.
     static let quietText = dynamic(dark: .secondaryLabelColor, light: NSColor(white: 0, alpha: 0.6))
 
-    /// The user's bubble: a touch of the accent colour over a faint fill.
+    /// The user's bubble: cyan in dark mode, the Mac's accent in light.
     static let bubbleBackground = NSColor(name: nil) { appearance in
         let dark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-        let accent = NSColor.controlAccentColor.usingColorSpace(.sRGB) ?? .systemBlue
+        let accent = (dark ? Theme.cyan : NSColor.controlAccentColor).usingColorSpace(.sRGB) ?? .systemBlue
         let (base, baseAlpha, accentAlpha): (CGFloat, CGFloat, CGFloat) = dark ? (1, 0.06, 0.09) : (0, 0.035, 0.09)
         // `accent` at `accentAlpha` composited over `base` grey at `baseAlpha`.
         let alpha = accentAlpha + baseAlpha * (1 - accentAlpha)
@@ -291,8 +291,8 @@ enum Theme {
                                    light: NSColor(srgbRed: 0.1, green: 0.55, blue: 0.22, alpha: 1))
     static let removedText = dynamic(dark: NSColor(srgbRed: 1, green: 0.45, blue: 0.45, alpha: 1),
                                      light: NSColor(srgbRed: 0.8, green: 0.15, blue: 0.15, alpha: 1))
-    // Jason's dark look: Ink `#101114` behind conversations, Threads and
-    // Highlights; rails and toolbars lifted toward Stone `#8E8B84`. From his
+    // Jason's dark look: black conversations, headers, Threads, Runners
+    // and Highlights, with lighter Stone rails. From his
     // Superset "Neon Noir" theme its cyan as the accent and its yellow for
     // Needs you and anything running. Light mode keeps the system's colours.
     private static func srgb(_ hex: UInt32) -> NSColor {
@@ -308,9 +308,10 @@ enum Theme {
     static let onAccent = dynamic(dark: srgb(0x0D0F14), light: .white)
     /// A thread's spinner and Working label, and the busy dots.
     static let running = dynamic(dark: yellow, light: .controlAccentColor)
-    /// Ink conversation canvas, with lighter Stone chrome around it.
-    static let canvas = dynamic(dark: srgb(0x101114), light: .windowBackgroundColor)
+    /// Black conversation canvas and panel surfaces, with lighter Stone rails.
+    static let canvas = dynamic(dark: srgb(0x000000), light: .windowBackgroundColor)
     static let sidebarFill = dynamic(dark: srgb(0x1D1D1F), light: .windowBackgroundColor)
+    static let blackSurface = dynamic(dark: srgb(0x000000), light: .windowBackgroundColor)
 
     /// "Needs you" and "Failed" in the sidebar. System orange and red on
     /// the light sidebar measured about 2:1; these darker light-mode shades

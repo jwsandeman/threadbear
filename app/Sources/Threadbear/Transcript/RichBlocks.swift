@@ -77,7 +77,7 @@ final class RichBlocks: @unchecked Sendable {
     var generation: Int { inner.withLock { $0.generation } }
 
     /// Bump when the palette or renderer changes, for both pictures and pane pages.
-    static let cacheVersion = 2
+    static let cacheVersion = 3
     static func key(_ block: RichBlock, zoom: Int = TypeScale.percent) -> String { "\(block.id)-\(zoom)-v\(cacheVersion)" }
 
     /// The block's state, starting it drawing if it's new.
