@@ -358,10 +358,13 @@ public enum CliText {
         }
     }
 
-    /// Who keeps it up to date, when that isn't the usual: a path set by
-    /// hand is never updated.
+    /// Who keeps it up to date, when that isn't the usual: a Codex path set
+    /// by hand is never updated, and a runner from before 9 Nov never
+    /// updates Oh My Pi.
     public static func managedLine(_ cli: CliStatus) -> String? {
-        cli.managedBy == "none" ? "Set by hand in runner.json, so Threadbear leaves it alone" : nil
+        guard cli.managedBy == "none" else { return nil }
+        if cli.provider == "omp" { return "This runner doesn't update Oh My Pi yet. Update it with omp update." }
+        return "Set by hand in runner.json, so Threadbear leaves it alone"
     }
 
     /// The update button's title, or nil when there's nothing to install.

@@ -233,6 +233,14 @@ final class CodexTranscriptTests: XCTestCase {
         XCTAssertEqual(CliText.policies.map(CliText.policyTitle), ["Automatic", "Ask me", "Off"])
     }
 
+    /// Only a Codex path set by hand blames runner.json; an older runner's
+    /// Oh My Pi says how to update it, and one it updates says nothing.
+    func testManagedLineNamesWhoUpdates() {
+        XCTAssertEqual(CliText.managedLine(CliStatus(provider: "codex", managedBy: "none", status: "current")), "Set by hand in runner.json, so Threadbear leaves it alone")
+        XCTAssertEqual(CliText.managedLine(CliStatus(provider: "omp", managedBy: "none", status: "unknown")), "This runner doesn't update Oh My Pi yet. Update it with omp update.")
+        XCTAssertNil(CliText.managedLine(CliStatus(provider: "omp", managedBy: "cli", installedVersion: "18.18.2", status: "current")))
+    }
+
     /// After going back from a version the runner holds it, with its own
     /// reason; "Go back" to it would just be "Update anyway" again.
     func testAVersionWentBackFromIsHeldWithItsReason() {

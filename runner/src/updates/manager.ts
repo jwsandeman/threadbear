@@ -1,11 +1,12 @@
-// Keeps the Claude and Codex CLIs up to date ("E. CLI updates" in
+// Keeps the Claude, Codex and Oh My Pi CLIs up to date ("E. CLI updates" in
 // docs/step4-plan.md). It checks an hour apart, installs by each provider's
 // policy, never while a runner restart is pending, and reports everything
 // through onChange so no RPC waits on an install.
 //
 // Updating is safe while turns run. Claude's installer keeps each version
 // in its own file. Codex runs from Threadbear's own versioned copies
-// (codex.ts), which nothing else touches. After an update the runner
+// (codex.ts), which nothing else touches. Oh My Pi renames its new binary
+// into place (omp.ts). After an update the runner
 // releases idle sessions on the old version (hooks.releaseIdle), and the
 // rest move as their turns end; every new process starts the new version.
 import fs from 'node:fs';
@@ -17,16 +18,19 @@ import { paths } from '../config.ts';
 import type { CliPolicy, CliStatus, Provider } from '../protocol.ts';
 import { experimentOn } from '../experiments.ts';
 import { claudeChannel, claudeInstalledVersion, claudeLatestVersion, runClaudeUpdate } from './claude.ts';
+import { ompInstalledVersion, ompLatestVersion, runOmpUpdate } from './omp.ts';
 import { CodexCopies, NPM_LATEST, codexPackageVersion, type CodexResolver, type SurfaceCheck } from './codex.ts';
 import { VERSION_RE, compareVersions, defaultExec, defaultFetchText, type Exec, type FetchText } from './exec.ts';
 import { UpdateHistory, type ProviderState, type UpdatesFile } from './history.ts';
 
 const MANAGED_PROVIDERS = ['claude', 'codex'] as const;
+const ALL_PROVIDERS = ['claude', 'codex', 'omp'] as const;
 
 export const FIRST_CHECK_MS = 60_000;
 export const CHECK_JITTER_MS = 5 * 60_000;
 export const LOOKUP_TIMEOUT_MS = 5_000;
 export const RUN_TIMEOUT_MS = 5 * 60_000;
+export const OMP_CHECK_TIMEOUT_MS = 30_000;
 export const CLAUDE_LOCK_RETRY_MS = 10 * 60_000;
 export const CLAUDE_LOCK_TRIES = 3;
 export const RESTART_RETRY_MS = 60_000;
@@ -103,7 +107,7 @@ export class CliUpdates {
     });
     // A previous update that was running when the runner stopped didn't
     // finish; say so rather than show it running forever.
-    for (const p of MANAGED_PROVIDERS) {
+    for (const p of ALL_PROVIDERS) {
       const u = this.st[p]?.update;
       if (u && (u.state === 'running' || u.state === 'waiting')) this.st[p]!.update = { ...u, state: 'failed', message: 'The runner stopped before this finished.' };
     }
@@ -139,13 +143,16 @@ export class CliUpdates {
   }
 
   list(): CliStatus[] {
-    const providers: Provider[] = [...MANAGED_PROVIDERS];
-    if (experimentOn(this.cfg.home, 'ohMyPi')) providers.push('omp');
-    return providers.map((p) => this.status(p));
+    return this.providers().map((p) => this.status(p));
+  }
+
+  // Oh My Pi only while its experiment is on.
+  private providers(): Provider[] {
+    return experimentOn(this.cfg.home, 'ohMyPi') ? [...ALL_PROVIDERS] : [...MANAGED_PROVIDERS];
   }
 
   check(p?: Provider): CliStatus[] {
-    for (const prov of p ? [p] : MANAGED_PROVIDERS) this.track(prov, this.runCheck(prov, true));
+    for (const prov of p ? [p] : this.providers()) this.track(prov, this.runCheck(prov, true));
     return this.list();
   }
 
@@ -155,7 +162,6 @@ export class CliUpdates {
   }
 
   setPolicy(p: Provider, policy: CliPolicy): CliStatus[] {
-    if (p === 'omp') return this.list();
     this.ps(p).policy = policy;
     this.save();
     this.changed();
@@ -200,18 +206,12 @@ export class CliUpdates {
   // ---- status
 
   private status(p: Provider): CliStatus {
-    if (p === 'omp') return {
-      provider: p, path: this.cfg.ompPath ?? 'omp', managedBy: 'none',
-      status: this.cfg.ompPath && fs.existsSync(this.cfg.ompPath) ? 'unknown' : 'missing',
-      policy: 'off', inUse: this.d.hooks.versionsInUse(p),
-      ...(this.st.omp?.update ? { update: this.st.omp.update } : {}),
-    };
     const s = this.st[p] ?? {};
     const installedVersion = this.installed[p];
     const latestVersion = s.latestVersion;
     const codexState = p === 'codex' && this.managedCodex() ? this.copies.state() : undefined;
     const hold = codexState?.hold;
-    const binary = p === 'claude' ? this.cfg.claudePath : this.codexBinary();
+    const binary = p === 'claude' ? this.cfg.claudePath : p === 'omp' ? this.ompPath() : this.codexBinary();
     let status: CliStatus['status'];
     if (!installedVersion) status = fs.existsSync(binary) ? 'unknown' : 'missing';
     else if (hold && latestVersion === hold.version && compareVersions(installedVersion, hold.version) < 0) status = 'held';
@@ -220,7 +220,7 @@ export class CliUpdates {
     const out: CliStatus = {
       provider: p,
       path: binary,
-      managedBy: p === 'claude' ? 'cli' : this.cfg.codexPath ? 'none' : 'threadbear',
+      managedBy: p === 'codex' ? (this.cfg.codexPath ? 'none' : 'threadbear') : 'cli',
       status,
       policy: this.policy(p),
       inUse: this.d.hooks.versionsInUse(p),
@@ -238,17 +238,26 @@ export class CliUpdates {
   // "off" can't be turned on from the app; a Codex binary set by hand is
   // never updated.
   private policy(p: Provider): CliPolicy {
-    if (p === 'omp' || this.configOff(p)) return 'off';
+    if (this.configOff(p)) return 'off';
     if (p === 'codex' && this.cfg.codexPath) return 'off';
     return this.st[p]?.policy ?? this.cfg.cliUpdates[p];
   }
 
   private configOff(p: Provider): boolean {
-    return p === 'omp' || this.env.THREADBEAR_CLI_UPDATES === 'off' || this.cfg.cliUpdates[p] === 'off';
+    return this.env.THREADBEAR_CLI_UPDATES === 'off' || this.cfg.cliUpdates[p] === 'off';
   }
 
   private managedCodex(): boolean {
     return !this.cfg.codexPath;
+  }
+
+  private ompPath(): string {
+    return this.cfg.ompPath ?? 'omp';
+  }
+
+  // omp prints colours and spinners to a terminal; none here.
+  private ompEnv(): NodeJS.ProcessEnv {
+    return { ...this.env, NO_COLOR: '1', FORCE_COLOR: '0', CI: '1' };
   }
 
   private fallbackCodex(): string {
@@ -259,8 +268,9 @@ export class CliUpdates {
     const claude = await claudeInstalledVersion(this.cfg.claudePath, this.exec);
     const bin = this.codexBinary();
     const codex = bin === this.copies.currentLink ? this.copies.currentVersion() : codexPackageVersion(bin);
-    const changed = claude !== this.installed.claude || codex !== this.installed.codex;
-    this.installed = { claude, codex };
+    const omp = experimentOn(this.cfg.home, 'ohMyPi') ? await ompInstalledVersion(this.ompPath(), this.exec) : undefined;
+    const changed = claude !== this.installed.claude || codex !== this.installed.codex || omp !== this.installed.omp;
+    this.installed = { claude, codex, ...(omp ? { omp } : {}) };
     if (claude) this.lastClaude ??= claude;
     if (changed) this.changed();
   }
@@ -275,7 +285,7 @@ export class CliUpdates {
       this.d.clock.setTimeout(() => {
         this.timers.delete(name);
         if (name === 'check') {
-          for (const p of MANAGED_PROVIDERS) this.track(p, this.runCheck(p, false));
+          for (const p of this.providers()) this.track(p, this.runCheck(p, false));
           const jitter = Math.floor((this.d.random ?? Math.random)() * CHECK_JITTER_MS);
           this.schedule('check', this.cfg.cliUpdates.checkMinutes * 60_000 + jitter);
         } else if (name.startsWith('retry:')) {
@@ -289,7 +299,7 @@ export class CliUpdates {
   }
 
   private async runCheck(p: Provider, asked: boolean): Promise<void> {
-    if (p === 'omp') return;
+    if (p === 'omp' && !experimentOn(this.cfg.home, 'ohMyPi')) return;
     await this.refreshInstalled();
     const policy = this.policy(p);
     if (policy === 'off' && !asked) return;
@@ -298,7 +308,9 @@ export class CliUpdates {
       const latest =
         p === 'claude'
           ? await claudeLatestVersion(this.fetchText, claudeChannel(this.cfg.claudeMainDir), LOOKUP_TIMEOUT_MS)
-          : (JSON.parse(await this.fetchText(NPM_LATEST, LOOKUP_TIMEOUT_MS)) as { version?: unknown }).version;
+          : p === 'omp'
+            ? await ompLatestVersion({ ompPath: this.ompPath(), exec: this.exec, env: this.ompEnv(), cwd: paths.run(this.cfg.home), timeoutMs: OMP_CHECK_TIMEOUT_MS, installed: this.installed.omp })
+            : (JSON.parse(await this.fetchText(NPM_LATEST, LOOKUP_TIMEOUT_MS)) as { version?: unknown }).version;
       const s = this.ps(p);
       if (typeof latest === 'string' && VERSION_RE.test(latest)) {
         if (latest !== s.latestVersion) this.history.append({ at: this.iso(), provider: p, action: 'check', ok: true, version: latest });
@@ -327,10 +339,6 @@ export class CliUpdates {
   // ---- updating
 
   private startUpdate(p: Provider, o: UpdateOptions, attempt = 1): void {
-    if (p === 'omp') {
-      this.finish(p, { state: 'failed', message: 'Oh My Pi is installed separately. Update it with omp update.' });
-      return;
-    }
     if (this.running[p] || this.stopped) return;
     const target = o.version ?? this.st[p]?.latestVersion;
     if (this.d.hooks.restartPending()) {
@@ -340,7 +348,7 @@ export class CliUpdates {
       return;
     }
     this.setUpdate(p, { state: 'running', targetVersion: target });
-    const promise = (p === 'claude' ? this.updateClaude(attempt) : this.updateCodex(o)).catch((e: Error) => {
+    const promise = (p === 'claude' ? this.updateClaude(attempt) : p === 'omp' ? this.updateOmp() : this.updateCodex(o)).catch((e: Error) => {
       this.d.log.error('cli updates: update failed', { provider: p, error: e.message });
       this.finish(p, { state: 'failed', targetVersion: target, message: e.message });
     });
@@ -377,6 +385,24 @@ export class CliUpdates {
     } else {
       this.history.append({ at: this.iso(), provider: 'claude', action: 'update', ok: false, message: r.message, output: r.output });
       this.finish('claude', { state: 'failed', targetVersion: target, message: r.message });
+    }
+    await this.refreshInstalled();
+  }
+
+  private async updateOmp(): Promise<void> {
+    const target = this.st.omp?.latestVersion;
+    const r = await runOmpUpdate({ ompPath: this.ompPath(), cwd: paths.run(this.cfg.home), exec: this.exec, env: this.ompEnv(), timeoutMs: RUN_TIMEOUT_MS });
+    if (r.kind === 'updated') {
+      this.installed.omp = r.to;
+      this.history.append({ at: this.iso(), provider: 'omp', action: 'update', ok: true, version: r.to, message: `from ${r.from ?? 'unknown'}`, output: r.output });
+      this.finish('omp', { state: 'succeeded', targetVersion: r.to });
+      this.d.hooks.releaseIdle('omp', r.to);
+    } else if (r.kind === 'unchanged') {
+      this.history.append({ at: this.iso(), provider: 'omp', action: 'update', ok: true, version: r.version, message: 'unchanged', output: r.output });
+      this.finish('omp', { state: 'unchanged', targetVersion: r.version });
+    } else {
+      this.history.append({ at: this.iso(), provider: 'omp', action: 'update', ok: false, message: r.message, output: r.output });
+      this.finish('omp', { state: 'failed', targetVersion: target, message: r.message });
     }
     await this.refreshInstalled();
   }

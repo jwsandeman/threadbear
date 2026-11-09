@@ -22,8 +22,9 @@ agent directory (default `~/.omp/agent`). Model choices come from OMP and
 include the underlying provider. Threadbear never reads or copies its tokens.
 
 Full access lets OMP run its tools; Ask before edits and Auto use approval
-cards. Plan first is unavailable for OMP. Oh My Pi updates remain managed
-outside Threadbear. Existing Claude Code and Codex sign-ins are separate.
+cards. Plan first is unavailable for OMP. Threadbear keeps Oh My Pi up
+to date with `omp update`, like Claude Code and Codex (Updates panel); a
+Homebrew, mise or Nix install is left to its package manager. Existing Claude Code and Codex sign-ins are separate.
 Historical usage charts and automatic retry when the network returns are
 not supported yet; send another message to retry a connection failure.
 Discovered OMP extensions and project MCP configuration are disabled so
