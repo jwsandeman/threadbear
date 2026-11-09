@@ -3,7 +3,11 @@
 // downloads the new binary beside the old one and renames it into place,
 // so a running omp keeps the file it started from. Installs from Homebrew,
 // mise or Nix answer that their package manager keeps omp up to date.
+//
+// omp picks what to check and replace with `which omp` on PATH, not the
+// binary that was run, so both run with ompPath's folder first on PATH.
 import fs from 'node:fs';
+import path from 'node:path';
 import { VERSION_RE, type Exec } from './exec.ts';
 
 const VERSION_IN = /(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)/;
@@ -22,8 +26,10 @@ export async function ompInstalledVersion(ompPath: string, exec: Exec): Promise<
 // The newest release, from `omp update --check`: the version it offers,
 // or the installed one when it says it's up to date.
 export async function ompLatestVersion(o: { ompPath: string; exec: Exec; env?: NodeJS.ProcessEnv; cwd: string; timeoutMs: number; installed?: string }): Promise<string | undefined> {
+  const env = targetEnv(o.ompPath, o.env);
+  if (typeof env === 'string') throw new Error(env);
   fs.mkdirSync(o.cwd, { recursive: true });
-  const r = await o.exec(o.ompPath, ['update', '--check'], { cwd: o.cwd, env: o.env, timeoutMs: o.timeoutMs });
+  const r = await o.exec(o.ompPath, ['update', '--check'], { cwd: o.cwd, env, timeoutMs: o.timeoutMs });
   const output = `${r.stdout}${r.stderr}`;
   if (r.code !== 0) throw new Error(firstLine(output) || r.error || `omp update --check exited ${r.code}`);
   const offered = NEWER.exec(output)?.[1];
@@ -39,9 +45,11 @@ export type OmpUpdateResult =
 
 // Runs `omp update` and asks the binary its version afterwards.
 export async function runOmpUpdate(o: { ompPath: string; cwd: string; exec: Exec; env?: NodeJS.ProcessEnv; timeoutMs: number }): Promise<OmpUpdateResult> {
+  const env = targetEnv(o.ompPath, o.env);
+  if (typeof env === 'string') return { kind: 'failed', message: env, output: '' };
   const before = await ompInstalledVersion(o.ompPath, o.exec);
   fs.mkdirSync(o.cwd, { recursive: true });
-  const r = await o.exec(o.ompPath, ['update'], { cwd: o.cwd, env: o.env, timeoutMs: o.timeoutMs });
+  const r = await o.exec(o.ompPath, ['update'], { cwd: o.cwd, env, timeoutMs: o.timeoutMs });
   const output = `${r.stdout}${r.stderr}`;
   const after = await ompInstalledVersion(o.ompPath, o.exec);
   if (after && after !== before) return { kind: 'updated', from: before, to: after, output };
@@ -49,6 +57,15 @@ export async function runOmpUpdate(o: { ompPath: string; cwd: string; exec: Exec
   const elsewhere = MANAGED_ELSEWHERE.exec(output);
   if (elsewhere) return { kind: 'failed', message: firstLine(output.slice(output.lastIndexOf('\n', elsewhere.index) + 1)), output };
   return { kind: 'unchanged', version: after, output };
+}
+
+// The environment that makes `which omp` find ompPath, or why there's none.
+export function targetEnv(ompPath: string, env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv | string {
+  if (!path.isAbsolute(ompPath) || !fs.existsSync(ompPath)) return `Oh My Pi isn't at ${ompPath}.`;
+  if (path.basename(ompPath) !== 'omp') return `ompPath ${ompPath} isn't named omp, so omp update would update another copy. Update it by hand.`;
+  const dir = path.dirname(ompPath);
+  const rest = (env.PATH ?? '').split(path.delimiter).filter((d) => d && path.resolve(d) !== dir);
+  return { ...env, PATH: [dir, ...rest].join(path.delimiter) };
 }
 
 function firstLine(s: string): string {

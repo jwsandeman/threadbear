@@ -494,31 +494,36 @@ test('compareVersions orders releases and pre-releases', () => {
 });
 
 
-// R/bin/omp: --version prints omp/<R/omp-version>; `update --check` offers
-// R/omp-latest; `update` installs it, unless R/omp-brew says Homebrew
-// keeps it up to date (exit 0, nothing changes), as the real one does.
-function fakeOmp(root: string): { ompPath: string; calls: () => string[] } {
-  const ompPath = path.join(root, 'bin', 'omp');
-  fs.writeFileSync(path.join(root, 'omp-version'), '18.12.6\n');
-  fs.writeFileSync(path.join(root, 'omp-latest'), '18.18.2\n');
+// D/omp: --version prints omp/<D/omp-version>. Like the real one, `update`
+// checks and replaces whichever omp `which` finds on PATH, not itself:
+// `--check` offers R/omp-latest, `update` writes it beside that omp,
+// unless R/omp-brew says Homebrew keeps it up to date (exit 0, nothing
+// changes).
+function fakeOmp(root: string, dir = path.join(root, 'bin')): { ompPath: string; version: () => string; calls: () => string[] } {
+  const ompPath = path.join(dir, 'omp');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'omp-version'), '18.12.6\n');
+  if (!fs.existsSync(path.join(root, 'omp-latest'))) fs.writeFileSync(path.join(root, 'omp-latest'), '18.18.2\n');
   script(
     ompPath,
     `echo "$*" >> "${root}/omp-calls"
-v=$(cat "${root}/omp-version"); latest=$(cat "${root}/omp-latest")
+latest=$(cat "${root}/omp-latest")
 case "$1" in
-  --version) echo "omp/$v";;
+  --version) echo "omp/$(cat "$(dirname "$0")/omp-version")";;
   update)
     [ "$NO_COLOR" = 1 ] || { echo "colours on" >&2; exit 3; }
+    target=$(command -v omp) || { echo "Update failed: Could not resolve omp binary path in PATH" >&2; exit 1; }
     if [ -f "${root}/omp-brew" ]; then echo "omp is installed and kept up to date by brew; update it from brew."; exit 0; fi
+    v=$(cat "$(dirname "$target")/omp-version")
     echo "Current version: $v"
     if [ "$v" = "$latest" ]; then echo "✔ Already up to date"; exit 0; fi
     echo "New version available: $latest"
     [ "$2" = "--check" ] && exit 0
-    echo "$latest" > "${root}/omp-version"
+    echo "$latest" > "$(dirname "$target")/omp-version"
     echo "Restart omp to use the new version";;
 esac`,
   );
-  return { ompPath, calls: () => (fs.existsSync(path.join(root, 'omp-calls')) ? fs.readFileSync(path.join(root, 'omp-calls'), 'utf8').split('\n').filter(Boolean) : []) };
+  return { ompPath, version: () => fs.readFileSync(path.join(dir, 'omp-version'), 'utf8').trim(), calls: () => (fs.existsSync(path.join(root, 'omp-calls')) ? fs.readFileSync(path.join(root, 'omp-calls'), 'utf8').split('\n').filter(Boolean) : []) };
 }
 
 function ompSetup(policy: 'auto' | 'notify' = 'notify') {
@@ -583,6 +588,37 @@ test('omp: an install Homebrew keeps up to date fails with its own words and cha
   assert.equal(s.update?.state, 'failed');
   assert.match(s.update?.message ?? '', /kept up to date by brew/);
   assert.deepEqual(t.hooks.released, []);
+});
+
+test('omp: updates the configured omp, not another one earlier on PATH or none on PATH at all', async () => {
+  for (const decoyFirst of [true, false]) {
+    const root = tmpDir('tb-omp-path-');
+    const decoy = fakeOmp(root, path.join(root, 'decoy'));
+    const t = setup({ env: { PATH: decoyFirst ? `${path.join(root, 'decoy')}:/usr/bin:/bin` : '/usr/bin:/bin' } });
+    const omp = fakeOmp(t.root);
+    fs.writeFileSync(path.join(t.home, 'runner.json'), JSON.stringify({ experiments: { ohMyPi: true } }));
+    t.cfg.ompPath = omp.ompPath;
+    t.cfg.cliUpdates.omp = 'notify';
+    t.u.check('omp');
+    await t.u.settled();
+    assert.equal(of(t.u.list(), 'omp').latestVersion, '18.18.2');
+    t.u.update('omp');
+    await t.u.settled();
+    assert.deepEqual([omp.version(), decoy.version()], ['18.18.2', '18.12.6']);
+    assert.equal(of(t.u.list(), 'omp').update?.state, 'succeeded');
+  }
+});
+
+test('omp: an ompPath not named omp is never handed to omp update', async () => {
+  const t = ompSetup();
+  const renamed = path.join(t.root, 'bin', 'omp-dev');
+  fs.copyFileSync(t.omp.ompPath, renamed);
+  fs.chmodSync(renamed, 0o755);
+  t.cfg.ompPath = renamed;
+  t.u.update('omp');
+  await t.u.settled();
+  assert.match(of(t.u.list(), 'omp').update?.message ?? '', /isn't named omp/);
+  assert.ok(!t.omp.calls().includes('update'));
 });
 
 test('omp: the policy chosen in the app persists; THREADBEAR_CLI_UPDATES=off wins', async () => {
