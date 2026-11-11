@@ -9,6 +9,7 @@ import { execFile } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { untrustedGit } from './safe-git.ts';
 
 export type GitMeta = {
   branch: string; // as it was, "HEAD" when detached
@@ -28,15 +29,13 @@ const MOVE_REFS = 'refs/threadbear/move/';
 
 type Run = { ok: boolean; stdout: string; stderr: string };
 
-// git in `cwd`, with only the variables we give it pointing it anywhere.
-function run(cwd: string, args: string[], env: Record<string, string> = {}): Promise<Run> {
-  const base: NodeJS.ProcessEnv = { ...process.env, GIT_TERMINAL_PROMPT: '0' };
-  for (const k of ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_COMMON_DIR', 'GIT_PREFIX']) delete base[k];
-  return new Promise((resolve) => {
-    execFile('git', ['-C', cwd, ...args], { env: { ...base, ...env }, maxBuffer: 64 * 1024 * 1024 }, (err, stdout, stderr) => {
-      resolve({ ok: !err, stdout: String(stdout), stderr: String(stderr) });
-    });
-  });
+// git in `cwd` that the repo's own config can't make run anything: no
+// filters, hooks, fsmonitor, signing or diff programs, no fetching but
+// where a step fetches on purpose (safe-git.ts untrustedGit). The repo a
+// thread works in may have come from an archive with its own .git/config,
+// and a move's preview reads it before anything is trusted.
+function run(cwd: string, args: string[], env: Record<string, string> = {}, network?: 'bundle' | 'remote'): Promise<Run> {
+  return untrustedGit(cwd, args, { env, ...(network ? { network } : {}) });
 }
 
 async function out(cwd: string, args: string[], env?: Record<string, string>): Promise<string | undefined> {
@@ -70,6 +69,47 @@ export async function originUrl(cwd: string): Promise<string | undefined> {
 }
 
 /**
+ * `url` with nothing in it that could be a password or token: an http(s)
+ * address loses its whole user part (GitHub takes a token as the user
+ * alone), ssh:// its password, and the query and fragment go. What a move
+ * says about a thread's repo goes to the other runner and through the
+ * backend, which only need to know which repo it is (security review,
+ * 10 Nov 2026: `https://user:github_pat_...@github.com/...` went whole to
+ * the runner a preview asked). The runner it goes to clones with its own
+ * credentials.
+ */
+export function withoutCredentials(url: string): string {
+  const m = /^([a-z][a-z0-9+.-]*:\/\/)([^/?#]*@)?([^?#]*)(?:[?#].*)?$/i.exec(url.trim());
+  if (!m) return url.trim();
+  const [, scheme, userinfo, rest] = m;
+  if (!userinfo) return `${scheme}${rest}`;
+  if (/^(https?|ftps?):\/\//i.test(scheme!)) return `${scheme}${rest}`;
+  const user = userinfo.slice(0, -1).split(':')[0];
+  return `${scheme}${user ? `${user}@` : ''}${rest}`;
+}
+
+// A repo T may clone for a moving thread: the URL is the old runner's
+// word, and that runner may be one of the owner's extra Macs, so only an
+// https or ssh address (as GitHub gives them) and never one git would read
+// as an option.
+export function cloneableUrl(url: string): boolean {
+  if (!url || url.length > 2000 || /[\s\0\\]/.test(url) || url.startsWith('-') || url.includes('::')) return false;
+  // scheme://[user@]host[:port]/path, each part plain, none starting with -.
+  const full = /^(https|ssh):\/\/(?:([A-Za-z0-9._~%+-]+)@)?([A-Za-z0-9._-]+)(?::(\d{1,5}))?\/[^/].*$/i.exec(url);
+  if (full) return !full[2]?.startsWith('-') && !full[3]!.startsWith('-') && !full[3]!.startsWith('.');
+  // user@host:path, as GitHub gives ssh ones.
+  const scp = /^([A-Za-z0-9._~+][A-Za-z0-9._~+-]*)@([A-Za-z0-9][A-Za-z0-9._-]*):([^:-][^:]*)$/.exec(url);
+  return !!scp;
+}
+
+/** Clones `url` to `to` (a folder that isn't there yet), as untrustedGit does. */
+export async function cloneRepo(url: string, to: string): Promise<{ ok: true } | { ok: false; reason: string }> {
+  if (!cloneableUrl(url)) return { ok: false, reason: `Threadbear only clones a moving thread's repo from an https or ssh address, not ${JSON.stringify(url.slice(0, 200))}.` };
+  const r = await untrustedGit(path.dirname(to), ['clone', '--quiet', '--no-recurse-submodules', '--', url, to], { network: 'remote' });
+  return r.ok ? { ok: true } : { ok: false, reason: `Couldn't clone ${url} to ${to}: ${why(r)}` };
+}
+
+/**
  * The same repo on two machines, from their `origin` URLs:
  * git@github.com:mikecann/threadbear.git, https://github.com/mikecann/threadbear
  * and ssh://git@github.com/mikecann/threadbear.git are one repo.
@@ -94,7 +134,8 @@ async function originDefault(cwd: string): Promise<string | undefined> {
 /** Files changed in a checkout, as `git status` names them (for what stays behind). */
 export async function changedFiles(cwd: string, max = 20): Promise<string[]> {
   // Not trimmed: the first line's leading space is part of its status.
-  const r = await run(cwd, ['status', '--porcelain=v1', '--untracked-files=all']);
+  // A submodule's own config isn't read, so git doesn't look inside one.
+  const r = await run(cwd, ['status', '--porcelain=v1', '--untracked-files=all', '--ignore-submodules=all']);
   if (!r.ok) return [];
   return r.stdout
     .split('\n')
@@ -139,7 +180,7 @@ export async function packGit(worktree: string, cwd: string, bundleFile: string)
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
-  const meta: GitMeta = { branch, head, ...(wip ? { wip } : {}), ...(base ? { base } : {}), ...(origin ? { origin } : {}), subdir };
+  const meta: GitMeta = { branch, head, ...(wip ? { wip } : {}), ...(base ? { base } : {}), ...(origin ? { origin: withoutCredentials(origin) } : {}), subdir };
   if (base === head && !wip) return { ok: true, meta };
 
   // A bundle names refs, so the tips get ones of their own for as long as
@@ -164,23 +205,32 @@ export async function packGit(worktree: string, cwd: string, bundleFile: string)
  * leaves `wip`'s changes uncommitted.
  */
 export async function unpackGit(worktree: string, meta: GitMeta, bundleFile?: string): Promise<{ ok: true } | { ok: false; reason: string }> {
-  const fetchBundle = () => run(worktree, ['fetch', '--quiet', '--no-tags', bundleFile!, `+${MOVE_REFS}*:${MOVE_REFS}*`]);
+  const fetchBundle = () => run(worktree, ['fetch', '--quiet', '--no-tags', bundleFile!, `+${MOVE_REFS}*:${MOVE_REFS}*`], {}, 'bundle');
   if (bundleFile) {
     let r = await fetchBundle();
     if (!r.ok) {
       // Most likely the commits it starts from: they're on origin.
-      await run(worktree, ['fetch', '--quiet', 'origin']);
+      await run(worktree, ['fetch', '--quiet', 'origin'], {}, 'remote');
       r = await fetchBundle();
     }
     if (!r.ok) return { ok: false, reason: `Couldn't bring the git work in: ${why(r)}` };
   } else if (!(await out(worktree, ['rev-parse', '--verify', '--quiet', `${meta.head}^{commit}`]))) {
-    await run(worktree, ['fetch', '--quiet', 'origin']);
+    await run(worktree, ['fetch', '--quiet', 'origin'], {}, 'remote');
   }
   try {
     if (!(await out(worktree, ['rev-parse', '--verify', '--quiet', `${meta.head}^{commit}`]))) return { ok: false, reason: `This machine's copy of the repo doesn't have ${meta.head.slice(0, 12)}, and origin didn't either.` };
     let r = await run(worktree, ['reset', '--quiet', '--hard', meta.head]);
     if (!r.ok) return { ok: false, reason: `Couldn't put the branch where it was: ${why(r)}` };
     if (meta.wip) {
+      // What the uncommitted work brings under a node_modules folder would
+      // be untracked here, which trust reads as installed packages and
+      // doesn't hash, so a trusted patch could import them unchecked. The
+      // old runner's `add -A` leaves ignored files behind, so an honest
+      // move never has any (Codex's review, 10 Nov 2026).
+      const brought = await run(worktree, ['diff', '--name-only', '-z', '--no-renames', '--no-ext-diff', '--no-textconv', meta.head, meta.wip]);
+      if (!brought.ok) return { ok: false, reason: `Couldn't read the uncommitted changes: ${why(brought)}` };
+      const packaged = brought.stdout.split('\0').find((f) => f.split('/').some((part) => part.toLowerCase() === 'node_modules'));
+      if (packaged) return { ok: false, reason: `Its uncommitted changes include ${packaged}, under node_modules, which a move doesn't carry: installed packages are set up again on this machine.` };
       // The worktree as the wip commit has it, then the index back at head:
       // its changes are uncommitted again, new files untracked again.
       r = await run(worktree, ['read-tree', '-u', '--reset', meta.wip]);

@@ -42,6 +42,7 @@ clients. The contract is in `docs/protocol.md`, "Oh My Pi harness".
 ## Taking it out
 
 Turn off `ohMyPi` to stop offering OMP accounts. To remove it, delete the
-adapter and its startup wiring, config and discovery fields, and provider
-picker entries. Keep decoding existing `omp` thread records and leave
+adapter and its startup wiring, config and discovery fields, its `omp` row
+in `runner/src/providers.ts` and `ProviderInfo.swift`, and provider picker
+entries. Keep decoding existing `omp` thread records and leave
 their saved sessions on disk.

@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { call, load, memoryBackend } from '../helpers/convex-memory.ts';
+import { call, load, memoryBackend, THREAD_BASICS } from '../helpers/convex-memory.ts';
 import { Moves, type MoveRow, type MovesBackend, type MovesHost, type MovePlan, type ThreadMoving } from '../../src/moves.ts';
 import type { PackEntry } from '../../src/move-pack.ts';
 import { SecretStore } from '../../src/secrets.ts';
@@ -126,7 +126,9 @@ function target(plan: MovePlan | { problem: string }) {
 }
 
 async function until(what: () => boolean, label: string) {
-  for (let i = 0; i < 500; i++) {
+  // By the clock, not a count of turns of the event loop: 500 turns is 30ms,
+  // which a busy machine's file and crypto work can easily outlast.
+  for (const deadline = Date.now() + 15_000; Date.now() < deadline; ) {
     if (what()) return;
     await new Promise((r) => setImmediate(r));
   }
@@ -146,7 +148,7 @@ const moveRow = (w: Awaited<ReturnType<typeof world>>) => w.b.rows('threadMoves'
 
 test('a thread moves from Bruce to the M5, and each side ends as it should', async () => {
   const w = await world();
-  await call(w.b.ctx, sync.upsertThreads, { key: BRUCE_KEY, threads: [{ threadId: 'T1', runnerId: BRUCE, title: 'T', view: 'inbox', needsYou: false }] });
+  await call(w.b.ctx, sync.upsertThreads, { key: BRUCE_KEY, threads: [{ threadId: 'T1', runnerId: BRUCE, ...THREAD_BASICS, title: 'T', view: 'inbox', needsYou: false }] });
   const s = source('T1');
   const t = target({ cwd: '/Users/mike/dev/x', accountId: 'claude-main', leftBehind: [] });
   const { ms } = runners(w, s, t);
@@ -169,7 +171,7 @@ test('a thread moves from Bruce to the M5, and each side ends as it should', asy
 
 test('a busy thread waits for its turn to end before it freezes', async () => {
   const w = await world();
-  await call(w.b.ctx, sync.upsertThreads, { key: BRUCE_KEY, threads: [{ threadId: 'T2', runnerId: BRUCE, title: 'T', view: 'inbox', needsYou: false }] });
+  await call(w.b.ctx, sync.upsertThreads, { key: BRUCE_KEY, threads: [{ threadId: 'T2', runnerId: BRUCE, ...THREAD_BASICS, title: 'T', view: 'inbox', needsYou: false }] });
   const s = source('T2');
   s.idle = false;
   const t = target({ cwd: '/x', accountId: 'a', leftBehind: [] });
@@ -186,7 +188,7 @@ test('a busy thread waits for its turn to end before it freezes', async () => {
 
 test("a move the new runner can't take fails, and the thread stays where it was", async () => {
   const w = await world();
-  await call(w.b.ctx, sync.upsertThreads, { key: BRUCE_KEY, threads: [{ threadId: 'T3', runnerId: BRUCE, title: 'T', view: 'inbox', needsYou: false }] });
+  await call(w.b.ctx, sync.upsertThreads, { key: BRUCE_KEY, threads: [{ threadId: 'T3', runnerId: BRUCE, ...THREAD_BASICS, title: 'T', view: 'inbox', needsYou: false }] });
   const s = source('T3');
   const t = target({ problem: 'The M5 has no copy of mikecann/foo.' });
   runners(w, s, t);
@@ -201,7 +203,7 @@ test("a move the new runner can't take fails, and the thread stays where it was"
 
 test("a bundle that doesn't arrive whole fails before the switch", async () => {
   const w = await world();
-  await call(w.b.ctx, sync.upsertThreads, { key: BRUCE_KEY, threads: [{ threadId: 'T4', runnerId: BRUCE, title: 'T', view: 'inbox', needsYou: false }] });
+  await call(w.b.ctx, sync.upsertThreads, { key: BRUCE_KEY, threads: [{ threadId: 'T4', runnerId: BRUCE, ...THREAD_BASICS, title: 'T', view: 'inbox', needsYou: false }] });
   const s = source('T4');
   const t = target({ cwd: '/x', accountId: 'a', leftBehind: [] });
   // The M5's download comes back damaged.
@@ -216,4 +218,26 @@ test("a bundle that doesn't arrive whole fails before the switch", async () => {
   assert.match(moveRow(w).note, /didn't arrive whole/);
   assert.equal(w.b.rows('threads').find((r) => r.threadId === 'T4')!.runnerId, BRUCE);
   assert.equal(t.adopted, 0);
+});
+
+// Moved away and back (Codex's review, 10 Nov 2026): an old move's switch
+// marked the thread gone for good, and its done, heard again after a
+// restart, put the thread that had come back away again.
+test("a thread moved away and back is this runner's again, and the old move's done leaves it alone", async () => {
+  let putAway = 0;
+  const host = { has: () => true, putAway: async () => void putAway++, setMoving() {}, runnerName: (id: string) => id, adopt: async () => {} } as unknown as MovesHost;
+  const row = (moveId: string, from: string, to: string, state: MoveRow['state'], createdAt: number): MoveRow => ({ moveId, threadId: 'T1', from, to, state, createdAt, updatedAt: createdAt });
+  const away = row('aaaaaaaa0001', M5, BRUCE, 'done', 1);
+  const back = row('aaaaaaaa0002', BRUCE, M5, 'done', 2);
+  const ms = new Moves({ self: () => M5, on: () => true, backend: () => undefined, host, log });
+  ms.update([away, back]);
+  await new Promise((r) => setImmediate(r));
+  assert.equal(ms.gone('T1'), false);
+  assert.equal(putAway, 0);
+  // Only the move away: gone, and put away.
+  const once = new Moves({ self: () => M5, on: () => true, backend: () => undefined, host, log });
+  once.update([away]);
+  await new Promise((r) => setImmediate(r));
+  assert.equal(once.gone('T1'), true);
+  assert.equal(putAway, 1);
 });

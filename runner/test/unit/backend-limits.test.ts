@@ -5,7 +5,7 @@
 // (test/helpers/convex-memory.ts), which counts the bytes a call reads.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { call, load, memoryBackend, outcome } from '../helpers/convex-memory.ts';
+import { call, load, memoryBackend, outcome, THREAD_BASICS } from '../helpers/convex-memory.ts';
 
 const OWNER = 'owner-key';
 const BRUCE_KEY = 'tbr_bruce';
@@ -44,7 +44,7 @@ async function setup() {
 }
 type S = Awaited<ReturnType<typeof setup>>;
 
-const thread = (threadId: string, runnerId: string) => ({ threadId, runnerId, title: 'T', view: 'inbox', needsYou: false });
+const thread = (threadId: string, runnerId: string) => ({ threadId, runnerId, ...THREAD_BASICS, title: 'T', view: 'inbox', needsYou: false });
 
 // A file uploaded the way a runner key's runner does (/runner/upload).
 async function runnerUpload(s: S, id: string, bytes = 1): Promise<string> {

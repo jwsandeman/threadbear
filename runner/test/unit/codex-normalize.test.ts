@@ -698,7 +698,9 @@ test("a machine's generic user name is not a private one, and a person's still i
 test('the committed Codex fixtures hold nothing private', () => {
   for (const f of fs.readdirSync(FIX).filter((f) => f.endsWith('.ndjson'))) {
     const text = fs.readFileSync(path.join(FIX, f), 'utf8');
-    assert.deepEqual(leaks(text), [], f);
+    // These captures came from another machine. This machine's name can be
+    // ordinary protocol text, such as the Linux hostname "agents".
+    assert.deepEqual(leaks(text, [], []), [], f);
   }
 });
 

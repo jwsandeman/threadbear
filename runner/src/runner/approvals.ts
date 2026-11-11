@@ -218,6 +218,7 @@ export const approvalsPart = {
       options: req.canAlwaysAllow ? ['allow', 'allowAlways', 'deny'] : ['allow', 'deny'],
     };
     if (req.toolUseId) body.itemId = req.toolUseId;
+    if (req.reason) body.reason = req.reason;
     const plan = req.name === 'ExitPlanMode' && req.toolUseId && req.toolUseId === st.rec.openPlan ? req.toolUseId : undefined;
     return new Promise((resolve) => {
       // A card offered without "Always allow" never answers with it, even
@@ -243,7 +244,9 @@ export const approvalsPart = {
 
   agentApprovalCard(this: Runner, st: ThreadState, req: AgentApprovalRequest): Promise<ToolApprovalAnswer> {
     const approvalId = crypto.randomUUID();
-    const body: EventBody = { type: 'approval.requested', approvalId, name: req.name, title: req.title, input: req.input, options: ['allow', 'deny'] };
+    // The title is why it asks; the Mac card's heading is only "Use <tool>?",
+    // so it goes in the reason line too (David, 9 Nov 2026).
+    const body: EventBody = { type: 'approval.requested', approvalId, name: req.name, title: req.title, input: req.input, options: ['allow', 'deny'], reason: req.title };
     return new Promise((resolve) => {
       const answer = (a: ToolApprovalAnswer) => resolve(a.decision === 'allowAlways' ? { ...a, decision: 'allow' } : a);
       this.addApproval(st, { approvalId, kind: 'tool', main: true, macOnly: true, resolve: answer }, body, req.signal ?? new AbortController().signal);

@@ -42,6 +42,7 @@ import type {
   PersistedEvent,
   Pool,
   Provider,
+  ProviderInfo,
   Question,
   RewoundFiles,
   RunnerDefaults,
@@ -51,7 +52,9 @@ import type {
   ThreadSummary,
   TurnOutcome,
 } from './protocol.ts';
+import { experimentOn } from './experiments.ts';
 import { agentsStillWorking, ErrorCode, LIMITS, PROTOCOL_VERSION, RpcError, sentByAgent } from './protocol.ts';
+import { activeProviders, cliName, providerInfo, providerName, providersForHello } from './providers.ts';
 import type { ArchivedBy, ArchiveVerdict, LibrarianStatus, Project, Schedule } from './protocol.ts';
 import { Projects } from './projects.ts';
 import type { Settings } from './settings.ts';
@@ -79,7 +82,7 @@ import { BIN_DIR, threadEnv } from './restart.ts';
 import { cleanUpWorktree, makeWorktree, sameSubfolder, worktreeInstructions } from './worktrees.ts';
 import { stripModelSuffix, type AccountRegistry, type LearnedAccountInfo } from './accounts.ts';
 import { pickAccount as pickByRoom, resetTime, type UsageReading } from './usage.ts';
-import { DEFAULT_POOL_FOLDERS, RUNNER_VERSION, expandHome, paths, readRunnerJson, writeRunnerJson, type Config } from './config.ts';
+import { DEFAULT_POOL_FOLDERS, RUNNER_VERSION, expandHome, paths, peekRunnerJson, type Config } from './config.ts';
 import { WAIT_SLACK_MS, blockedUntil, limitWhy, loginOk, nextLogin, pickInPool, poolAccounts, poolForFolder, poolProviders, readPools, roomWait, validatePools } from './pools.ts';
 import { copyImageInto, imageRefFor } from './media.ts';
 import { isDirectory } from './fsutil.ts';
@@ -125,7 +128,7 @@ import {
   projectPatchFiles,
   webPage,
 } from './patches.ts';
-import { cutSafely, firstLineSafely, isSafeSlice } from './safe-cut.ts';
+import { cutSafely, firstLineSafely, isSafeSlice, safeEndOfPartial } from './safe-cut.ts';
 import { FolderCache } from './folder-cache.ts';
 import { worktreesPart, type WorktreesPart } from './runner/worktrees.ts';
 import { networkPart, type NetworkPart } from './runner/network.ts';
@@ -146,6 +149,7 @@ import { patchesPart, type PatchesPart } from './runner/patches.ts';
 import { highlightsPart, type HighlightsPart } from './runner/highlights.ts';
 import { titlesPart, type TitlesPart } from './runner/titles.ts';
 import { commandsPart, type CommandsPart } from './runner/commands.ts';
+import { contextUsagePart, type ContextUsageAnswer, type ContextUsagePart } from './runner/context-usage.ts';
 import type { SlashCommand } from './slash-commands.ts';
 import { hibernationPart, type HibernationPart } from './runner/hibernation.ts';
 import { newThreadsPart, type NewThreadsPart } from './runner/new-threads.ts';
@@ -185,6 +189,10 @@ export type RunnerUpdates = {
   launcherReason?: string;
   // Mike's releases, for a fork (upstream.ts); left out while off.
   upstream?: UpstreamStatus;
+  // This machine isn't following GitHub's main properly (follow-origin.ts).
+  followProblem?: string;
+  // The other runners that say that of themselves, on the main Mac's runner.
+  behindRunners?: { name: string; problem: string }[];
 };
 
 // What the librarian (librarian.ts) hears about threads: a turn that ended,
@@ -497,6 +505,9 @@ export const SAVE_RETRY_MS = 5000;
 export type RunnerDeps = {
   // The release it runs, when not this code's own (tests).
   release?: string;
+  // A thread's RPC credential, for its CLI's environment (rpc-auth.ts).
+  // Without it (tests), a thread's tb reads the token as before.
+  threadKey?: (threadId: string) => string;
   config: Config;
   store: ThreadStore;
   adapters: Record<string, AgentAdapter>;
@@ -606,7 +617,7 @@ export const UNTIL_RESTART = '9999-12-31T00:00:00.000Z';
 export const NO_WAKE_TIME = UNTIL_RESTART;
 
 // Parts of the Runner that live in runner/ (see each file's top).
-export interface Runner extends LooseEndsPart, LabReviewPart, NewThreadsPart, HibernationPart, TitlesPart, HighlightsPart, PatchesPart, EditingPart, ClisPart, ReviewsPart, ButtonsPart, ApprovalsPart, ProjectsHostPart, StoppedWorkPart, HandoversPart, PoolsPart, NetworkPart, WorktreesPart, CommandsPart, MovesPart {}
+export interface Runner extends LooseEndsPart, LabReviewPart, NewThreadsPart, HibernationPart, TitlesPart, HighlightsPart, PatchesPart, EditingPart, ClisPart, ReviewsPart, ButtonsPart, ApprovalsPart, ProjectsHostPart, StoppedWorkPart, HandoversPart, PoolsPart, NetworkPart, WorktreesPart, CommandsPart, ContextUsagePart, MovesPart {}
 export class Runner {
   // While main.ts is still starting up: waking a thread for its waits
   // (reconcileWaits) would start a CLI whose tools aren't ready, so they
@@ -619,12 +630,15 @@ export class Runner {
   // threads hibernating until a new one (snoozedUntil "release"). Tests set it.
   release: string | undefined = RELEASE.release;
   cfg: Config;
+  private recapFlag = { at: -Infinity, on: false };
   store: ThreadStore;
   adapters: Record<string, AgentAdapter>;
   accounts: AccountSource;
   usage?: UsageSink;
   // Each login and folder's slash commands, for the picker (runner/commands.ts).
   commandCache = new Map<string, { at: number; commands: SlashCommand[] }>();
+  // threads.contextUsage asks in flight, by thread, so two at once share one.
+  contextAsks = new Map<string, Promise<ContextUsageAnswer>>();
   pickAccount: AccountPicker;
   clis?: CliControl;
   clock: Clock;
@@ -657,6 +671,9 @@ export class Runner {
   threads = new Map<string, ThreadState>();
   // Other runners' names by id, for what a move says (main.ts sets it).
   runnerNames?: (runnerId: string) => string | undefined;
+  // True on the main Mac (the owner key): a thread moved here from another
+  // runner arrives with at most Ask (runner/moves.ts capMovedMode).
+  movedInAtMostAsk?: () => boolean;
   listeners = new Set<(n: Notification) => void>();
   dirty = new Set<string>();
   flushScheduled = false;
@@ -705,7 +722,9 @@ export class Runner {
   appRestartAsked?: (threadId: string) => void;
   atMac?: () => boolean | undefined;
 
+  private threadKey?: (threadId: string) => string;
   constructor(deps: RunnerDeps) {
+    this.threadKey = deps.threadKey;
     if ('release' in deps) this.release = deps.release;
     this.cfg = deps.config;
     this.store = deps.store;
@@ -1197,7 +1216,7 @@ export class Runner {
 
   // --------------------------------------------------------------- queries
 
-  hello(): { runnerVersion: string; protocol: number; accounts: Account[]; pools: Pool[]; defaults: RunnerDefaults; clis?: CliStatus[] } {
+  hello(): { runnerVersion: string; protocol: number; accounts: Account[]; providers: ProviderInfo[]; pools: Pool[]; defaults: RunnerDefaults; clis?: CliStatus[] } {
     const accounts = this.accounts.list();
     const pools = this.pools(accounts);
     const defaults: RunnerDefaults = { cwd: this.cfg.defaults.cwd, accountId: this.defaultAccountId(accounts) };
@@ -1210,7 +1229,7 @@ export class Runner {
     if (this.cfg.defaults.efforts) defaults.efforts = { ...this.cfg.defaults.efforts };
     // The app's composer starts a new thread on it.
     if (this.cfg.defaults.permissionMode) defaults.permissionMode = this.cfg.defaults.permissionMode;
-    const out: ReturnType<Runner['hello']> = { runnerVersion: RUNNER_VERSION, protocol: PROTOCOL_VERSION, accounts, pools, defaults };
+    const out: ReturnType<Runner['hello']> = { runnerVersion: RUNNER_VERSION, protocol: PROTOCOL_VERSION, accounts, providers: providersForHello(activeProviders(this.cfg.home)), pools, defaults };
     const clis = this.cliList();
     if (clis) out.clis = clis;
     return out;
@@ -1224,7 +1243,7 @@ export class Runner {
   defaultAccountId(all = this.accounts.list()): string {
     // Only accounts this runner can start a CLI for.
     const accounts = all.filter((a) => this.adapters[a.provider]);
-    const json = readRunnerJson(this.cfg.home).defaults;
+    const json = peekRunnerJson(this.cfg.home).defaults;
     const saved = json?.accountId ?? this.cfg.defaults.accountId;
     const last = saved && accounts.some((a) => a.id === saved) ? saved : (accounts.find((a) => a.id === 'claude-main')?.id ?? accounts[0]?.id);
     if (json?.keepAccount && last) return last;
@@ -1393,6 +1412,8 @@ export class Runner {
 
   sendTo(st: ThreadState, text: string, images: ImageRef[], opts: SendOptions = {}): string {
     const { rec, rt } = st;
+    // Read before anything below moves these: was the recap box up?
+    const recapped = this.recapShowing(rec);
     if (opts.origin !== 'runner') {
       rt.hookTurns = undefined;
       delete rec.stoppedWorkWakes;
@@ -1443,6 +1464,7 @@ export class Runner {
     if (opts.scheduleId) msg.scheduleId = opts.scheduleId;
     if (opts.answers?.length) msg.answers = opts.answers;
     if (opts.editOf) msg.editOf = opts.editOf;
+    if (recapped) msg.recapped = true;
     rec.lastActivityAt = this.isoNow();
     if (rt.turn && !opts.queue && fromMike(text, opts) && this.switchWaiting(st)) {
       // He picked another login (another provider, usually) during this
@@ -1594,6 +1616,36 @@ export class Runner {
     return `[Sent from the iPhone app${where}]\n${msg.text}`;
   }
 
+  // The switch is read from runner.json, and every row of every list asks.
+  recapOn(): boolean {
+    const now = this.clock.now();
+    if (now - this.recapFlag.at >= 5_000) this.recapFlag = { at: now, on: experimentOn(this.cfg.home, 'recapBox') };
+    return this.recapFlag.on;
+  }
+
+  // Whether the apps are showing the recap box (the same rule in each:
+  // docs/protocol.md, "The recap box"), so the agent needn't say it again.
+  // Only when the box says what the thread is for: a note from before
+  // purposes has just the where-it-stands, so the agent still adds that.
+  recapShowing(rec: ThreadRecord): boolean {
+    if (!rec.brief?.purpose || rec.status !== 'idle' || rec.archivedAt || !this.recapOn()) return false;
+    return this.clock.now() - Date.parse(rec.lastActivityAt) >= AWAY_MS;
+  }
+
+  // The line that asks for a recap when he comes back to a thread after a
+  // long gap, read from the last turn's own event so threads from before
+  // this line get it too. Only here and not in forAgent: a message steered
+  // into a running turn isn't a return, however old the last finished turn.
+  // Not for an answer to a card or a review: the question is in front of him.
+  awayLine(st: ThreadState, msg: QueuedSend): string | undefined {
+    const { rec } = st;
+    if (msg.recapped || !rec.lastTurnCompletedSeq || !fromMike(msg.text, msg) || msg.answers?.length || msg.reviewId) return undefined;
+    const ended = this.store.log(rec.id).read(rec.lastTurnCompletedSeq, rec.lastTurnCompletedSeq)[0];
+    const gap = ended ? this.clock.now() - Date.parse(ended.ts) : NaN;
+    if (!(gap >= AWAY_MS)) return undefined;
+    return `[This thread's last turn ended ${agoWords(gap)}, so the user may have lost track: open your reply with a line or two on what this thread is for and where it stands, then answer.]`;
+  }
+
   // Writes the turn's first events before changing any state, so if the
   // disk refuses (full, permissions) the thread is left as it was rather
   // than stuck on a turn that never started.
@@ -1623,6 +1675,7 @@ export class Runner {
       delete rec.waitingForRoom;
       this.armRoomTimer();
     }
+    delete rec.limitHitTurn;
     // Likewise a wait for the network: a message from Mike goes now, and
     // if the line's still down it fails and the wait starts over. A turn
     // that isn't the runner's carry-on ends that outage's count.
@@ -1667,6 +1720,8 @@ export class Runner {
       if (/^\/(compact|review|clear)\b/i.test(msg.text.trim())) rt.turn.noSteer = true;
     }
     let text = command ? msg.text : this.forAgent(msg);
+    const away = command ? undefined : this.awayLine(st, msg);
+    if (away) text = `${away}\n${text}`;
     // Claude's CLI starts a new session for /clear, which the runner follows
     // (its next init), but says nothing.
     if (command && rec.provider === 'claude' && /^\/clear\b/i.test(msg.text.trim())) {
@@ -1823,8 +1878,9 @@ export class Runner {
     // message may have brought hooks.
     // A thread shut in a sandbox starts in one or not at all (the adapters
     // check too); one that starts in one is shut in it from now on.
-    const inSandbox = rec.provider === 'claude' && this.sandboxed(rec.cwd);
-    if (rec.confined && !inSandbox) throw new Error(rec.provider === 'claude' ? CONFINED_NO_SANDBOX(rec.cwd) : `This thread runs in a sandbox, and ${providerName(rec.provider)} can't, so it wasn't started. Move it to a Claude login.`);
+    const canSandbox = providerInfo(rec.provider).sandbox;
+    const inSandbox = canSandbox && this.sandboxed(rec.cwd);
+    if (rec.confined && !inSandbox) throw new Error(canSandbox ? CONFINED_NO_SANDBOX(rec.cwd) : `This thread runs in a sandbox, and ${providerName(rec.provider)} can't, so it wasn't started. Move it to a Claude login.`);
     if (inSandbox) rec.confined = true;
     const claude = rec.provider === 'claude' ? this.patchTrust.checkClaude(rec.cwd, claudeOptions(rec)) : undefined;
     rt.claudeSkipped = claude && !claude.trusted ? claude.hash : undefined;
@@ -1845,7 +1901,9 @@ export class Runner {
         blobsDir: this.store.blobsDir(rec.id),
         tmpDir: path.join(paths.run(this.cfg.home), 'tmp'),
         allowRules: rec.allowRules ?? [],
-        env: threadEnv(rec.id, this.cfg.home),
+        // A sandboxed thread gets no key: nothing in the sandbox should
+        // reach the runner's RPC at all.
+        env: threadEnv(rec.id, this.cfg.home, undefined, rec.confined ? undefined : this.threadKey?.(rec.id)),
         ...this.briefFor(rec, resume),
         ...(rt.claudeSkipped ? { untrustedProjectSettings: claudeSettingsWithoutCommands(rec.cwd) } : {}),
         // Read at each call, from the thread's folder then.
@@ -2237,6 +2295,7 @@ export class Runner {
     // What it needs from Mike: its end_turn call, else its closing "What I
     // need from you". Only a turn it finished; a stopped one says nothing.
     const said = outcome === 'completed' ? turnNeeds(turn) : undefined;
+    if (said?.asks) said.asks = this.armRunAsks(st, said.asks, turn.turnId);
     if (said) {
       body.needs = said.needs;
       if (said.asks) body.asks = said.asks;
@@ -2269,7 +2328,11 @@ export class Runner {
     // archive, which Mike asked it for). It can't archive itself mid-turn,
     // as that stops the CLI, so it happens here, once the turn is over, and
     // not if a message is already waiting for the next one.
-    const away = outcome === 'completed' && !turn.auto && said?.needs === 'nothing' && !rec.queue.length;
+    // Nor while a card is still waiting (a subagent's, which outlives the
+    // turn): archiving or snoozing would hide it and stop the work behind it.
+    // More likely now the runner's own threads run on the install's mode
+    // (own-threads.ts; Codex review, 9 Nov 2026).
+    const away = outcome === 'completed' && !turn.auto && said?.needs === 'nothing' && !rec.queue.length && !rt.approvals.size;
     const archive = away && archiveFromTool(turn.endTurn);
     // Hibernating likewise (end_turn's snooze). Archive wins if it asked for both.
     const snooze = away && !archive ? snoozeFromTool(turn.endTurn) : undefined;
@@ -2293,7 +2356,7 @@ export class Runner {
     if (outcome === 'completed' && said?.needs === 'nothing' && !archive) void this.checkLooseEnds(st);
     this.recheckStarter(st);
     // A code change gets another lab's review before it counts as done
-    // (experiment labReview, runner/lab-review.ts): the thread waits on
+    // (runner/lab-review.ts, unless Settings turns it off): the thread waits on
     // the review, so anything waiting on it hears once it's been fixed.
     // One the last runner owed (a handover) is settled by the next turn to
     // complete: a finish gives this turn's change if it made one worth it,
@@ -2634,6 +2697,10 @@ export class Runner {
     archivedBy?: ArchivedBy;
     verdict?: ArchiveVerdict;
     starred?: boolean;
+    // Whether a turn that hits its login's limit waits for room and
+    // carries on by itself (the limit box's menu). false also ends a wait
+    // under way; true starts one if the thread is stuck at its limit now.
+    carryOnAtReset?: boolean;
     // A move Mike made (the app, tb) or allowed on a card: a thread shut in
     // a sandbox may leave it. Without it, a move or login change that would
     // take it out is refused (ThreadRecord.confined).
@@ -2672,9 +2739,9 @@ export class Runner {
     }
     if (newAccount && toAccountId !== rec.accountId) this.checkProvider(newAccount);
     // Checked before anything changes: where it would run after this.
-    const stillIn = (newAccount?.provider ?? rec.provider) === 'claude' && this.sandboxed(newCwd ?? rec.cwd);
+    const stillIn = providerInfo(newAccount?.provider ?? rec.provider).sandbox && this.sandboxed(newCwd ?? rec.cwd);
     if (rec.confined && (newCwd !== undefined || toAccountId !== undefined) && !stillIn && !params.unconfine) {
-      throw new RpcError(ErrorCode.badParams, `"${rec.title}" runs in a sandbox, and this would take it out of it (a folder that isn't in one, or a harness that can't run in one). Only the user can do that.`);
+      throw new RpcError(ErrorCode.badParams, `"${rec.title}" runs in a sandbox, and this would take it out of it (a folder that isn't in one, or a login that can't run in one). Only the user can do that.`);
     }
     if ((newAccount?.provider ?? rec.provider) === 'omp' && params.permissionMode === 'plan') {
       throw new RpcError(ErrorCode.badParams, 'Plan first is not supported by Oh My Pi. Choose Ask before edits.');
@@ -2869,6 +2936,7 @@ export class Runner {
     }
     if (params.starred === true) rec.starredAt ??= this.isoNow();
     else if (params.starred === false) delete rec.starredAt;
+    if (params.carryOnAtReset !== undefined) this.setCarryOnAtReset(st, params.carryOnAtReset);
     if (accountChanged && rt.turn && rt.session && !stop) {
       // The turn carries on where it started; say so, or the picker reads
       // as if the new model were already doing the work.
@@ -3248,6 +3316,7 @@ export class Runner {
     };
     if (rec.poolId) s.poolId = rec.poolId;
     if (rec.waitingForRoom) s.waitingForRoom = { ...rec.waitingForRoom };
+    if (rec.carryOnAtReset === false) s.carryOnAtReset = false;
     if (rec.waitingForNetwork) s.waitingForNetwork = { since: rec.waitingForNetwork.since };
     if (rec.needs && rec.needs.seq === rec.lastTurnCompletedSeq) {
       s.needs = rec.needs.needs;
@@ -3299,6 +3368,7 @@ export class Runner {
     if (rec.schedule) s.schedule = { ...rec.schedule };
     if (rec.startedBy) s.startedBy = { ...rec.startedBy };
     if (rec.asked) s.asked = rec.asked;
+    if (rec.brief && this.recapOn()) s.recap = recapText(rec.brief);
     if (rec.panelRequest) s.panelRequest = { ...rec.panelRequest };
     // A record from 28 Oct may say "people" (sharing with specific people,
     // since dropped): that's not shared.
@@ -3517,9 +3587,9 @@ export class Runner {
       title,
       worktree: false,
       origin: 'runner',
-      // The runner's own, so not the default for new threads: Mike answering
-      // it runs as it always has.
-      permissionMode: 'full',
+      // On the install's default mode, like the runner's other threads
+      // (own-threads.ts): what it says comes from this Mac, but whoever
+      // answers it may ask its agent to act.
       startedBy: { kind: 'runner', label: 'Threadbear' },
     }).st;
     st.rec.forceUnread = true;
@@ -3542,7 +3612,7 @@ export class Runner {
 
 // The Runner's other methods live in parts under runner/, one area each;
 // they go onto its prototype here, as the class's own methods would be.
-for (const part of [looseEndsPart, labReviewPart, newThreadsPart, hibernationPart, titlesPart, highlightsPart, patchesPart, editingPart, clisPart, reviewsPart, buttonsPart, approvalsPart, projectsHostPart, stoppedWorkPart, handoversPart, poolsPart, networkPart, worktreesPart, commandsPart, movesPart]) {
+for (const part of [looseEndsPart, labReviewPart, newThreadsPart, hibernationPart, titlesPart, highlightsPart, patchesPart, editingPart, clisPart, reviewsPart, buttonsPart, approvalsPart, projectsHostPart, stoppedWorkPart, handoversPart, poolsPart, networkPart, worktreesPart, commandsPart, contextUsagePart, movesPart]) {
   for (const [key, d] of Object.entries(Object.getOwnPropertyDescriptors(part))) {
     Object.defineProperty(Runner.prototype, key, { ...d, enumerable: false });
   }
@@ -3578,6 +3648,39 @@ export type SendOptions = { origin?: MessageOrigin; scheduleId?: string; queue?:
 export function fromMike(text: string, opts: SendOptions): boolean {
   if (opts.origin && opts.origin !== 'phone') return false;
   return !sentByAgent(text);
+}
+
+// How long after a thread's last turn a message from Mike counts as coming
+// back to it. From 1,872 messages he typed in real threads up to 9 Nov 2026:
+// 5% come 12 hours or more after the last turn. Those coming back after 8 to
+// 12 hours just carry on from the night before, and from about 12 hours they
+// start to ask what a thing was ("what's this project?", "what's next?").
+// Each time he said outright that he'd lost track was 45 to 124 hours after.
+const AWAY_MS = 12 * 3_600_000;
+
+// What the recap box says: the sentence on what the thread is for, on a line
+// of its own above the librarian's bullets.
+// The most setBrief keeps of each (runner/titles.ts). Before 10 Nov it cut
+// both to 200 and 600 with a plain slice, and those records are still about.
+export const RECAP_PURPOSE_CHARS = 199;
+export const RECAP_BRIEF_CHARS = 600;
+export function recapText(brief: { text: string; purpose?: string }): string {
+  // An old purpose of 200 may have been cut partway through a secret whose
+  // end (a URL's "@", a closing quote) was never kept, and mid-recap the
+  // scrub can't tell. What's left of it can't be found either (a quoted
+  // password with a space in it), so one that long is left out: a new one is
+  // never more than 199 (Codex's review of Daybreak's 75). The brief comes
+  // last, where the scrub's rules for a value cut off at the end apply, and
+  // loses its last unseen run too, as text read up to a limit does.
+  const purpose = brief.purpose && brief.purpose.length <= RECAP_PURPOSE_CHARS ? brief.purpose : '';
+  const text = brief.text.length >= RECAP_BRIEF_CHARS ? brief.text.slice(0, safeEndOfPartial(brief.text, brief.text.length)).trimEnd() : brief.text;
+  return purpose ? `${purpose}\n${text}` : text;
+}
+
+// "14 hours ago", "3 days ago": rounded, as it's only there to say how long.
+function agoWords(ms: number): string {
+  const hours = Math.round(ms / 3_600_000);
+  return hours < 48 ? `${hours} hours ago` : `${Math.round(hours / 24)} days ago`;
 }
 
 // What the agent is told when Mike writes a message while its question or
@@ -3724,15 +3827,6 @@ export function oneLine(text: string, max: number): string {
   const s = text.replace(/\s+/g, ' ').trim();
   // Never through a secret: these lines go to Convex (safe-cut.ts).
   return cutSafely(s, max, '…');
-}
-
-// A provider's name in notes.
-export function providerName(p: Provider): string {
-  return p === 'omp' ? 'Oh My Pi' : p === 'codex' ? 'Codex' : 'Claude';
-}
-
-function cliName(p: Provider): string {
-  return p === 'omp' ? 'Oh My Pi' : p === 'codex' ? 'Codex' : 'Claude Code';
 }
 
 // Claude's own ids: its aliases, and anything starting claude- (with or

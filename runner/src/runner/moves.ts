@@ -12,21 +12,25 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { execFile } from 'node:child_process';
 import type { Runner } from '../runner.ts';
 import type { RunnerPart } from './part.ts';
+import { providerName } from '../providers.ts';
 import { paths } from '../config.ts';
 import { isDirectory } from '../fsutil.ts';
 import { readTree, writeTree, type PackEntry } from '../move-pack.ts';
-import { changedFiles, originUrl, packGit, repoKey, repoTop, unpackGit, type GitMeta } from '../move-git.ts';
-import type { MoveInfo, MovePlan, MovePreview, MoveRow, ThreadMoving } from '../moves.ts';
+import { changedFiles, cloneRepo, cloneableUrl, originUrl, packGit, repoKey, repoTop, unpackGit, withoutCredentials, type GitMeta } from '../move-git.ts';
+import { movedSchedules, type MoveInfo, type MovePlan, type MovePreview, type MoveRow, type MovedSchedule, type ThreadMoving } from '../moves.ts';
 import { projectDirName, sessionTranscriptPath } from '../transcripts.ts';
 import { findWorktreePatch } from '../patches.ts';
+import { isPatchFile, patchHash } from '../patch-trust.ts';
+import { claudeCommands } from '../claude-trust.ts';
+import { untrustedGit } from '../safe-git.ts';
+import { isPermissionMode } from '../protocol.ts';
 import { cleanUpWorktree, makeWorktree, mainCheckoutOf, realpath, type WorktreeRecord } from '../worktrees.ts';
 
 // What T placed for a move, so adopting after a restart and throwing it
 // away after a failure both know (<home>/moves/<moveId>/placed.json).
-type Placed = { cwd: string; worktree?: WorktreeRecord; patchFile?: string; patchName?: string; transcript: string[]; leftBehind: string[]; fromName: string; schedules?: unknown[] };
+type Placed = { cwd: string; worktree?: WorktreeRecord; patchFile?: string; patchName?: string; transcript: string[]; leftBehind: string[]; fromName: string; schedules?: unknown[]; gitTips?: string[] };
 
 // A moved thread's old folder is kept this long on S, in case.
 const KEPT_MS = 7 * 24 * 60 * 60_000;
@@ -44,11 +48,211 @@ function swapHome(p: string, fromHome: string): string {
   return p;
 }
 
-function clone(url: string, to: string): Promise<void> {
-  return new Promise((resolve, reject) => {
-    execFile('git', ['clone', '--quiet', url, to], { env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } }, (err, _out, stderr) => (err ? reject(new Error(`Couldn't clone ${url} to ${to}: ${String(stderr).trim().split('\n').pop() || err.message}`)) : resolve()));
-  });
+// What the moved record (the old runner's word, and that runner may be an
+// extra Mac) may not bring: anything that runs or approves something here.
+// "Always allow" rules were answers on the other machine, for its folder;
+// reply buttons (a command to run, a thread to start with its own mode, a
+// message to send) and an open card's commands were made there, for
+// there. They're asked or made again on this machine. True if it changed.
+function dropMovedPowers(rec: Record<string, any>): boolean {
+  let changed = false;
+  if (rec.allowRules !== undefined) {
+    delete rec.allowRules;
+    changed = true;
+  }
+  if (rec.buttons !== undefined) {
+    delete rec.buttons;
+    changed = true;
+  }
+  for (const ask of Array.isArray(rec.needs?.asks) ? rec.needs.asks : []) {
+    if (ask && typeof ask === 'object' && 'run' in ask) {
+      delete ask.run;
+      changed = true;
+    }
+  }
+  // A mode this runner doesn't know compares as nothing (2 > undefined is
+  // false), so every check that a thread may raise access would pass:
+  // Ask. A missing return mode from Plan first means Full (leavePlan), so
+  // one that isn't a mode is Ask too.
+  if (!isPermissionMode(rec.permissionMode)) {
+    rec.permissionMode = 'ask';
+    changed = true;
+  }
+  if (rec.modeBeforePlan !== undefined && !isPermissionMode(rec.modeBeforePlan)) {
+    rec.modeBeforePlan = 'ask';
+    changed = true;
+  }
+  return changed;
 }
+
+// On the main Mac, a thread from another runner arrives with at most Ask
+// (Mike, 10 Nov 2026): its mode is that runner's word, an extra Mac may be
+// compromised, and the main Mac's sidebar never showed what mode the
+// thread had there, so a thread that looked careful could arrive running
+// anything. Full and Auto become Ask (Plan first ranks with Ask and
+// stays), and so does the mode Plan first would go back to. Says what it
+// was, for the thread's note, or undefined when nothing changed.
+const ABOVE_ASK = new Set(['full', 'auto']);
+function capMovedMode(rec: Record<string, any>): { was?: string; changed: boolean } {
+  let was: string | undefined;
+  let changed = false;
+  if (rec.permissionMode !== 'ask' && rec.permissionMode !== 'plan') {
+    if (ABOVE_ASK.has(rec.permissionMode)) was = rec.permissionMode;
+    rec.permissionMode = 'ask';
+    changed = true;
+  }
+  if (rec.permissionMode === 'plan') {
+    // Approving the plan goes back to this, and to Full when it's missing
+    // (leavePlan), so it's always set.
+    if (rec.modeBeforePlan !== 'ask') {
+      if (ABOVE_ASK.has(rec.modeBeforePlan)) was ??= rec.modeBeforePlan;
+      rec.modeBeforePlan = 'ask';
+      changed = true;
+    }
+  } else if (rec.modeBeforePlan !== undefined) {
+    delete rec.modeBeforePlan;
+    changed = true;
+  }
+  return { ...(was ? { was } : {}), changed };
+}
+
+const MODE_WORDS: Record<string, string> = { full: 'Full access', auto: 'Auto' };
+function cappedNote(was: string, from: string): string {
+  return `It had ${MODE_WORDS[was] ?? was} on ${from}, so it asks before tools run here: give it more access again if you want.`;
+}
+
+// What a moved record may keep here, applied to the record wherever it is
+// (staging, the live folder, or loaded already): dropMovedPowers, and on
+// the main Mac capMovedMode. The note's line about the mode goes in
+// `notes`. True if it changed.
+function sanitizeMoved(rec: Record<string, any>, atMostAsk: boolean, from: string, notes: string[]): boolean {
+  let changed = dropMovedPowers(rec);
+  if (atMostAsk) {
+    const capped = capMovedMode(rec);
+    if (capped.was && !notes.some((n) => n.includes('so it asks before tools run here'))) notes.push(cappedNote(capped.was, from));
+    changed ||= capped.changed;
+  }
+  return changed;
+}
+
+// Whether the worktree's setup would run something the moved git work
+// changed: the patch's own copy, or a file it reaches, differs in the
+// worktree from the commit it was made from (this runner's own main), or
+// can't be followed. Threadbear's own checkout is always trusted, so for
+// its worktrees nothing else would stop the old runner's version of the
+// setup script running here (Codex's review, 10 Nov 2026). Says why, or
+// undefined when setup can run.
+export async function setupChangedByMove(w: WorktreeRecord, patchFile: string): Promise<string | undefined> {
+  // placeMove keeps the absolute path (makeWorktree's patchFile); the
+  // record's own is relative to the worktree.
+  const copy = path.isAbsolute(patchFile) ? patchFile : path.join(w.path, patchFile);
+  let reached: string[];
+  try {
+    const h = patchHash(copy);
+    if (h.incomplete) return `what it runs can't all be followed (${h.incomplete})`;
+    reached = [copy, ...h.deps.map((d) => (path.isAbsolute(d.path) ? d.path : path.resolve(path.dirname(copy), d.path))), ...h.unnamed.map((u) => (path.isAbsolute(u) ? u : path.resolve(path.dirname(copy), u)))];
+  } catch (e) {
+    return `its patch couldn't be read (${e instanceof Error ? e.message : String(e)})`;
+  }
+  const root = realpath(w.path);
+  for (const file of new Set(reached)) {
+    const real = realpath(file);
+    const rel = path.relative(root, real);
+    // Outside the worktree: the move didn't bring it.
+    if (rel.startsWith('..') || path.isAbsolute(rel)) continue;
+    const there = await untrustedGit(w.path, ['cat-file', '-e', `${w.base}:${rel.split(path.sep).join('/')}`]);
+    const exists = fs.existsSync(real);
+    if (!there.ok) {
+      if (exists) return `the moved work adds ${rel}, which it runs`;
+      continue;
+    }
+    if (!exists) return `the moved work removes ${rel}, which it runs`;
+    const same = await untrustedGit(w.path, ['diff', '--quiet', '--no-ext-diff', '--no-textconv', w.base, '--', rel.split(path.sep).join('/')]);
+    if (!same.ok) return `the moved work changes ${rel}, which it runs`;
+  }
+  return undefined;
+}
+
+// Whether the moved git work changed anything patch or Claude settings
+// trust covers in the worktree, from the commit T made it from: a file
+// under any .threadbear or .claude folder, a .mcp.json, or a file a patch
+// there or the Claude settings reach. Threadbear's own checkout is always
+// trusted, and its worktrees with it, so without this the old runner's
+// patches would load and its Claude hooks run here (Codex's review, 10 Nov
+// 2026). True when it did, or when it can't tell.
+// `tips`: the move's own commits (its head, and the commit of its
+// uncommitted work), whose trees say exactly what it brought, ignore rules
+// or not (a file this machine ignores is still written, untracked). Without
+// them (one placed by a runner from before), the worktree as it is, every
+// untracked file included.
+export async function trustTouchedByMove(w: WorktreeRecord, home: string, tips?: readonly string[], cwd?: string): Promise<boolean> {
+  const lists: { ok: boolean; stdout: string }[] = [];
+  if (tips?.length) {
+    for (const tip of tips) lists.push(await untrustedGit(w.path, ['diff', '--name-only', '-z', '--no-renames', '--no-ext-diff', '--no-textconv', w.base, tip]));
+  } else {
+    lists.push(await untrustedGit(w.path, ['diff', '--name-only', '-z', '--no-renames', '--no-ext-diff', '--no-textconv', w.base]));
+    lists.push(await untrustedGit(w.path, ['ls-files', '-z', '--others']));
+  }
+  if (lists.some((l) => !l.ok)) return true;
+  const changed = [...new Set(lists.flatMap((l) => l.stdout.split('\0')).filter(Boolean))];
+  if (!changed.length) return false;
+  // Without case: on the Mac .CLAUDE is .claude, and a name from a
+  // case-sensitive machine can be either.
+  // node_modules too: a committed package is code a patch may import.
+  if (changed.some((f) => f.toLowerCase().split('/').some((part) => part === '.threadbear' || part === '.claude' || part === 'node_modules') || path.posix.basename(f).toLowerCase() === '.mcp.json')) return true;
+  const touchedLower = new Set(changed.map((f) => path.join(realpath(w.path), ...f.split('/')).toLowerCase()));
+  const root = realpath(w.path);
+  // A changed symlink can point an unchanged patch's import at another
+  // file, which the reached paths name rather than the link: any changed
+  // link counts (Codex's review).
+  for (const f of changed) {
+    try {
+      if (fs.lstatSync(path.join(w.path, ...f.split('/'))).isSymbolicLink()) return true;
+    } catch {
+      // Gone: a removal, compared below.
+    }
+  }
+  const touched = new Set(changed.map((f) => path.join(root, ...f.split('/'))));
+  const hit = (file: string) => {
+    const real = realpath(path.isAbsolute(file) ? file : path.join(root, file));
+    return touched.has(real) || touchedLower.has(real.toLowerCase());
+  };
+  // What the patches already there reach (a patch file itself changing
+  // was caught above).
+  const patches = await untrustedGit(w.path, ['ls-files', '-z', '--cached', '--others', '--exclude-standard', '--', ':(glob)**/.threadbear/patches/*']);
+  if (!patches.ok) return true;
+  for (const rel of patches.stdout.split('\0').filter(Boolean)) {
+    const file = path.join(root, ...rel.split('/'));
+    if (!isPatchFile(file)) continue;
+    try {
+      const h = patchHash(file);
+      if (h.incomplete) return true;
+      const near = (p: string) => (path.isAbsolute(p) ? p : path.resolve(path.dirname(file), p));
+      if ([...h.deps.map((d) => d.path), ...h.unnamed, ...h.code.keys()].some((p) => hit(near(p)))) return true;
+    } catch {
+      return true;
+    }
+  }
+  // What runs, and what lets tools run unasked (a permissions allow).
+  // From the worktree's top and from the folder Claude starts in (a thread
+  // in a subfolder), as Claude reads the settings above where it starts.
+  for (const dir of new Set([w.path, ...(cwd ? [cwd] : [])])) {
+    for (const grants of [false, true]) {
+      const claude = claudeCommands(dir, home, { grants });
+      if (claude && (claude.incomplete || [...claude.files, ...claude.named].some(hit))) return true;
+    }
+  }
+  return false;
+}
+
+// Every untracked file under a node_modules folder in `dir`, removed (not
+// followed: git lists a linked node_modules as the link, and leaves it).
+export async function dropUntrackedPackages(dir: string): Promise<void> {
+  const listed = await untrustedGit(dir, ['ls-files', '-z', '--others', '--', ':(glob)**/node_modules/**']);
+  for (const rel of listed.ok ? listed.stdout.split('\0').filter(Boolean) : []) fs.rmSync(path.join(dir, ...rel.split('/')), { force: true });
+}
+
+const UNVOUCHED_NOTE = "Its worktree's work changes this repo's patches or Claude Code settings, so they wait for you to trust them in Patches here.";
 
 export const movesPart = {
   // ThreadSummary.moving, and while it's set no turn starts: messages wait
@@ -79,7 +283,9 @@ export const movesPart = {
     const account = this.accounts.list().find((a) => a.id === rec.accountId);
     const own = Boolean(rec.worktree && !rec.worktree.removedAt);
     const top = await repoTop(rec.cwd);
-    const origin = top ? await originUrl(top) : undefined;
+    // Which repo, never a password or token in its address (move-git.ts).
+    const raw = top ? await originUrl(top) : undefined;
+    const origin = raw ? withoutCredentials(raw) : undefined;
     const rel = top ? path.relative(top, rec.cwd) : '';
     return {
       title: rec.title,
@@ -97,6 +303,23 @@ export const movesPart = {
       ...(rec.sessionUsed && rec.nativeSessionId ? { sessionId: rec.nativeSessionId } : {}),
       schedules,
     };
+  },
+
+  // What packForMove will leave behind, in words for before the move. Move
+  // to goes straight away unless there's something here to say first.
+  async leftBehindByMove(this: Runner, threadId: string): Promise<string[]> {
+    const st = this.threads.get(threadId);
+    if (!st) return [];
+    const { rec, rt } = st;
+    const out: string[] = [];
+    const shells = rt.tasks.filter((t) => t.kind !== 'agent').length;
+    if (shells) out.push(`${shells} background ${shells === 1 ? 'job, which gets' : 'jobs, which get'} stopped`);
+    if (!rec.worktree || rec.worktree.removedAt) {
+      const top = await repoTop(rec.cwd);
+      const files = top ? await changedFiles(top) : [];
+      if (files.length) out.push(`uncommitted changes in ${top}, as other threads share that checkout: ${files.join(', ')}`);
+    }
+    return out;
   },
 
   // Releases the CLI and gathers what goes: the thread's folder, its
@@ -171,7 +394,7 @@ export const movesPart = {
       accounts.find((a) => a.provider === info.provider && a.email && info.email && a.email.toLowerCase() === info.email.toLowerCase()) ??
       accounts.find((a) => a.id === this.defaultAccountId() && a.provider === info.provider) ??
       accounts.find((a) => a.provider === info.provider);
-    if (!account) return { problem: `${here} has no ${info.provider === 'omp' ? 'Oh My Pi' : info.provider === 'codex' ? 'Codex' : 'Claude'} login.` };
+    if (!account) return { problem: `${here} has no ${providerName(info.provider)} login.` };
     const leftBehind: string[] = [];
     const subdir = info.subdir ?? '';
     const into = (top: string) => (subdir ? path.join(top, ...subdir.split('/')) : top);
@@ -208,7 +431,10 @@ export const movesPart = {
       let cloneTo: { url: string; to: string } | undefined;
       if (!repo && info.repoTop) {
         const to = swapHome(info.repoTop, info.home);
-        if (!fs.existsSync(to) && isDirectory(path.dirname(to))) {
+        // Both are the old runner's word: a clone only from an address git
+        // can't read as an option, into a new folder named in full.
+        const plain = path.isAbsolute(to) && path.resolve(to) === to;
+        if (plain && cloneableUrl(info.origin) && !fs.existsSync(to) && isDirectory(path.dirname(to))) {
           cloneTo = { url: info.origin, to };
           repo = to;
         }
@@ -247,9 +473,18 @@ export const movesPart = {
         // the old one says its own (the note read "Moved from 7928812d92c1").
         if (placed.fromName === row.from && typeof m.fromName === 'string' && m.fromName.trim()) placed.fromName = m.fromName.trim().slice(0, 80);
       }
+      // Only when and what each sends (moves.ts movedSchedules): nothing
+      // that runs or approves anything comes from the other runner.
       const schedules = entries.find((e) => e.path === 'schedules.json');
-      if (schedules) placed.schedules = JSON.parse(schedules.data.toString('utf8')) as unknown[];
-      if (plan.clone) await clone(plan.clone.url, plan.clone.to);
+      if (schedules) {
+        const { schedules: kept, dropped } = movedSchedules(JSON.parse(schedules.data.toString('utf8')), row.threadId);
+        placed.schedules = kept;
+        if (dropped) placed.leftBehind.push(`${dropped === 1 ? "A schedule's shell check was" : `${dropped} schedules' shell checks were`} left off here: set ${dropped === 1 ? 'it' : 'them'} again if still wanted, with a card on this machine.`);
+      }
+      if (plan.clone) {
+        const cloned = await cloneRepo(plan.clone.url, plan.clone.to);
+        if (!cloned.ok) throw new Error(cloned.reason);
+      }
 
       if (plan.worktree) {
         const patch = await findWorktreePatch(plan.worktree.repo, this.panelsRoot, this.patchCache, undefined, this.patchTrust);
@@ -270,6 +505,14 @@ export const movesPart = {
           const r = await unpackGit(made.worktree.path, meta, bundle ? bundleFile : undefined);
           fs.rmSync(bundleFile, { force: true });
           if (!r.ok) throw new Error(r.reason);
+          // Patches and Claude settings it changed are held to the stored
+          // hashes here, even in an always-trusted checkout.
+          placed.gitTips = [meta.head, ...(meta.wip ? [meta.wip] : [])];
+          if (await trustTouchedByMove(made.worktree, os.homedir(), placed.gitTips, plan.worktree.subdir ? path.join(made.worktree.path, ...plan.worktree.subdir.split('/')) : made.worktree.path)) {
+            this.patchTrust.unvouch?.(made.worktree.path);
+            placed.leftBehind.push(UNVOUCHED_NOTE);
+            save();
+          }
         }
       }
 
@@ -295,8 +538,10 @@ export const movesPart = {
         rec.provider = account.provider;
         delete rec.model;
         delete rec.effort;
-        delete rec.allowRules;
       }
+      // Nothing that runs or approves anything comes (dropMovedPowers),
+      // and on the main Mac no more than Ask (capMovedMode).
+      sanitizeMoved(rec, Boolean(this.movedInAtMostAsk?.()), placed.fromName, placed.leftBehind);
       rec.cwd = placed.cwd;
       rec.accountId = account.id;
       delete rec.poolId;
@@ -316,29 +561,59 @@ export const movesPart = {
 
   // T, after the switch: the staging folder joins the live threads. Safe to
   // call again (after a restart, say): once it's here there's nothing left.
-  async adoptMoved(this: Runner, row: MoveRow): Promise<{ adopted: boolean; schedules?: unknown[] }> {
+  async adoptMoved(this: Runner, row: MoveRow): Promise<{ adopted: boolean; schedules?: MovedSchedule[] }> {
     const stage = stageOf(this.cfg.home, row.moveId);
     const placedFile = path.join(stage, 'placed.json');
     if (!fs.existsSync(placedFile)) return { adopted: false };
     const placed = JSON.parse(fs.readFileSync(placedFile, 'utf8')) as Placed;
     const dest = paths.thread(this.cfg.home, row.threadId);
+    const atMostAsk = Boolean(this.movedInAtMostAsk?.());
+    // The record as placeMove leaves it is clean already, but one placed by
+    // a runner from before (and adopted after it updated) may not be: made
+    // clean before it joins the live threads, and again wherever a crash
+    // left it (the live folder, or loaded at start).
+    const clean = (recFile: string) => {
+      try {
+        const rec = JSON.parse(fs.readFileSync(recFile, 'utf8'));
+        if (sanitizeMoved(rec, atMostAsk, placed.fromName, placed.leftBehind)) fs.writeFileSync(recFile, JSON.stringify(rec, null, 2));
+      } catch {
+        // No record to read: adopt says the thread didn't load.
+      }
+    };
+    // Worked out again here: one placed by a runner from before this
+    // never was (trustTouchedByMove), and it must be before anything loads
+    // the worktree's patches or starts its CLI.
+    // One placed by a runner from before unpackGit refused packages in the
+    // uncommitted work may have them there, untracked, which trust reads
+    // as installed and doesn't hash: they go (setup installs them again).
+    if (placed.worktree && !placed.gitTips) await dropUntrackedPackages(placed.worktree.path);
+    if (placed.worktree && (await trustTouchedByMove(placed.worktree, os.homedir(), placed.gitTips, placed.cwd))) {
+      this.patchTrust.unvouch?.(placed.worktree.path);
+      if (!placed.leftBehind.includes(UNVOUCHED_NOTE)) placed.leftBehind.push(UNVOUCHED_NOTE);
+    }
     if (!fs.existsSync(dest)) {
+      clean(path.join(stage, 'thread', 'thread.json'));
       fs.mkdirSync(path.dirname(dest), { recursive: true });
       fs.renameSync(path.join(stage, 'thread'), dest);
-    }
+    } else clean(path.join(dest, 'thread.json'));
     this.adopt(row.threadId);
     const st = this.threads.get(row.threadId);
     if (!st) throw new Error("The moved thread didn't load.");
+    if (sanitizeMoved(st.rec as unknown as Record<string, any>, atMostAsk, placed.fromName, placed.leftBehind)) this.store.save(st.rec);
     const lines = [`Moved from ${placed.fromName} to ${this.moveRunnerName(row.to)}, in ${placed.cwd}.`, ...placed.leftBehind];
     this.emit(st, { type: 'system.note', text: lines.join(' ') });
     this.markDirty(st);
     fs.rmSync(stage, { recursive: true, force: true });
     if (placed.worktree && placed.patchFile && placed.patchName) {
       const patch = await findWorktreePatch(placed.worktree.mainCheckout, this.panelsRoot, this.patchCache, undefined, this.patchTrust).catch(() => undefined);
-      if (patch) await this.setUpWorktree(st, { worktree: placed.worktree, patchFile: placed.patchFile }, patch);
+      const changed = patch?.setup ? await setupChangedByMove(placed.worktree, placed.patchFile) : undefined;
+      if (changed) this.emit(st, { type: 'system.note', text: `Didn't run the worktree's setup (${patch!.setup}): ${changed}. Look at it, then run it yourself if it's right.` });
+      else if (patch) await this.setUpWorktree(st, { worktree: placed.worktree, patchFile: placed.patchFile }, patch);
     }
     this.log.info('took a moved thread in', { threadId: row.threadId, from: row.from });
-    return { adopted: true, ...(placed.schedules?.length ? { schedules: placed.schedules } : {}) };
+    // Through the same filter again: a placed.json from before it had one.
+    const schedules = movedSchedules(placed.schedules ?? [], row.threadId).schedules;
+    return { adopted: true, ...(schedules.length ? { schedules } : {}) };
   },
 
   // T: the move failed or was cancelled before the switch.

@@ -18,6 +18,9 @@ const HOSTS: Partial<Record<Provider, string>> = {
   claude: 'api.anthropic.com',
   // Codex logins are ChatGPT ones; its requests go to chatgpt.com.
   codex: 'chatgpt.com',
+  cursor: 'api2.cursor.sh',
+  // Its free models; a login's own provider may be elsewhere.
+  opencode: 'opencode.ai',
 };
 
 // How long a probe may take in all, whatever arrives meanwhile: a proxy

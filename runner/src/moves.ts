@@ -17,6 +17,7 @@
 import type { PackEntry } from './move-pack.ts';
 import { archive, chunks, MAX_SEALED_BYTES, sealInfo, sha256, unarchive, biggest } from './move-pack.ts';
 import { sealBytes } from './secrets.ts';
+import { withoutCredentials } from './move-git.ts';
 
 export type MoveState = 'asking' | 'ready' | 'packing' | 'unpacking' | 'claimed' | 'done' | 'failed' | 'cancelled';
 
@@ -60,6 +61,87 @@ export function moveInfoFrom(raw: unknown): MoveInfo | undefined {
     if (v !== undefined) info[k] = v;
   }
   return info;
+}
+
+// The runner `asked` names for move_thread: its id, its whole name, or a
+// word in just one runner's name, or why none. A name is the runner's own
+// word (another Mac's heartbeat sets it, and can change it while a card
+// is up), so a word that's one runner's whole name and part of another's
+// is ambiguous rather than the whole-name one: "cloud" with "Hetzner
+// Cloud" and a runner that renamed itself "cloud" names neither. The move
+// then goes by the id this picks, never the name again (security review,
+// 10 Nov 2026).
+export function pickRunner(asked: string, all: readonly { id: string; name: string }[]): { id: string; name: string } | { problem: string } {
+  const want = asked.trim().toLowerCase();
+  const byId = all.find((r) => r.id === asked.trim());
+  if (byId) return byId;
+  const matches = want ? all.filter((r) => r.name.toLowerCase().includes(want)) : [];
+  const listed = all.map((r) => `${r.name} (${r.id})`).join(', ');
+  if (matches.length === 1) return matches[0]!;
+  if (!matches.length) return { problem: `No runner called ${asked}. There are: ${listed}.` };
+  return { problem: `${asked} could be ${matches.map((r) => `${r.name} (${r.id})`).join(' or ')}: name one by its id or its whole name, with no other runner's name containing it.` };
+}
+
+// The runner pickRunner chose, as the move goes: still there, under the
+// name the card showed, or it throws and nothing moves.
+export function stillRunner(runnerId: string, runnerName: string, all: readonly { id: string; name: string }[]): { id: string; name: string } {
+  const to = all.find((r) => r.id === runnerId);
+  if (!to) throw new Error(`The runner ${runnerName} (${runnerId}) isn't there any more, so the thread stays here.`);
+  if (to.name !== runnerName) throw new Error(`The runner ${runnerId} is called ${to.name} now, not ${runnerName} as it was when the move was asked for, so the thread stays here. Ask again if it's still the one.`);
+  return to;
+}
+
+// What T makes again of a moved thread's schedules (the bundle's
+// schedules.json): only when and what each sends, to the moved thread.
+// The bundle is the old runner's word, and that runner may be one of the
+// owner's extra Macs, so nothing that runs or approves anything comes
+// across: no shell check (Scheduler.create approves a check it's given
+// without a card), no folder, login, model or mode (a schedule that sends
+// to a thread runs on the thread's), no other runner. A check is set
+// again on the runner that runs it, with its own card (security review,
+// 10 Nov 2026). `dropped` counts the checks left off, for the thread's note.
+export type MovedSchedule = { text: string; title?: string; cron?: string; at?: string; timezone?: string; paused?: boolean; createdBy?: string };
+export function movedSchedules(raw: unknown, threadId: string): { schedules: MovedSchedule[]; dropped: number } {
+  const schedules: MovedSchedule[] = [];
+  let dropped = 0;
+  for (const item of Array.isArray(raw) ? raw.slice(0, 100) : []) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
+    const o = item as Record<string, unknown>;
+    const str = (k: string, max: number) => (typeof o[k] === 'string' && (o[k] as string).trim() && (o[k] as string).length <= max ? (o[k] as string) : undefined);
+    if (o.check !== undefined || o.checkCard !== undefined) dropped++;
+    const text = str('text', 100_000);
+    const cron = str('cron', 200);
+    const at = str('at', 100);
+    if (!text || !cron === !at) continue;
+    const title = str('title', 200);
+    const timezone = str('timezone', 100);
+    schedules.push({ text, ...(title ? { title } : {}), ...(cron ? { cron } : { at: at! }), ...(timezone ? { timezone } : {}), ...(o.paused === true ? { paused: true } : {}), ...(o.createdBy === threadId ? { createdBy: threadId } : {}) });
+  }
+  return { schedules, dropped };
+}
+
+// What the main Mac sends the runner a preview asks (threads.movePreview,
+// a relay `moves.preview` call): only what planMove reads, and what a
+// runner from before this needs to read it (moveInfoFrom wants a title,
+// login and mode), scrubbed as sync scrubs. A relay command isn't scrubbed
+// on its way (the phone's words go as typed), so this is where (security
+// review, 10 Nov 2026).
+export function previewInfo(info: MoveInfo, scrub: <T>(v: T) => T): Record<string, unknown> {
+  const out: Record<string, unknown> = {
+    title: '',
+    cwd: info.cwd,
+    home: info.home,
+    provider: info.provider,
+    accountId: info.accountId,
+    permissionMode: info.permissionMode,
+    worktree: info.worktree,
+    schedules: 0,
+    ...(info.email ? { email: info.email } : {}),
+    ...(info.origin ? { origin: withoutCredentials(info.origin) } : {}),
+    ...(info.repoTop ? { repoTop: info.repoTop } : {}),
+    ...(info.subdir !== undefined ? { subdir: info.subdir } : {}),
+  };
+  return scrub(out);
 }
 
 // Where T will run it (moves:moveReady).
@@ -112,7 +194,7 @@ export type ThreadMoving = { moveId: string; to: string; toName: string; state: 
 export type MovesBackend = {
   // Every update of the moves this runner is in (moves:moves).
   watch(onMoves: (rows: MoveRow[]) => void, onError: (e: unknown) => void): () => void;
-  call(fn: 'moveInfo' | 'moveReady' | 'moveFrozen' | 'moveChunkUrl' | 'movePacked' | 'moveChunks' | 'moveClaim' | 'moveDone' | 'moveFailed', args: Record<string, unknown>): Promise<unknown>;
+  call(fn: 'moveInfo' | 'moveReady' | 'moveFrozen' | 'moveChunkUrl' | 'movePacked' | 'moveChunks' | 'moveClaim' | 'moveDone' | 'moveFailed' | 'moveDropChunks', args: Record<string, unknown>): Promise<unknown>;
   upload(url: string, bytes: Buffer): Promise<string>;
   download(url: string): Promise<Buffer>;
 };
@@ -191,10 +273,22 @@ export class Moves {
   }
 
   // Threads leaving this runner whose rows it must no longer write: past
-  // the switch they're the other runner's.
+  // the switch they're the other runner's. Only the thread's latest move
+  // past its switch counts, so one moved away and back again is this
+  // runner's again.
   gone(threadId: string): boolean {
-    for (const m of this.rows.values()) if (m.threadId === threadId && m.from === this.d.self() && (m.state === 'claimed' || m.state === 'done')) return true;
-    return false;
+    const last = this.lastSwitched(threadId);
+    return !!last && last.from === this.d.self();
+  }
+
+  // A thread's latest move that got past its switch, of those heard of.
+  private lastSwitched(threadId: string): MoveRow | undefined {
+    let last: MoveRow | undefined;
+    for (const m of this.rows.values()) {
+      if (m.threadId !== threadId || (m.state !== 'claimed' && m.state !== 'done')) continue;
+      if (!last || m.createdAt > last.createdAt) last = m;
+    }
+    return last;
   }
 
   // The move a thread here is in, for ThreadSummary.moving.
@@ -275,11 +369,20 @@ export class Moves {
         if (sealed.length > MAX_SEALED_BYTES) throw new Error(`The thread is too big to move (${Math.round(sealed.length / 1024 / 1024)} MB, over 100): most of it is ${biggest(entries)}.`);
         const backend = this.backend();
         const ids: string[] = [];
-        for (const part of chunks(sealed)) {
-          const url = (await backend.call('moveChunkUrl', { moveId: row.moveId })) as string;
-          ids.push(await backend.upload(url, part));
+        try {
+          for (const part of chunks(sealed)) {
+            const url = (await backend.call('moveChunkUrl', { moveId: row.moveId })) as string;
+            ids.push(await backend.upload(url, part));
+          }
+          await backend.call('movePacked', { moveId: row.moveId, chunks: ids, sha256: sha256(sealed), bytes: sealed.length });
+        } catch (e) {
+          // The move ended meanwhile (the other runner failed it, say): the
+          // main Mac's uploads have no record the backend's cleanup could
+          // find, so it asks for them to go (a runner key's go with the move
+          // by themselves; the backend refuses this for them).
+          if (ids.length) await backend.call('moveDropChunks', { moveId: row.moveId, chunks: ids }).catch(() => undefined);
+          throw e;
         }
-        await backend.call('movePacked', { moveId: row.moveId, chunks: ids, sha256: sha256(sealed), bytes: sealed.length });
         return;
       }
       case 'unpacking':
@@ -287,7 +390,9 @@ export class Moves {
         host.setMoving(id, this.moving(row));
         return;
       case 'done':
-        if (host.has(id)) await host.putAway(id, row);
+        // Not if it has come back since (a later move to here): heard again
+        // after a restart, an old move's done would put the thread away.
+        if (host.has(id) && this.lastSwitched(id)?.moveId === row.moveId) await host.putAway(id, row);
         return;
       case 'failed':
       case 'cancelled': {

@@ -17,7 +17,7 @@ test("the backend lets the Move sheet's two calls through, and only the descript
     method: 'moves.preview',
     params: { info: { title: 't', cwd: '/c', home: '/h', provider: 'claude', accountId: 'a', permissionMode: 'full', worktree: true, schedules: 2, secret: 'no', email: 5 }, cwd: '/there', extra: 1 },
   });
-  assert.deepEqual(out, { method: 'moves.preview', params: { info: { title: 't', cwd: '/c', home: '/h', provider: 'claude', accountId: 'a', permissionMode: 'full', worktree: true, schedules: 2 }, cwd: '/there' } });
+  assert.deepEqual(out, { method: 'moves.preview', params: { info: { title: '', cwd: '/c', home: '/h', provider: 'claude', accountId: 'a', permissionMode: 'full', worktree: true, schedules: 2 }, cwd: '/there' } });
   assert.throws(() => commandArgs('call', { method: 'threads.events', params: {} }), /can be asked of another runner/);
 });
 

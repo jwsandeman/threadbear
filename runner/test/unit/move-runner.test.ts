@@ -160,3 +160,19 @@ test("a place that can't finish undoes what it made", async () => {
   assert.equal(fs.existsSync(path.join(t.home, 'moves', r.moveId)), false);
   assert.equal(t.runner.threads.has(id), false);
 });
+
+test('a preview says what the thread would leave behind on this machine', async () => {
+  const work = tmpDir('tb-move-work-');
+  const git = (...args: string[]) => execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.com', ...args], { cwd: work, stdio: 'ignore' });
+  git('init', '-q');
+  fs.writeFileSync(path.join(work, 'a.txt'), 'one');
+  git('add', '.');
+  git('commit', '-qm', 'one');
+  const s = machine([{ id: 'claude-main', provider: 'claude', title: 'S login', configDir: tmpDir() }]);
+  const id = s.runner.create({ text: 'Fix it', accountId: 'claude-main', cwd: work }).thread.id;
+  assert.deepEqual(await s.runner.leftBehindByMove(id), [], 'nothing to say, so Move to goes straight away');
+  fs.writeFileSync(path.join(work, 'a.txt'), 'two');
+  const said = await s.runner.leftBehindByMove(id);
+  assert.equal(said.length, 1);
+  assert.match(said[0], /uncommitted changes in .*share that checkout: a\.txt/);
+});

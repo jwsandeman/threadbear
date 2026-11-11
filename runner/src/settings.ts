@@ -3,14 +3,23 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { Config } from './config.ts';
-import { expandHome, readRunnerJson, writeRunnerJson } from './config.ts';
+import { expandHome, peekRunnerJson, readRunnerJson, writeRunnerJson } from './config.ts';
 import type { Clock } from './clock.ts';
 import { ErrorCode, RpcError } from './protocol.ts';
 import type { Notification } from './runner.ts';
 import type { Models } from './models/index.ts';
 import type { BringInSetting } from './bring-in.ts';
 import { DEFAULT_BRING_IN_DAYS, parseBringIn } from './bring-in.ts';
-import { EXPERIMENTS, experimentOn } from './experiments.ts';
+import { EXPERIMENTS, experimentOn, type Experiment } from './experiments.ts';
+
+// One experiment as Settings > General lists it, with its switch.
+export type ExperimentSetting = {
+  id: string;
+  name: string;
+  // The guide's paragraph (experiments/<id>.md, "What it does").
+  does: string;
+  on: boolean;
+};
 
 export type Settings = {
   defaultCwd: string;
@@ -19,6 +28,11 @@ export type Settings = {
   followMain: boolean;
   bulletReplies: boolean;
   oneReply: boolean;
+  // Review by another lab (runner/lab-review.ts).
+  labReview: boolean;
+  // Keep the Mac awake while threads work (keep-awake.ts). Only on a Mac:
+  // left out elsewhere, so Settings shows no switch for it.
+  keepAwake?: boolean;
   // How often a fork's runner starts a thread to bring in Mike's releases
   // (bring-in.ts): every so many days, 'important' or 'off'.
   bringIn: BringInSetting;
@@ -26,19 +40,8 @@ export type Settings = {
     pool: string | null;
     privateFolders: string[];
   };
-  // Every experiment (experiments.ts), for Settings > Experiments: `on` is
-  // what this runner does now, `standard` what it would do with nothing in
-  // runner.json.
+  // Every experiment there is, oldest first, and whether it's on here.
   experiments: ExperimentSetting[];
-};
-
-export type ExperimentSetting = {
-  id: string;
-  name: string;
-  title: string;
-  added: string;
-  on: boolean;
-  standard: boolean;
 };
 
 export type SettingsUpdate = {
@@ -48,11 +51,12 @@ export type SettingsUpdate = {
   followMain?: boolean;
   bulletReplies?: boolean;
   oneReply?: boolean;
+  labReview?: boolean;
+  keepAwake?: boolean;
   bringIn?: BringInSetting;
   models?: { pool?: string | null; privateFolders?: string[] };
-  // true or false sets the switch in runner.json; null takes it out, so
-  // the experiment goes back to its default.
-  experiments?: Record<string, boolean | null>;
+  // Experiment id to on or off, saved under runner.json `experiments`.
+  experiments?: Record<string, boolean>;
 };
 
 export class SettingsService {
@@ -60,9 +64,11 @@ export class SettingsService {
   private publish: (n: Notification) => void;
   // The pools there are, so models.pool can be checked; unchecked without.
   private poolIds?: () => string[];
+  private experimentList: readonly Experiment[];
 
-  constructor(opts: { config: Config; publish: (n: Notification) => void; poolIds?: () => string[] }) {
+  constructor(opts: { config: Config; publish: (n: Notification) => void; poolIds?: () => string[]; experiments?: readonly Experiment[] }) {
     this.cfg = opts.config;
+    this.experimentList = opts.experiments ?? EXPERIMENTS;
     this.poolIds = opts.poolIds;
     this.publish = opts.publish;
   }
@@ -73,15 +79,17 @@ export class SettingsService {
       idleMinutes: Math.round((this.cfg.idleMs / 60_000) * 100) / 100,
       maxLiveCLIs: this.cfg.maxLive,
       // What the next start will do, which is what the switch means.
-      followMain: readRunnerJson(this.cfg.home).followMain !== false,
+      followMain: peekRunnerJson(this.cfg.home).followMain !== false,
       bulletReplies: this.cfg.bulletReplies,
       oneReply: this.cfg.oneReply,
+      labReview: this.cfg.labReview,
+      ...(process.platform === 'darwin' ? { keepAwake: this.cfg.keepAwake } : {}),
       bringIn: bringInSetting(this.cfg.home),
       models: {
         pool: this.cfg.models.pool,
         privateFolders: [...this.cfg.models.privateFolders],
       },
-      experiments: EXPERIMENTS.map((x) => ({ id: x.id, name: x.name, title: x.title, added: x.added, on: experimentOn(this.cfg.home, x.id), standard: x.on })),
+      experiments: this.experimentList.map((x) => ({ id: x.id, name: x.name, does: x.does, on: experimentOn(this.cfg.home, x.id, this.experimentList) })),
     };
   }
 
@@ -102,8 +110,9 @@ export class SettingsService {
     if (pool === '') throw bad('pool must be a pool id or null');
     const pools = pool ? this.poolIds?.() : undefined;
     if (pool && pools && !pools.includes(pool)) throw bad(`No pool called ${pool}. Pools: ${pools.join(', ') || 'none'}`);
+    const known = this.experimentList.map((x) => x.id);
     for (const id of Object.keys(u.experiments ?? {})) {
-      if (!EXPERIMENTS.some((x) => x.id === id)) throw bad(`No experiment called ${id}. Experiments: ${EXPERIMENTS.map((x) => x.id).join(', ')}`);
+      if (!known.includes(id)) throw bad(`No experiment called ${id}. Experiments: ${known.join(', ') || 'none'}`);
     }
 
     const json = readRunnerJson(this.cfg.home);
@@ -123,6 +132,8 @@ export class SettingsService {
     if (u.followMain !== undefined) json.followMain = u.followMain;
     if (u.bulletReplies !== undefined) json.bulletReplies = this.cfg.bulletReplies = u.bulletReplies;
     if (u.oneReply !== undefined) json.oneReply = this.cfg.oneReply = u.oneReply;
+    if (u.labReview !== undefined) json.labReview = this.cfg.labReview = u.labReview;
+    if (u.keepAwake !== undefined) json.keepAwake = this.cfg.keepAwake = u.keepAwake;
     // Read each time it's needed (bring-in.ts), so this takes effect at once.
     if (u.bringIn !== undefined) json.releases = { ...json.releases, bringIn: u.bringIn };
     if (folders !== undefined || pool !== undefined) {
@@ -130,18 +141,8 @@ export class SettingsService {
       if (pool !== undefined) json.models.pool = this.cfg.models.pool = pool;
       if (folders !== undefined) json.models.privateFolders = this.cfg.models.privateFolders = [...new Set(folders)];
     }
-    // Read afresh wherever an experiment is checked (experimentOn), so a
-    // switch takes effect at once; one that lives in the app is read from
-    // settings.updated there.
-    if (u.experiments) {
-      const flags = { ...json.experiments };
-      for (const [id, on] of Object.entries(u.experiments)) {
-        if (on === null) delete flags[id];
-        else flags[id] = on;
-      }
-      if (Object.keys(flags).length) json.experiments = flags;
-      else delete json.experiments;
-    }
+    // Read at each use (experimentOn), so this takes effect at once.
+    if (u.experiments && Object.keys(u.experiments).length) json.experiments = { ...json.experiments, ...u.experiments };
     writeRunnerJson(this.cfg.home, json);
     return this.changed();
   }
@@ -173,6 +174,14 @@ export function settingsMethods(s: SettingsService): Record<string, (p: Record<s
         if (typeof p.oneReply !== 'boolean') throw bad('oneReply must be a boolean');
         u.oneReply = p.oneReply;
       }
+      if (p.labReview !== undefined) {
+        if (typeof p.labReview !== 'boolean') throw bad('labReview must be a boolean');
+        u.labReview = p.labReview;
+      }
+      if (p.keepAwake !== undefined) {
+        if (typeof p.keepAwake !== 'boolean') throw bad('keepAwake must be a boolean');
+        u.keepAwake = p.keepAwake;
+      }
       if (p.bringIn !== undefined) {
         const b = parseBringIn(p.bringIn);
         if (b === undefined) throw bad("bringIn must be a whole number of days from 1 to 365, 'important' or 'off'");
@@ -195,13 +204,11 @@ export function settingsMethods(s: SettingsService): Record<string, (p: Record<s
         }
       }
       if (p.experiments !== undefined) {
-        const e = p.experiments;
-        if (!e || typeof e !== 'object' || Array.isArray(e)) throw bad('experiments must be an object of id to true, false or null');
-        u.experiments = {};
-        for (const [id, on] of Object.entries(e as Record<string, unknown>)) {
-          if (on !== null && typeof on !== 'boolean') throw bad(`experiments.${id} must be true, false or null`);
-          u.experiments[id] = on;
+        const x = p.experiments;
+        if (!x || typeof x !== 'object' || Array.isArray(x) || Object.values(x).some((v) => typeof v !== 'boolean')) {
+          throw bad('experiments must map each experiment id to true or false');
         }
+        u.experiments = x as Record<string, boolean>;
       }
       return { settings: s.update(u) };
     },
@@ -270,5 +277,5 @@ function maxTokens(p: Record<string, unknown>): { maxTokens?: number } {
 
 // runner.json `releases.bringIn`, or every 5 days.
 export function bringInSetting(home: string): BringInSetting {
-  return parseBringIn(readRunnerJson(home).releases?.bringIn) ?? DEFAULT_BRING_IN_DAYS;
+  return parseBringIn(peekRunnerJson(home).releases?.bringIn) ?? DEFAULT_BRING_IN_DAYS;
 }

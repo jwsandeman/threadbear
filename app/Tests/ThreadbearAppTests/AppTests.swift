@@ -423,6 +423,19 @@ final class QuestionAnswerTests: XCTestCase {
         let answers = QuestionRowCell.answers(for: request, chosen: [:], typed: "Medium")
         XCTAssertEqual(answers, ["Which size?": "Medium"])
     }
+
+    /// A long option description wraps and the card grows to fit it,
+    /// rather than cutting it off at one line.
+    func testLongOptionDescriptionsWrap() {
+        func height(_ description: String) -> CGFloat {
+            let question = Question(question: "Which?", options: [QuestionOption(label: "Lean", description: description)])
+            let row = TranscriptRow(id: "q", seq: 1, content: .question(QuestionItem(request: QuestionRequest(approvalId: "q1", questions: [question]))))
+            return RowRenderer.render(row, expanded: false, tableWidth: 500, measurer: TextMeasurer()).height
+        }
+        let short = height("Keep the four.")
+        let long = height(String(repeating: "Keep the workflow skills and add the security check. ", count: 6))
+        XCTAssertGreaterThan(long, short + RowMetrics.optionDescription * 2)
+    }
 }
 
 /// Incremental measuring while a reply streams must give exactly the height
@@ -667,6 +680,21 @@ final class DraftTests: XCTestCase {
         XCTAssertEqual(app.newThreadPermission, .auto, "back to the runner's default")
         XCTAssertNil(app.newThreadPermissionPick)
         XCTAssertEqual(app.newThreadRequest(text: "x", images: []).permissionMode, .auto, "and that's what the next one sends")
+    }
+
+    /// A runner whose default mode this app doesn't know: the composer says
+    /// so rather than Full access, a new thread leaves the mode out so the
+    /// runner starts it on that default, and a schedule made from it asks.
+    func testUnknownRunnerDefaultModeIsNotFullAccess() {
+        defer { UserDefaults.standard.removeObject(forKey: AppModel.lastAccountKey) }
+        let app = AppModel()
+        app.defaults = try! JSONDecoder().decode(RunnerDefaults.self, from: Data(#"{"cwd":"/w","accountId":"claude-3","permissionMode":"sandboxed"}"#.utf8))
+        XCTAssertEqual(app.newThreadPermission, .unknown)
+        XCTAssertNil(app.newThreadRequest(text: "x", images: []).permissionMode)
+        app.newSchedule(from: nil)
+        XCTAssertEqual(app.scheduleEditor?.permissionMode.sent, .ask)
+        app.newThreadPermission = .full
+        XCTAssertEqual(app.newThreadRequest(text: "x", images: []).permissionMode, .full, "a mode picked is still sent")
     }
 
     /// A Codex pick doesn't become the next Claude thread's model, and the

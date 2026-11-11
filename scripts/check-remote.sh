@@ -9,7 +9,7 @@
 # With several hosts (Mike's are Tinker Desk and the cloud box), each run
 # goes to the first one that's free and can run it, or waits for the first
 # that can. A Linux host only takes what needs no Mac: a --quick run that
-# doesn't touch ios/ (ThreadbearKit's tests are Swift), with no --shots.
+# doesn't touch ios/, app/ or dock/ (each brings in Swift), with no --shots.
 # Mike asked on 6 Nov, when nine threads' checks queued at once.
 #
 # Mike asked on 6 Nov 2026, after three threads' unit suites, a swift test
@@ -54,8 +54,10 @@ if [ "${1:-}" = "--on-host" ]; then
   shift 2
   base="$HOME/$BASE_REL"
   src="$base/src"
-  NODE="$HOME/.nvm/versions/node/v24.22.1/bin/node"
-  export PATH="$(dirname "$NODE"):/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin"
+  # An ssh session's PATH has no nvm, so find-node.sh looks there too.
+  . "${BASH_SOURCE[0]%/*}/../runner/scripts/find-node.sh"
+  NODE="$(threadbear_find_node)" || exit 1
+  export PATH="${NODE%/*}:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin"
   # Everything the tests make in a temp folder goes here and is deleted
   # with the run, so nothing piles up in /var/folders.
   export TMPDIR="$base/tmp-$id"
@@ -95,7 +97,11 @@ if [ "${1:-}" = "--on-host" ]; then
 
   # node_modules per package-lock, kept between runs (the newest three of
   # each). npm ci only when the lockfile is new.
-  for dir in . runner app/Tools/mock-runner; do
+  # --runner (the runner's self-update) needs only the runner's: a broken
+  # lockfile elsewhere mustn't hold the runner back (Codex, 9 Nov).
+  dep_dirs=". runner app/Tools/mock-runner"
+  case " $* " in *" --runner "*) dep_dirs="runner" ;; esac
+  for dir in $dep_dirs; do
     [ -f "$src/$dir/package-lock.json" ] || continue
     name="$(printf '%s' "$dir" | tr -c 'a-zA-Z0-9' '-')"
     hash="$(shasum -a 256 "$src/$dir/package-lock.json" | cut -c1-16)"
@@ -277,15 +283,23 @@ dropped() {
   timed 10 "${SSH[@]}" -O exit "$1" >/dev/null 2>&1
 }
 # Past MAX_SECS: not 255, as running it all again here wouldn't be quicker.
+# Before the check started there (waiting for a host or copying: over_time
+# busy), BUSY_EXIT, as with no host having room: the runner's self-update
+# sets THREADBEAR_CHECK_BUSY_EXIT so it can tell the hosts' trouble from a
+# failed check and try again later (deploy-steps.mjs, remoteChecks).
+BUSY_EXIT="${THREADBEAR_CHECK_BUSY_EXIT:-1}"
+case "$BUSY_EXIT" in [1-9]|[1-9][0-9]|1[01][0-9]|12[0-3]) ;; *) BUSY_EXIT=1 ;; esac
 over_time() {
   echo "This check has been going for $((MAX_SECS / 60)) minutes, waiting in line included, so it was stopped." >&2
   rm -f "$files" "$changed"
+  if [ "${1:-}" = busy ]; then exit "$BUSY_EXIT"; fi
   exit 1
 }
 
 ARGS=()
 SHOTS=""
 QUICK=0
+RUNNER_ONLY=0
 ALL=0
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -293,6 +307,7 @@ while [ $# -gt 0 ]; do
       case "$2" in /*) SHOTS="$2" ;; *) SHOTS="$PWD/$2" ;; esac
       shift ;;
     --quick) QUICK=1; ARGS+=("$1") ;;
+    --runner) QUICK=1; RUNNER_ONLY=1; ARGS+=("$1") ;;
     --all) ALL=1; ARGS+=("$1") ;;
     *) ARGS+=("$1") ;;
   esac
@@ -309,11 +324,16 @@ changed="$(mktemp)"
 } 2>/dev/null | sort -u >"$changed"
 
 # Whether a Linux host can run this: only the runner's, Convex's and the
-# website's checks, so --quick, nothing changed under ios/ (and something
+# website's checks, so --quick, nothing changed under ios/ (ThreadbearKit's
+# tests), app/ or dock/ (the Mac app's release build) (and something
 # changed: with nothing, check.sh itself or --all, it runs everything), no
 # shots.
 linux_ok=0
-if [ "$QUICK" = 1 ] && [ "$ALL" = 0 ] && [ -z "$SHOTS" ] && [ -s "$changed" ] && ! grep -qE '^ios/|^check\.sh$' "$changed"; then linux_ok=1; fi
+if [ "$QUICK" = 1 ] && [ "$ALL" = 0 ] && [ -z "$SHOTS" ] && [ -s "$changed" ] && ! grep -qE '^(ios|app|dock)/|^check\.sh$' "$changed"; then linux_ok=1; fi
+# --runner is only Node, whatever changed: the runner's self-update sends
+# it from a clone on main, where nothing has, and with Tinker Desk away a
+# Linux host should still take it rather than this Mac (Codex, 9 Nov).
+if [ "$RUNNER_ONLY" = 1 ] && [ -z "$SHOTS" ]; then linux_ok=1; fi
 
 # The disk a run wants free on its host. On 7 Nov Tinker Desk fell under 1 GiB
 # and an --app check died with a CodeSign error that said nothing about space,
@@ -372,7 +392,7 @@ choose() {
     case " $SKIP " in *" $h "*) continue ;; esac
     out="$(watched "$h" "${SSH[@]}" "$h" "$probe" 2>/dev/null)"
     rc=$?
-    [ "$rc" != 125 ] || over_time
+    [ "$rc" != 125 ] || over_time busy
     if [ "$rc" = 124 ]; then
       dropped "$h"
       continue
@@ -451,7 +471,7 @@ take_copylock() {
   holder=$!
   # Waiting for another check from this checkout counts towards MAX_SECS too.
   until [ -e "$ready" ] || ! kill -0 "$holder" 2>/dev/null; do
-    if [ "$(date +%s)" -ge "$DEADLINE" ]; then kill_tree "$holder"; wait "$holder" 2>/dev/null; holder="" release=""; over_time; fi
+    if [ "$(date +%s)" -ge "$DEADLINE" ]; then kill_tree "$holder"; wait "$holder" 2>/dev/null; holder="" release=""; over_time busy; fi
     sleep 0.2
   done
   # The helper gone with no ready file never had the lock (a lock file it
@@ -517,7 +537,7 @@ while :; do
     if [ -n "$LOW" ]; then
       # Not 255: a disk to clear isn't a reason to run it all on this Mac.
       echo "No check host has room for this check: $LOW, and it wants $MIN_FREE_GIB GiB. Free some space there and run it again." >&2
-      exit 1
+      exit "$BUSY_EXIT"
     fi
     echo "None of $HOST_LIST can run this check now." >&2
     exit 255
@@ -559,7 +579,7 @@ while :; do
     rc=$?
     if [ "$rc" = 124 ] || [ "$rc" = 125 ]; then
       drop_copylock
-      [ "$rc" != 125 ] || over_time
+      [ "$rc" != 125 ] || over_time busy
       dropped "$HOST"
       continue
     elif [ "$rc" != 0 ]; then
@@ -613,7 +633,15 @@ while :; do
   local_logs="$(mktemp -d "${TMPDIR:-/tmp}/threadbear-check-remote.XXXXXX")"
   watched "$HOST" "${SSH[@]}" "$HOST" "$remote_cmd" 2>&1 | rewrite_logs "$remote_base/tmp-$id/threadbear-check." "$local_logs"
   code=${PIPESTATUS[0]}
-  [ "$code" != 125 ] || { rmdir "$local_logs" 2>/dev/null; over_time; }
+  if [ "$code" = 125 ]; then
+    rmdir "$local_logs" 2>/dev/null
+    # Still waiting for the host's lock, the check never started: its copy is
+    # still under runs/, which --on-host moves out once it has the lock. A
+    # host that doesn't answer is taken as still waiting too; a run that did
+    # start (a hung step) is the check's own failure (Codex, 9 Nov).
+    if ! timed 15 "${SSH[@]}" "$HOST" "test ! -d '$remote_run'" >/dev/null 2>&1; then over_time busy; fi
+    over_time
+  fi
   # 255 is ssh's own: the connection went before the check ended. Like a host
   # that stops answering, it's the next host's (or, with none, this Mac's): a
   # run that can't finish anywhere would hold the landing for nothing.

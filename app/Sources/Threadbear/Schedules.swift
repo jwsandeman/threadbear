@@ -77,7 +77,23 @@ extension AppModel {
                 runners = try await client.listRunners()
             } catch {
                 AppLog.write("rpc", "runners.list failed: \(error.localizedDescription)")
+                retryRunners(on: client)
             }
+        }
+    }
+
+    /// runners.list asks the backend, so it fails with no network, even
+    /// though this Mac's own rows need only its name from the answer. On a
+    /// timer rather than on news of other runners: with them all offline
+    /// there may be no news when the network comes back. One timer at a
+    /// time, until the name is known or this connection has gone (the next
+    /// one asks for itself).
+    private func retryRunners(on client: RPCClient) {
+        guard runnersRetry == nil, !runners.contains(where: \.isSelf) else { return }
+        runnersRetry = Task { [self] in
+            try? await Task.sleep(for: runnersRetryDelay)
+            runnersRetry = nil
+            if self.client === client, !runners.contains(where: \.isSelf) { loadRunners() }
         }
     }
 

@@ -12,25 +12,24 @@ import { api } from '../../convex/_generated/api';
 import type { Id } from '../../convex/_generated/dataModel';
 import { MessageText, Pictures, picturesByRow, ToolRun, Worked, type PageMessage, type Picture } from './messages';
 import { CommandState } from './command-state';
-import { empty, hasMore, next, pictures, rows, startChunks, takeLive, takeOlder, type History } from './share-history';
+import { empty, hasMore, nextBefore, pictures, rows, takeLive, takeOlder, type History } from './share-history';
 import { fold, splitTurns, duration, roughly, type Item, type Turn } from './turns';
 import { day, modelLabel, plain, sender, sentences } from './format';
 import * as Icon from './icons';
 
 // Big enough that most threads arrive whole: the outline and byline only
-// know the turns that have loaded.
+// know the turns that have loaded. It's the live query's size for good:
+// older rows are read once each (share-history.ts).
 const FIRST_PAGE = 400;
 const MORE = 200;
 const SITE = 'https://threadbear.mikecann.app';
 
 export function SharePage({ slug, token }: { slug: string; token: string | null }) {
   const convex = useConvex();
-  const [limit, setLimit] = useState(FIRST_PAGE);
-  const data = useLiveQuery(api.share.view, { slug, limit, ...(token ? { token } : {}) });
-  // Keeps the last page on screen while a bigger one loads.
+  const data = useLiveQuery(api.share.view, { slug, limit: FIRST_PAGE, ...(token ? { token } : {}) });
   const [shown, setShown] = useState<typeof data>(undefined);
   // The rows as far back as the reader has gone: the live answer, then older
-  // chunks once it can't grow (share-history.ts).
+  // chunks (share-history.ts).
   const [history, setHistory] = useState<History<Row, Pic>>(empty);
   const historyRef = useRef(history);
   const [loadingChunk, setLoadingChunk] = useState(false);
@@ -38,20 +37,13 @@ export function SharePage({ slug, token }: { slug: string; token: string | null 
     if (!data) return;
     setShown(data);
     if (data.state !== 'ok') return;
-    // useLiveQuery answers nothing until the new limit's answer comes, so this one is the limit's.
-    historyRef.current = takeLive(historyRef.current, data, limit);
+    historyRef.current = takeLive(historyRef.current, data);
     setHistory(historyRef.current);
   }, [data]);
 
   const more = () => {
-    const step = next(historyRef.current, limit, MORE);
-    if (!step) return;
-    if ('grow' in step) {
-      setLimit(step.grow);
-      return;
-    }
-    const before = step.older;
-    historyRef.current = startChunks(historyRef.current);
+    const before = nextBefore(historyRef.current);
+    if (before === undefined || loadingChunk) return;
     setLoadingChunk(true);
     convex
       .query(api.share.view, { slug, limit: MORE, beforeSeq: before, ...(token ? { token } : {}) })
@@ -90,7 +82,7 @@ export function SharePage({ slug, token }: { slug: string; token: string | null 
       </main>
     );
   }
-  return <WriteUp slug={slug} token={token} data={all as Shared} loading={data !== shown || history.liveLimit !== limit || loadingChunk} onMore={more} />;
+  return <WriteUp slug={slug} token={token} data={all as Shared} loading={data !== shown || loadingChunk} onMore={more} />;
 }
 
 type Row = Shared['messages'][number];

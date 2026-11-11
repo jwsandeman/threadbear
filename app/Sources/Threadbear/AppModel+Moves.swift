@@ -10,6 +10,9 @@ extension AppModel {
         var threadId: String
         var runnerId: String
         var runnerName: String
+        /// The target's answer when that's why the sheet is opening, so it
+        /// opens filled in rather than asking all over again.
+        var answer: MovePreview?
         var id: String { threadId + ">" + runnerId }
     }
 
@@ -24,42 +27,82 @@ extension AppModel {
         return orderedRunners.filter { $0.id != here }
     }
 
-    /// Opens the Move sheet. It asks the target for its guess itself.
+    /// Move to ▸ a runner. It goes straight away when the target has a clean
+    /// answer; the sheet is for a problem, or something that won't come.
+    /// With no connection the sheet opens too, and waits for one.
     func openMove(_ threadId: String, to runner: RunnerInfo) {
-        moveRequest = MoveRequest(threadId: threadId, runnerId: runner.id, runnerName: runner.name)
+        let request = MoveRequest(threadId: threadId, runnerId: runner.id, runnerName: runner.name)
+        guard connection == .connected else {
+            moveRequest = request
+            return
+        }
+        go(request, cwd: nil, accountId: nil, askFirst: true)
     }
 
     /// The sheet's guess, or what's in the way. Read-only: nothing starts.
-    func movePreview(_ request: MoveRequest, cwd: String? = nil, accountId: String? = nil) async -> MovePreview {
-        guard let client else { return MovePreview(problems: ["This Mac's runner isn't connected."]) }
+    /// nil when this Mac's runner can't be reached just now. That's no
+    /// answer about the move: the runner drops the app for a few seconds at
+    /// every update, so the sheet waits and asks again once it's back.
+    func movePreview(_ request: MoveRequest, cwd: String? = nil, accountId: String? = nil) async -> MovePreview? {
+        guard let client, connection == .connected else { return nil }
         do {
             return try await client.movePreview(threadId: request.threadId, runnerId: request.runnerId, cwd: cwd, accountId: accountId)
+        } catch RPCError.disconnected {
+            return nil
         } catch {
             return MovePreview(problems: [error.localizedDescription])
         }
     }
 
-    /// Move pressed: the row says "Moving to …" at once, and goes back with
-    /// the error if the runner turns it down.
+    /// Move pressed in the sheet.
     func startMove(_ request: MoveRequest, cwd: String?, accountId: String?) {
-        guard let client else { return }
+        go(request, cwd: cwd, accountId: accountId, askFirst: false)
+    }
+
+    /// The row says "Moving to …" at once, from the click, and goes back if
+    /// the sheet turns out to be needed or the runner turns the move down.
+    private func go(_ request: MoveRequest, cwd: String?, accountId: String?, askFirst: Bool) {
         let threadId = request.threadId
+        let key = BusyKey.moveThread(threadId)
+        guard let client, !isBusy(key) else { return }
         let before = threads[threadId]
         if var guess = before {
             guess.moving = ThreadMoving(moveId: "", to: request.runnerId, toName: request.runnerName, state: "asking")
             threads[threadId] = guess
         }
-        whileBusy(BusyKey.moveThread(threadId)) { [self] in
+        let putBack = { [self] in
+            if var now = threads[threadId], now.moving?.moveId == "" {
+                now.moving = before?.moving
+                threads[threadId] = now
+            }
+        }
+        whileBusy(key) { [self] in
+            if askFirst {
+                let answer = await movePreview(request)
+                if answer?.canGoAsIs != true {
+                    putBack()
+                    var showing = request
+                    showing.answer = answer
+                    moveRequest = showing
+                    return
+                }
+            }
             do {
                 try await client.moveThread(threadId: threadId, runnerId: request.runnerId, cwd: cwd, accountId: accountId)
             } catch {
-                if var now = threads[threadId], now.moving?.moveId == "" {
-                    now.moving = before?.moving
-                    threads[threadId] = now
-                }
+                putBack()
                 show(error)
             }
         }
+    }
+
+    /// A move still being asked for is only known here, so a summary landing
+    /// meanwhile mustn't take "Moving to …" off the row.
+    func keepingAskedMove(_ incoming: ThreadSummary, over previous: ThreadSummary?) -> ThreadSummary {
+        guard incoming.moving == nil, previous?.moving?.moveId == "", isBusy(BusyKey.moveThread(incoming.id)) else { return incoming }
+        var kept = incoming
+        kept.moving = previous?.moving
+        return kept
     }
 
     /// Cancel on a moving row, before the thread has gone.

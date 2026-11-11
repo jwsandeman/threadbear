@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { empty, firstSeq, hasMore, next, pictures, rows, startChunks, takeLive, takeOlder, type History } from './share-history.ts';
+import { empty, firstSeq, hasMore, LOADED_MAX, nextBefore, OLDER_MAX_BYTES, OLDER_MAX_PICTURES, OLDER_MAX_ROWS, pictures, rowBytes, rows, takeLive, takeOlder, type History } from './share-history.ts';
 
 type R = { seq: number };
 type P = { seq: number; url: string };
@@ -12,65 +12,165 @@ const page = (a: number, b: number, more: boolean, pics: number[] = []) => ({
 });
 const seqs = (h: History<R, P>) => rows(h).map((m) => m.seq);
 
-test('a full live page under the most grows, and waits while the bigger one comes', () => {
-  const h = takeLive(empty<R, P>(), page(601, 1000, true), 400);
-  assert.deepEqual(next(h, 400, 200), { grow: 600 });
-  assert.equal(next(h, 600, 200), null);
+// The live page never grows: a bigger one would be read again on every new
+// row (37.6 MB of Convex I/O in a day on the phone, 8 Nov).
+test('load earlier reads a chunk before the shown rows, never a bigger live page', () => {
+  assert.equal(nextBefore(empty<R, P>()), undefined);
+  assert.equal(nextBefore(takeLive(empty<R, P>(), page(601, 1000, true))), 601);
+  assert.equal(nextBefore(takeLive(empty<R, P>(), page(1, 400, false))), undefined);
 });
 
-test('at the most a share sends (2,000) it reads an older chunk instead', () => {
-  const h = takeLive(empty<R, P>(), page(5501, 7500, true), 2000);
-  assert.deepEqual(next(h, 2000, 200), { older: 5501 });
-  // A page cut short by its size (8 MB a query) does the same.
-  const big = takeLive(empty<R, P>(), page(901, 1000, true), 600);
-  assert.deepEqual(next(big, 600, 200), { older: 901 });
-});
-
+// Going back is never cut off by the cap: what the reader loads is room on
+// top of it (Codex's review: a cap that stopped Load earlier left a long
+// thread's start out of reach for good).
 test('chunks go above the live page until the start', () => {
-  let h = startChunks(takeLive(empty<R, P>(), page(5501, 7500, true), 2000));
-  h = takeOlder(h, page(5301, 5500, true, [5310]), 5501)!;
-  assert.deepEqual(seqs(h), range(5301, 7500));
-  assert.deepEqual(next(h, 2000, 200), { older: 5301 });
-  h = takeOlder(h, page(1, 5300, false), 5301)!;
+  let h = takeLive(empty<R, P>(), page(7101, 7500, true));
+  h = takeOlder(h, page(6901, 7100, true, [6910]), 7101)!;
+  assert.deepEqual(seqs(h), range(6901, 7500));
+  assert.equal(nextBefore(h), 6901);
+  h = takeOlder(h, page(1, 6900, false), 6901)!;
   assert.equal(rows(h).length, 7500);
   assert.equal(hasMore(h), false);
-  assert.equal(next(h, 2000, 200), null);
-  assert.deepEqual(pictures(h).map((p) => p.seq), [5310]);
+  assert.equal(nextBefore(h), undefined);
+  assert.deepEqual(pictures(h).map((p) => p.seq), [6910]);
 });
 
-test('rows that slide off the live page stay once chunks are in', () => {
-  let h = startChunks(takeLive(empty<R, P>(), page(5501, 7500, true, [5502]), 2000));
-  h = takeLive(h, page(5503, 7502, true), 2000);
-  assert.equal(firstSeq(h), 5501);
-  h = takeOlder(h, page(5301, 5500, true), 5501)!;
-  assert.deepEqual(seqs(h), range(5301, 7502));
-  assert.deepEqual(pictures(h).map((p) => p.seq), [5502]);
+// After loading, rows sliding off the live page still only get the cap on
+// top of what was loaded; the oldest go, and can be loaded again.
+test('a stream after loading earlier keeps within what was loaded plus the cap', () => {
+  let h = takeLive(empty<R, P>(), page(3001, 3400, true));
+  h = takeOlder(h, page(2001, 3000, true), 3001)!;
+  for (let i = 1; i <= 400; i++) h = takeLive(h, page(3001 + i * 10, 3400 + i * 10, true));
+  assert.equal(h.older.length, 1000 + OLDER_MAX_ROWS);
+  assert.equal(h.older[h.older.length - 1]!.seq, h.live!.messages[0]!.seq - 1);
+  assert.equal(hasMore(h), true);
+  assert.equal(nextBefore(h), h.older[0]!.seq);
 });
 
-test('without chunks a sliding live page is all there is', () => {
-  let h = takeLive(empty<R, P>(), page(601, 1000, true), 400);
-  h = takeLive(h, page(602, 1001, true), 400);
-  assert.deepEqual(seqs(h), range(602, 1001));
+// Codex's second review: rows the cap let go, read again (the phone loads
+// by itself when Load earlier comes into view), earned more room each time,
+// so a runner could grow it without anyone asking. They earn nothing now,
+// and a chunk that brings nothing that stays ends loading.
+test('rows let go and read again earn no room, and loading stops', () => {
+  let h = takeLive(empty<R, P>(), page(1, 400, true));
+  for (let i = 1; i <= 300; i++) h = takeLive(h, page(1 + i * 10, 400 + i * 10, true));
+  assert.equal(h.older.length, OLDER_MAX_ROWS);
+  const before = nextBefore(h)!;
+  // The rows just below, which were let go, come back.
+  h = takeOlder(h, page(before - 40, before - 1, true), before)!;
+  assert.equal(h.older.length, OLDER_MAX_ROWS);
+  assert.equal(hasMore(h), false);
+  assert.equal(nextBefore(h), undefined);
+});
+
+// However far back the reader goes, what loading adds stops at LOADED_MAX
+// times the caps.
+test('loading earlier adds room only up to its ceiling', () => {
+  const top = 100_000;
+  let h = takeLive(empty<R, P>(), page(top - 399, top, true));
+  for (let i = 0; i < 60 && nextBefore(h) !== undefined; i++) {
+    const before = nextBefore(h)!;
+    h = takeOlder(h, page(before - 1000, before - 1, true), before)!;
+  }
+  assert.ok(h.older.length <= OLDER_MAX_ROWS * (LOADED_MAX + 1), `kept ${h.older.length}`);
+  assert.ok(h.older.length >= OLDER_MAX_ROWS * LOADED_MAX);
+  assert.equal(hasMore(h), false);
+});
+
+// Daybreak, 10 Nov: a runner writing its own shared thread a few rows at a
+// time, under the live page's size so the pages always overlap, and nobody
+// pressing Load earlier. 251 pages of 400 rows of 8 KiB, 40 new each time,
+// kept 10,400 rows (81 MiB); now `older` stays within its caps, and every
+// update stays cheap.
+test('a paced stream of big rows keeps older within its byte cap', () => {
+  const text = 'x'.repeat(8192);
+  const big = (a: number, b: number) => ({ messages: range(a, b).map((seq) => ({ seq, text })), images: [], hasMore: true });
+  type B = { seq: number; text: string };
+  let h = empty<B, P>();
+  const start = process.cpuUsage();
+  for (let i = 0; i <= 250; i++) h = takeLive(h, big(1 + i * 40, 400 + i * 40));
+  const cpu = process.cpuUsage(start);
+  const bytes = h.older.reduce((n, m) => n + rowBytes(m), 0);
+  assert.ok(bytes <= OLDER_MAX_BYTES, `older holds ${bytes} bytes`);
+  assert.ok(h.older.length < 1100, `older kept ${h.older.length} rows`);
+  // Contiguous with the live page: the newest old rows are the ones kept.
+  assert.equal(h.older[h.older.length - 1]!.seq, h.live!.messages[0]!.seq - 1);
+  // What went can be loaded again.
+  assert.equal(nextBefore(h), h.older[0]!.seq);
+  assert.ok((cpu.user + cpu.system) / 1000 < 100, `took ${(cpu.user + cpu.system) / 1000} ms of CPU`);
+});
+
+test('a long stream of small rows keeps older within its row cap', () => {
+  let h = empty<R, P>();
+  for (let i = 0; i < 1000; i++) h = takeLive(h, page(1 + i * 10, 400 + i * 10, true));
+  assert.equal(h.older.length, OLDER_MAX_ROWS);
+  assert.equal(h.older[h.older.length - 1]!.seq, h.live!.messages[0]!.seq - 1);
+});
+
+// Pictures between rows (seqs no row has) count with the row before them,
+// so a stream of pictures can't grow `older` past its bytes either.
+test('pictures between rows count against the cap', () => {
+  const url = `https://x/${'p'.repeat(100_000)}.png`;
+  let h = empty<R, P>();
+  for (let i = 0; i < 300; i++) {
+    const a = 1 + i * 1000;
+    h = takeLive(h, { messages: [{ seq: a }, { seq: a + 1000 }], images: [{ seq: a + 500, url: `${url}?${i}` }], hasMore: true });
+  }
+  const bytes = h.older.reduce((n, m) => n + rowBytes(m), 0) + h.olderImages.reduce((n, p) => n + rowBytes(p), 0);
+  assert.ok(bytes <= OLDER_MAX_BYTES, `older holds ${bytes} bytes`);
+  assert.ok(h.olderImages.length < 100);
+  assert.ok(h.olderImages.every((p) => p.seq >= h.older[0]!.seq));
+});
+
+// Codex's review: a picture at a seq below the only row, with no older rows,
+// was added to `older` again on every live answer (a title change is
+// enough to send one), N copies after N answers.
+test('a picture before every row is kept once however many answers come', () => {
+  const one = { messages: [{ seq: 10 }], images: [{ seq: 1, url: 'https://x/1.png' }], hasMore: false };
+  let h = empty<R, P>();
+  for (let i = 0; i < 1000; i++) h = takeLive(h, one);
+  assert.equal(h.olderImages.length, 1);
+  assert.deepEqual(pictures(h).map((p) => p.seq), [1]);
+});
+
+test('pictures with no older rows are capped too', () => {
+  let h = empty<R, P>();
+  for (let i = 0; i < 3000; i++) h = takeLive(h, { messages: [{ seq: 1_000_000 }], images: [{ seq: i, url: `https://x/${i}.png` }], hasMore: false });
+  assert.equal(h.older.length, 0);
+  assert.ok(h.olderImages.length <= OLDER_MAX_PICTURES, `kept ${h.olderImages.length}`);
+  // The newest are the ones kept.
+  assert.equal(Math.max(...h.olderImages.map((p) => p.seq)), 2998);
+});
+
+test('rows that slide off the live page stay, before and after a chunk', () => {
+  let h = takeLive(empty<R, P>(), page(601, 1000, true, [601]));
+  h = takeLive(h, page(603, 1002, true));
+  assert.equal(firstSeq(h), 601);
+  assert.deepEqual(seqs(h), range(601, 1002));
+  h = takeOlder(h, page(401, 600, true), 601)!;
+  h = takeLive(h, page(604, 1003, true));
+  assert.deepEqual(seqs(h), range(401, 1003));
+  assert.deepEqual(pictures(h).map((p) => p.seq), [601]);
 });
 
 test('no overlap with the answer before starts again from the newest', () => {
-  let h = startChunks(takeLive(empty<R, P>(), page(5501, 7500, true), 2000));
-  h = takeOlder(h, page(5301, 5500, true), 5501)!;
-  h = takeLive(h, page(9601, 11600, true), 2000);
-  assert.deepEqual(seqs(h), range(9601, 11600));
-  assert.equal(h.chunked, false);
+  let h = takeLive(empty<R, P>(), page(601, 1000, true));
+  h = takeOlder(h, page(401, 600, true), 601)!;
+  h = takeLive(h, page(1101, 1500, true));
+  assert.deepEqual(seqs(h), range(1101, 1500));
+  assert.equal(nextBefore(h), 1101);
 });
 
 test('a live page reaching further back takes its rows back from the chunks', () => {
-  let h = startChunks(takeLive(empty<R, P>(), page(5501, 7500, true, [5505]), 2000));
-  h = takeLive(h, page(5511, 7510, true), 2000);
-  h = takeLive(h, page(5490, 7510, true, [5505]), 2000);
-  assert.deepEqual(seqs(h), range(5490, 7510));
-  assert.deepEqual(pictures(h).map((p) => p.seq), [5505]);
+  let h = takeLive(empty<R, P>(), page(601, 1000, true, [605]));
+  h = takeLive(h, page(611, 1010, true));
+  h = takeLive(h, page(590, 1010, true, [605]));
+  assert.deepEqual(seqs(h), range(590, 1010));
+  assert.deepEqual(pictures(h).map((p) => p.seq), [605]);
 });
 
 test('a chunk that comes too late is dropped', () => {
-  let h = startChunks(takeLive(empty<R, P>(), page(5501, 7500, true), 2000));
-  h = takeOlder(h, page(5301, 5500, true), 5501)!;
-  assert.equal(takeOlder(h, page(5301, 5500, true), 5501), undefined);
+  let h = takeLive(empty<R, P>(), page(601, 1000, true));
+  h = takeOlder(h, page(401, 600, true), 601)!;
+  assert.equal(takeOlder(h, page(401, 600, true), 601), undefined);
 });

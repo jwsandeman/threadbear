@@ -118,7 +118,7 @@ export async function replyImagesFrom(ctx: QueryCtx, threadId: string, from: num
 
 export const view = query({
   // beforeSeq: only rows before it, for a page that has scrolled back past
-  // the most one answer holds (PAGE_MAX), read once (web/src/share-history.ts).
+  // its live first page, read once (web/src/share-history.ts).
   args: { slug: v.string(), token: v.optional(v.string()), limit: v.optional(v.number()), beforeSeq: v.optional(v.number()) },
   returns: v.union(
     v.object({ state: v.literal('gone') }),

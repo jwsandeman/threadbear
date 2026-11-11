@@ -47,7 +47,7 @@ extension AppModel {
             listed.insert(summary.id)
             madeRemote.remove(summary.id)
             if liveRemote.contains(summary.id), next[summary.id] != nil { continue }
-            next[summary.id] = summary
+            next[summary.id] = keepingAskedMove(summary, over: next[summary.id])
         }
         let gone = next.values.filter { $0.isRemote && !listed.contains($0.id) && !liveRemote.contains($0.id) && !madeRemote.contains($0.id) }.map(\.id)
         if next != threads { threads = next }
@@ -178,6 +178,16 @@ extension AppModel {
     func runnerName(of thread: ThreadSummary) -> String? {
         guard thread.isRemote else { return nil }
         return remoteRunner(of: thread)?.name ?? "another Mac"
+    }
+
+    /// The runner's name on a sidebar row ("M5", "bruce"), this Mac's own
+    /// threads included: Mike moves threads between machines and asked to
+    /// see at a glance where each one is (9 Nov). Nil with only this Mac,
+    /// where every row would just repeat the same name.
+    func runnerLabel(of thread: ThreadSummary) -> String? {
+        if thread.isRemote { return runnerName(of: thread) }
+        guard !remoteRunners.isEmpty else { return nil }
+        return runners.first(where: \.isSelf)?.name
     }
 
     /// The SF Symbol for the runner a thread lives on, as the schedule

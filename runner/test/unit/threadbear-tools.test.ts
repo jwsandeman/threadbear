@@ -1828,6 +1828,10 @@ test('move_thread with a runner asks the main Mac to move the thread whole, and 
   const control: RemoteControl = {
     list: async () => ({ runners: [], threads: [] }),
     call: async () => undefined,
+    runners: async () => [
+      { id: 'm5runner0001', name: 'M5' },
+      { id: 'legitcloud01', name: 'Hetzner Cloud' },
+    ],
     move: async (p) => {
       asked.push(p);
       return 'Moving it to Hetzner Cloud.';
@@ -1837,7 +1841,7 @@ test('move_thread with a runner asks the main Mac to move the thread whole, and 
   const r = await call('move_thread', { runner: 'cloud', folder: '/home/mike/x' });
   assert.equal(r.error, false, r.text);
   assert.match(r.text, /Moving it to Hetzner Cloud/);
-  assert.deepEqual(asked, [{ threadId: me.id, runner: 'cloud', cwd: '/home/mike/x' }]);
+  assert.deepEqual(asked, [{ threadId: me.id, runnerId: 'legitcloud01', runnerName: 'Hetzner Cloud', cwd: '/home/mike/x' }]);
   // `then` is for folder moves; neither folder nor runner is an error.
   assert.equal((await call('move_thread', { runner: 'cloud', then: 'go' })).error, true);
   assert.equal((await call('move_thread', {})).error, true);

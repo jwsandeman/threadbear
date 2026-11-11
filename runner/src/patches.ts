@@ -1327,15 +1327,16 @@ export function runCommand(
       }, 50);
       tick.unref();
     };
+    // At the limit, the whole process group (a shell's children too) gets
+    // SIGTERM, then SIGKILL once the grace is up, whether or not
+    // `killGroup` asked for that on exit too: a command that ignores
+    // SIGTERM (`trap '' TERM`) never closed its pipes, and whatever waited
+    // on it (a worktree's setup before the first turn, its teardown before
+    // the cleanup, which messages, actions and handovers wait on) waited
+    // for ever (Codex's review, 9 Nov).
     const timer = setTimeout(() => {
       timedOut = true;
-      if (opts.killGroup) return endGroup();
-      // The whole process group: a shell's children too.
-      try {
-        process.kill(-child.pid!, 'SIGTERM');
-      } catch {
-        child.kill('SIGTERM');
-      }
+      endGroup();
     }, timeoutMs);
     child.stdout.on('data', take);
     child.stderr.on('data', take);

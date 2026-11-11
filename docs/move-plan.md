@@ -12,14 +12,15 @@ over"), and step 6's Later list has this as `move_thread` with a runner.
 ## What it's like when it's done
 
 - A thread's menu (sidebar and the ... menu) has **Move to** with each other
-  runner. Offline ones are greyed with "offline". Picking one opens a small
-  sheet: the folder it will run in there and the login, both filled in with
-  that machine's best guess, and a line for anything that won't come (a
-  dev server that will stop, changes in a checkout other threads share).
-  **Move** starts it.
+  runner. Offline ones are greyed with "offline". Picking one moves it
+  straight away, to the folder and login that machine guesses. If it can't
+  go, or something won't come (a dev server that will stop, changes in a
+  checkout other threads share), a small sheet shows the folder and login,
+  both filled in, and says why. **Move** starts it.
 - The row stays where it is and shows "Moving to cloud" with a spinner. A
   thread mid-turn shows "Moves to cloud when this turn ends". Messages sent
-  meanwhile wait in its queue and go with it.
+  from the phone meanwhile wait in its queue and go with it; in the Mac app
+  the message box and any open card lock until it lands or is cancelled.
 - When it lands, the row shows the new machine, the transcript has one line
   ("Moved from M5 to cloud, in ~/dev/me/threadbear-threads/slot-1") and the
   next message carries on in the same Claude session there, with the same

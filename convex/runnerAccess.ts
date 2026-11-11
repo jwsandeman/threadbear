@@ -254,6 +254,8 @@ export const ACCESS: Record<string, Access> = {
   moveClaim: 'own',
   moveDone: 'own',
   moveFailed: 'own',
+  // The main Mac's own uploads for a move that ended first (moves.ts).
+  moveDropChunks: 'owner',
 };
 
 // A runner name as lists show it, for a runner key's heartbeat: folded to

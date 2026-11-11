@@ -12,9 +12,10 @@ export class Fail extends Error {}
 
 // A step that didn't exit 0, with where its output went.
 export class StepFailed extends Fail {
-  constructor(message, logFile) {
+  constructor(message, logFile, status) {
     super(message);
     this.logFile = logFile;
+    this.status = status;
   }
 }
 
@@ -49,6 +50,16 @@ export function sleepCount() {
 // commit again later. An exit code rather than words in the log, as the log
 // has the tests' output too, and a failing test that printed the same words
 // would have made a broken main look like a sleep (Codex, 9 Nov).
+// The Node a LaunchAgent's ProgramArguments (or a systemd unit's ExecStart)
+// starts launch.mjs with: the argument just before it. ["Threadbear
+// Runner", node, launch.mjs] on a Mac, [node, launch.mjs] on Linux.
+// undefined when it doesn't start `launch` or names no Node first.
+export function nodeBeforeLaunch(args, launch, same = (a, b) => a === b) {
+  const at = args.findIndex((a) => typeof a === 'string' && same(a, launch));
+  const node = at > 0 ? args[at - 1] : undefined;
+  return typeof node === 'string' && path.isAbsolute(node) ? node : undefined;
+}
+
 export const SLEPT_EXIT = 75; // EX_TEMPFAIL
 export class SleptThrough extends Fail {}
 export function checkSlept(before, after, what) {
@@ -92,7 +103,68 @@ export function step(name, cmd, args, opts, io = {}) {
   error(tail(logFile));
   // Not a StepFailed, so unitTests doesn't rerun it either.
   checkSlept(sleepsBefore, slept(), `${name} (${why}; the output is in ${logFile})`);
-  throw new StepFailed(`${name} failed (${why}); the whole output is in ${logFile}`, logFile);
+  throw new StepFailed(`${name} failed (${why}); the whole output is in ${logFile}`, logFile, r.status);
+}
+
+// The check hosts in a runner.json, as check.sh reads them: "checkHosts" (a
+// list) over "checkHost", each a plain ssh host name. Empty when there's none.
+export function checkHostsFrom(json) {
+  const h = Array.isArray(json?.checkHosts) ? json.checkHosts : json?.checkHost;
+  return (Array.isArray(h) ? h : [h]).filter((x) => typeof x === 'string' && /^[A-Za-z0-9][A-Za-z0-9._@-]*$/.test(x));
+}
+
+// The self-update's typecheck and unit tests, on a check host when the
+// runner has one. Mike asked on 9 Nov, with his M5 at a load of 50: every
+// runner update (six that morning) ran the whole unit suite on it for 10
+// minutes, the one suite that never went to Tinker Desk with the others on
+// 6 Nov. check.sh --runner sends them there (scripts/check-remote.sh), or to
+// a Linux host, and runs them here at low priority only when no host can be
+// reached, as it does for a thread's checks. --runner rather than --quick:
+// only what the runner's own tests cover, so a website or iPhone test can't
+// hold the runner back from main (update.ts keys a failure by runner/'s tree,
+// so fixing one of those wouldn't even retry it). With no check host (a fork,
+// a sandbox), the steps run here as before. Returns whether it ran them.
+//
+// No host with room, or none free for three hours before the check could
+// start, is the hosts' trouble, not main's: check-remote.sh exits with
+// THREADBEAR_CHECK_BUSY_EXIT for those (an exit code it's told, not words
+// in the output, which a check's own output could fake or leave out), and
+// that's ChecksUnavailable, which update.ts tries again later rather than
+// keeping as a failure until runner/ changes. Anything else is a failed
+// check. That gets one more whole run, as unitTests() gives one, since
+// check.sh only reruns up to 8 named files; not when it ran here, which
+// would be the full suite on this Mac twice.
+export const UNAVAILABLE_EXIT = 69; // EX_UNAVAILABLE
+export class ChecksUnavailable extends Fail {}
+export function remoteChecks(hosts, root, opts, io = {}) {
+  const { say = console.log, node = process.execPath } = io;
+  const checkSh = path.join(root, 'check.sh');
+  if (!hosts.length || !fs.existsSync(checkSh)) return false;
+  // The deploy's own Node, which check.sh would otherwise take as the pinned
+  // nvm path (an install with --node elsewhere has none there), here and as
+  // what it uses on a fallback run.
+  const env = { ...opts.env, THREADBEAR_CHECK_HOST: hosts.join(','), THREADBEAR_NODE: node, THREADBEAR_CHECK_BUSY_EXIT: String(UNAVAILABLE_EXIT) };
+  // Each try is classified the same way, the second included (Codex, 9 Nov).
+  const run = (name) => {
+    try {
+      step(name, checkSh, ['--runner'], { ...opts, cwd: root, env }, io);
+    } catch (e) {
+      if (e instanceof StepFailed && e.status === UNAVAILABLE_EXIT) throw new ChecksUnavailable(`${e.message}. No check host could take it, so it's tried again later`);
+      throw e;
+    }
+  };
+  const name = `Typecheck and unit tests (on ${hosts.join(' or ')})`;
+  try {
+    run(name);
+    return true;
+  } catch (e) {
+    if (!(e instanceof StepFailed) || e instanceof ChecksUnavailable) throw e;
+    if (/run on this Mac instead/.test(readOr(e.logFile))) throw e;
+    say(`Running them once more, in case that was a flaky test.`);
+    run(`${name}, again`);
+    say(`The second run passed (first run's output: ${e.logFile})`);
+    return true;
+  }
 }
 
 // The full suite runs files in parallel on a Mac that's usually busy with
@@ -121,7 +193,7 @@ export function unitTests(c, opts, io = {}) {
       say(`The second run passed (first run's output: ${e.logFile})`);
       return;
     }
-    step(`Rerunning ${files.join(', ')}`, c.node ?? process.execPath, ['--test', '--test-reporter=spec', '--test-concurrency=1', ...TEST_LIMITS, ...files], opts, io);
+    step(`Rerunning ${files.join(', ')}`, c.node ?? process.execPath, ['--import=./test/helpers/clean-env.ts', '--test', '--test-reporter=spec', '--test-concurrency=1', ...TEST_LIMITS, ...files], opts, io);
     say(`Flaky: ${files.join(', ')} failed in the full run and passed alone (first run's output: ${e.logFile})`);
   }
 }

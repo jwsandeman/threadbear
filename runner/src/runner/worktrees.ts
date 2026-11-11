@@ -7,7 +7,7 @@ import type { RunnerPart } from './part.ts';
 import type { Action, EventBody } from '../protocol.ts';
 import type { ThreadRecord } from '../store.ts';
 import { BIN_DIR, threadEnv } from '../restart.ts';
-import { cleanUpWorktree, makeWorktree, sameSubfolder, stillCheckedOut, worktreeGone, type WorktreeRecord } from '../worktrees.ts';
+import { cleanUpWorktree, makeWorktree, readPlainFile, sameSubfolder, stillCheckedOut, worktreeFolderNow, worktreeGone, type WorktreeRecord } from '../worktrees.ts';
 import { isDirectory } from '../fsutil.ts';
 import { automaticTrust, findWorktreePatch, isInside, readWorktreePatch, runCommand, type PatchSet, type WorktreePatch, worktreePatchFiles } from '../patches.ts';
 import fs from 'node:fs';
@@ -55,6 +55,9 @@ export const worktreesPart = {
       this.emit(st, { type: 'system.note', text: `Couldn't make a worktree for this thread: ${made.reason}. It starts in ${asked} instead.` }, turnId);
       return;
     }
+    // Made afresh from main (or a spare reset to it): what a move left
+    // there is gone, so the checkout's own trust reaches it again.
+    this.patchTrust.vouch?.(made.worktree.path);
     rec.worktree = made.worktree;
     rec.cwd = made.cwd;
     rec.updatedAt = this.isoNow();
@@ -163,13 +166,10 @@ export const worktreesPart = {
       if ('skip' in copy) {
         // An untrusted copy can't be loaded to see if it has a teardown, so
         // it's only worth a note when it looks like it might: most don't.
-        let text = '';
-        try {
-          text = fs.readFileSync(file, 'utf8');
-        } catch {
-          // Unreadable: the skip says so if it mentions one.
-        }
-        if (/\bteardown\b/.test(text)) return { skip: copy.skip };
+        // One that isn't a plain file of a sensible size (a fifo, which
+        // would hold the runner up for ever: Codex's review, 9 Nov) might.
+        const text = readPlainFile(file);
+        if (text === undefined || /\bteardown\b/.test(text)) return { skip: copy.skip };
         continue;
       }
       if (!copy.patch) continue;
@@ -222,12 +222,23 @@ export const worktreesPart = {
         return;
       }
     }
+    // The last check, with nothing awaited between it and the start: the
+    // folder can have been swapped (for a link to the main checkout, say)
+    // while the patch was read, and it runs by the path checked.
+    const cwd = worktreeFolderNow(w);
+    if (!cwd) {
+      this.log.warn("didn't run a worktree's teardown: its folder changed", { threadId: rec.id, path: w.path });
+      return;
+    }
     const outcome = await runCommand(found.run ?? found.command, {
-      cwd: w.path,
+      cwd,
       env: { ...process.env, ...threadEnv(rec.id, this.cfg.home) },
       shell: this.actionShell,
       timeoutMs: this.actionTimeoutMs,
       background: this.backgroundJobs,
+      // The cleanup, and everything waiting on it, waits for this: nothing
+      // it leaves running can hold the pipes open past it, as for hooks.
+      killGroup: true,
     });
     w.tornDownAt = this.isoNow();
     this.log.info('worktree teardown', { threadId: rec.id, path: w.path, ok: outcome.ok, exitCode: outcome.exitCode });

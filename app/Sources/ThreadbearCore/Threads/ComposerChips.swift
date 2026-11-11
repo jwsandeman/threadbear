@@ -78,10 +78,10 @@ public enum ComposerChips {
 
     /// The levels a provider offers when the model's own list isn't known.
     public static func effortLevels(provider: String) -> [String] {
-        switch provider {
-        case "omp": return [] // OMP's models can have no reasoning; use its reported levels only.
-        case "codex": return codexEffortLevels
-        default: return effortLevels
+        switch Providers.info(provider).effort {
+        case "codex": codexEffortLevels
+        case "none": []
+        default: effortLevels
         }
     }
 

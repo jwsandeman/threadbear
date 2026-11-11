@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { makeHarness, tick } from '../helpers/fakes.ts';
 import { describeAt, describeCron, nextRuns, parseCron } from '../../src/cron.ts';
-import { Scheduler, scheduleMethods, type ScheduleBackend, type StoredSchedule } from '../../src/schedules.ts';
+import { SAVE_RETRY_MS, Scheduler, scheduleMethods, type ScheduleBackend, type StoredSchedule } from '../../src/schedules.ts';
 import { buildThreadbearTools } from '../../src/threadbear-mcp.ts';
 import { ErrorCode, RpcError } from '../../src/protocol.ts';
 import { nullLogger } from '../../src/log.ts';
@@ -1104,4 +1104,77 @@ test('a one-off run now that the backend missed hearing of is not sent again at 
   assert.ok(row.finishedAt, 'finished');
   bruce.stop();
   s.stop();
+});
+
+// -------------------------------------------------------- a failed save
+
+function failingSaves() {
+  const errors: string[] = [];
+  const h = makeHarness();
+  const updates: unknown[] = [];
+  h.runner.onNotification((n) => n.method === 'schedules.updated' && updates.push(n.params));
+  const sched = new Scheduler({ runner: h.runner, home: h.home, clock: h.clock, log: { ...nullLogger, error: (m: string) => errors.push(m) }, zone: () => 'UTC' });
+  sched.start();
+  const file = path.join(h.home, 'schedules.json');
+  // A rename can't replace a folder, so the save fails the way a full disk's
+  // does, and taking the folder away is the disk getting its room back.
+  const breakSaves = () => {
+    fs.rmSync(file, { force: true });
+    fs.mkdirSync(file);
+  };
+  const fixSaves = () => fs.rmdirSync(file);
+  const saved = () => JSON.parse(fs.readFileSync(file, 'utf8')).schedules.map((s: { id: string }) => s.id);
+  return { h, sched, errors, updates, file, breakSaves, fixSaves, saved };
+}
+
+test('a delete whose save failed is saved by itself, and a restart after that does not bring it back (THREADBEAR-1R)', async () => {
+  const { h, sched, errors, updates, breakSaves, fixSaves, saved } = failingSaves();
+  const { thread } = idleThread(h);
+  const sc = await sched.create({ text: 'Check the deploy', at: iso(h.clock.now() + 60 * MIN), threadId: thread.id });
+  assert.deepEqual(saved(), [sc.id]);
+
+  breakSaves();
+  await sched.delete(sc.id);
+  // Said once, not on every try: it goes to Sentry.
+  assert.deepEqual(errors, ['could not save schedules']);
+  const told = updates.length;
+
+  h.clock.advance(SAVE_RETRY_MS);
+  assert.deepEqual(errors, ['could not save schedules'], 'still failing, not said again');
+  assert.equal(updates.length, told, 'a retry with nothing new tells nobody');
+
+  fixSaves();
+  h.clock.advance(SAVE_RETRY_MS);
+  assert.deepEqual(saved(), [], 'no change came along, and it saved anyway');
+
+  // Saved, so nothing is left waiting to try again.
+  const before = h.clock.pending();
+  h.clock.advance(SAVE_RETRY_MS);
+  assert.equal(h.clock.pending(), before);
+  sched.stop();
+
+  const again = new Scheduler({ runner: h.runner, home: h.home, clock: h.clock, log: nullLogger, zone: () => 'UTC' });
+  again.start();
+  assert.deepEqual(again.list(), [], 'the restarted runner reads the saved list');
+  again.stop();
+});
+
+test('a later failure of the schedules save is reported again, and stop ends the retrying', async () => {
+  const { h, sched, errors, file, breakSaves, fixSaves } = failingSaves();
+  const { thread } = idleThread(h);
+  breakSaves();
+  const sc = await sched.create({ text: 'One', at: iso(h.clock.now() + 60 * MIN), threadId: thread.id });
+  fixSaves();
+  h.clock.advance(SAVE_RETRY_MS);
+  assert.equal(errors.length, 1);
+
+  breakSaves();
+  await sched.delete(sc.id);
+  assert.equal(errors.length, 2, 'a new failure after one that recovered is news');
+
+  sched.stop();
+  fixSaves();
+  h.clock.advance(SAVE_RETRY_MS);
+  // A stopped runner mustn't write over what the runner taking over has saved.
+  assert.equal(fs.existsSync(file), false, 'the retry went with the scheduler');
 });

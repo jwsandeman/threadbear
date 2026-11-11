@@ -305,4 +305,21 @@
 //    Firebase, whatever Apple key the backend has (docs/push-relay.md). An
 //    older backend refuses the argument, so an Android phone registers only
 //    with a backend of 66 or later.
-export const API_VERSION = 66;
+// 67: sync:heartbeat takes `followProblem`, a runner's own word that it can't
+//    follow GitHub's main (runner/src/follow-origin.ts), and otherRunnersList
+//    and otherRunnersThreads (main key only) give it back. An older
+//    backend's validator refuses the field, so a runner sends it only from 67.
+// 68: relay:queueCommand takes `press` ({ buttonId }) and `slashCommands`
+//    for another runner's thread, as the phone sends them, and
+//    relay:remoteTail and remoteMessages rows carry their `buttons`, so the
+//    main Mac presses reply buttons and lists slash commands on another
+//    runner's thread (docs/parity.md). A runner asks only from 68.
+// 69: phone:interrupt, Stop on the phone and the website: queues an
+//    `interrupt` command for the thread's runner, which runners have applied
+//    since 44. An older phone has no Stop.
+// 70: threads and threadIndex rows carry `recap`, the librarian's recap for
+//    the recap box. A runner sends it only from 70.
+// 71: an open card's asks can carry `run`, a command and the id of the Run
+//    button that runs it (phone:press). A runner sends it only from 71; an
+//    older phone just doesn't show it.
+export const API_VERSION = 71;

@@ -120,7 +120,7 @@ const ONLINE_MS = 3 * 60_000;
 // offered in runners.list: an old install, or a test's.
 const FORGET_MS = 30 * 86_400_000;
 
-export type ScheduleRunner = Pick<Runner, 'create' | 'send' | 'get' | 'hello' | 'onNotification' | 'publish' | 'patchTrust'>;
+export type ScheduleRunner = Pick<Runner, 'create' | 'send' | 'get' | 'hello' | 'onNotification' | 'publish' | 'patchTrust'> & { cfg?: Pick<Runner['cfg'], 'defaults'> };
 
 export type CreateScheduleParams = {
   // A card's approval of `check` (patch-trust.ts, approveCheck). Not from a client.
@@ -174,6 +174,8 @@ export type UpdateScheduleParams = {
 const TICK_MS = 30_000;
 // A one-off that has run stays in the list this long, then goes.
 const KEEP_FINISHED_MS = 7 * 86_400_000;
+// How soon a save that failed is tried again.
+export const SAVE_RETRY_MS = 5000;
 const BUSY = new Set(['starting', 'running', 'waiting']);
 
 export class Scheduler {
@@ -184,6 +186,8 @@ export class Scheduler {
   private zone: () => string;
   private items = new Map<string, ScheduleRecord>();
   private timer?: TimerHandle;
+  private saveRetry?: TimerHandle;
+  private saveFailed = false;
   private stopped = false;
   private unlisten?: () => void;
   // This runner, as the backend knows it (sync.runnerId and its name).
@@ -331,6 +335,7 @@ export class Scheduler {
   stop(): void {
     this.stopped = true;
     this.timer?.cancel();
+    this.saveRetry?.cancel();
     this.unlisten?.();
     this.unsubscribe?.();
     this.unsubscribe = undefined;
@@ -1360,14 +1365,28 @@ export class Scheduler {
   // -------------------------------------------------------------- helpers
 
   private changed(): void {
+    this.save();
+    this.publish();
+  }
+
+  // A save that fails is tried again in a moment, as Runner.flush does for
+  // threads, rather than waiting for the next change: until it lands a
+  // restart brings back the old list, so a deleted schedule could fire again
+  // (THREADBEAR-1R: the cloud box's disk filled).
+  private save(): void {
+    this.saveRetry?.cancel();
+    this.saveRetry = undefined;
     const stored = [...this.items.values()];
     const version = this.mode === 'backend' ? 2 : 1;
     try {
       atomicWriteFileSync(this.file, `${JSON.stringify({ version, schedules: stored }, null, 2)}\n`);
+      this.saveFailed = false;
     } catch (e) {
-      this.log.error('could not save schedules', { error: String(e) });
+      // Said once until it saves, as it reaches Sentry.
+      if (!this.saveFailed) this.log.error('could not save schedules', { error: String(e) });
+      this.saveFailed = true;
+      if (!this.stopped) this.saveRetry = this.clock.setTimeout(() => this.save(), SAVE_RETRY_MS);
     }
-    this.publish();
   }
 
   private publish(): void {
@@ -1376,6 +1395,13 @@ export class Scheduler {
 
   private view(rec: ScheduleRecord): Schedule {
     const v: Schedule = { ...rec, whenText: this.whenText(rec) };
+    // What one with no mode of its own runs with, as new-threads.ts picks it
+    // when it runs: so raising it is checked against that, not a guess of
+    // full (Daybreak, 10 Nov: on an Ask-default runner, an Ask thread set
+    // one to Auto as if lowering it). Only this runner's default is known.
+    const defaults = this.runner.cfg?.defaults;
+    if (!rec.threadId && !rec.permissionMode && this.mine(rec) && defaults) v.defaultMode = defaults.permissionMode ?? 'full';
+    else delete v.defaultMode;
     if (rec.runnerId) {
       const own = rec.runnerId === this.self.id;
       const name = own ? this.self.name : this.names.get(rec.runnerId);

@@ -2,9 +2,11 @@
 import { parseArgs } from 'node:util';
 import { startedByFlags } from './started-by-flags.ts';
 import path from 'node:path';
-import { loadConfig, readToken, runnerUrl } from './config.ts';
+import { loadConfig, runnerUrl, RunnerJsonError } from './config.ts';
+import { connectTb, ownerOnly } from './tb-connect.ts';
 import { RunnerClient } from './client.ts';
 import { poolLine } from './pools.ts';
+import { providerName } from './providers.ts';
 import type { Account, ImageRef, Pool, LibrarianStatus, PersistedEvent, Project, RunnerDefaults, Schedule, ThreadSummary } from './protocol.ts';
 import type { Settings } from './settings.ts';
 import { backgroundFlag } from './protocol.ts';
@@ -13,9 +15,11 @@ import { DEV_HELP, formatModels, logsCommand, runDev } from './tb-dev.ts';
 import { findWorktreePatch, isInside } from './patches.ts';
 import { TRUST_ALL } from './patch-trust.ts';
 import { land, landTargetFromGit, type LandTarget } from './worktrees.ts';
+import { landRefusal } from './follow-origin.ts';
 import { activityCommand } from './activity.ts';
 import { pairCommand } from './pair.ts';
 import { runnerKeysCommand } from './runner-keys.ts';
+import { pickRunner } from './moves.ts';
 
 const OPTIONS = {
   cwd: { type: 'string' },
@@ -255,12 +259,32 @@ async function main(argv: string[]): Promise<number> {
       return 2;
     }
   }
-  const cfg = loadConfig();
+  let cfg: ReturnType<typeof loadConfig>;
+  try {
+    cfg = loadConfig();
+  } catch (e) {
+    // A broken runner.json: say what's wrong with it, not a stack trace.
+    if (!(e instanceof RunnerJsonError)) throw e;
+    console.error(e.message);
+    // tb logs and tb activity only read files, and the log is where to
+    // look while the runner won't start, so they still run.
+    if (cmd !== 'logs' && cmd !== 'activity') return 1;
+    cfg = loadConfig(process.env, { readOnly: true });
+  }
   if (cmd === 'logs') return logsCommand(cfg, values);
   // The app's activity log is files on this Mac: no runner needed.
   if (cmd === 'activity') return activityCommand(cfg, values);
   // Works with no runner too: from any thread/ worktree, by git alone.
   if (cmd === 'land') return landCommand(cfg, Boolean(values['dry-run']));
+  // tb pair and tb runner use this Mac's keys straight from disk, so the
+  // runner never sees them to refuse them (tb-connect.ts).
+  if (cmd === 'pair' || cmd === 'runner') {
+    const why = await ownerOnly(cfg);
+    if (why) {
+      console.error(why);
+      return 1;
+    }
+  }
   // Read from runner.json alone, on the Mac being paired.
   if (cmd === 'pair') return pairCommand(cfg);
   // Straight to the backend with this Mac's key, so no runner needed either.
@@ -268,7 +292,7 @@ async function main(argv: string[]): Promise<number> {
     const flags = { ...(typeof values.ssh === 'string' ? { ssh: values.ssh } : {}), ...(typeof values.out === 'string' ? { out: values.out } : {}), ...(typeof values.id === 'string' ? { id: values.id } : {}), json: Boolean(values.json), finish: Boolean(values.finish), replace: Boolean(values.replace), ...(Array.isArray(values.drop) ? { remove: values.drop as string[] } : {}), ...(typeof values.snapshot === 'string' ? { snapshot: values.snapshot } : {}), keysChecked: Boolean(values['keys-checked']), ...(Array.isArray(values['lock-out']) ? { lockOut: values['lock-out'] as string[] } : {}), purge: Boolean(values.purge) };
     // The audit asks this Mac's runner how far each of its threads goes.
     const heads = async () => {
-      const client = await RunnerClient.connect(runnerUrl(cfg), readToken(cfg.home));
+      const client = await connectTb(cfg);
       try {
         await client.call('hello', { client: 'tb', version: '1' });
         const r = await client.call<{ threads: ThreadSummary[] }>('threads.list', { include: ['inbox', 'snoozed', 'archived'] });
@@ -282,7 +306,7 @@ async function main(argv: string[]): Promise<number> {
   const url = runnerUrl(cfg);
   let client: RunnerClient;
   try {
-    client = await RunnerClient.connect(url, readToken(cfg.home));
+    client = await connectTb(cfg, url);
   } catch (e) {
     console.error(`Couldn't reach the runner at ${url}: ${(e as Error).message}`);
     return 2;
@@ -325,6 +349,11 @@ async function landCommand(cfg: ReturnType<typeof loadConfig>, dryRun: boolean):
     }
     target = found.target;
   }
+  const refused = landRefusal(cfg.home, target.mainCheckout);
+  if (refused) {
+    console.error(refused);
+    return 1;
+  }
   return land(target, {
     dryRun,
     // Read after the landing lock and rebase: main may have changed the
@@ -338,7 +367,7 @@ async function landCommand(cfg: ReturnType<typeof loadConfig>, dryRun: boolean):
 async function threadFromRunner(cfg: ReturnType<typeof loadConfig>, threadId: string): Promise<ThreadSummary | undefined> {
   let client: RunnerClient;
   try {
-    client = await RunnerClient.connect(runnerUrl(cfg), readToken(cfg.home));
+    client = await connectTb(cfg);
   } catch {
     return undefined;
   }
@@ -575,7 +604,7 @@ async function run(client: RunnerClient, cmd: string, args: string[], f: Flags):
         const note = a.note ? `  (${a.note})` : '';
         // The provider has its own column, so not "Codex · " again.
         const who = a.email ?? a.title.replace(/^Codex · /, '');
-        console.log(`${a.id === r.defaults.accountId ? '*' : ' '} ${a.id.padEnd(12)} ${(a.provider === 'omp' ? 'Oh My Pi' : a.provider === 'codex' ? 'Codex' : 'Claude').padEnd(7)}${who}${note}`);
+        console.log(`${a.id === r.defaults.accountId ? '*' : ' '} ${a.id.padEnd(12)} ${providerName(a.provider).padEnd(9)}${who}${note}`);
       }
       return 0;
     }
@@ -744,6 +773,8 @@ function printSettings(s: Settings): void {
   console.log(`Follow main      ${s.followMain ? 'on' : 'off'}`);
   console.log(`Bullet replies   ${s.bulletReplies === false ? 'off' : 'on'}`);
   console.log(`One reply        ${s.oneReply ? 'on' : 'off'}`);
+  console.log(`Lab review       ${s.labReview === false ? 'off' : 'on'}`);
+  if (s.keepAwake !== undefined) console.log(`Keep Mac awake   ${s.keepAwake ? 'on' : 'off'}`);
   printModels(s);
   // An older runner sends no list.
   const on = (s.experiments ?? []).filter((x) => x.on).map((x) => x.id);
@@ -842,12 +873,11 @@ async function resolveApproval(client: RunnerClient, threadId: string, prefix: s
 // tb move --to: the runner by name or id (runners.list), then
 // threads.movePreview or threads.move on this runner.
 async function moveToRunner(client: RunnerClient, threadId: string, f: Flags): Promise<number> {
-  const want = String(f.to).toLowerCase();
   const { runners } = await client.call<{ runners: { id: string; name: string; online: boolean; isSelf?: boolean }[] }>('runners.list', {});
-  // Its id, its name, or a word of its name only it has ("cloud" for "Hetzner Cloud").
-  const partly = runners.filter((r) => r.name.toLowerCase().includes(want));
-  const runner = runners.find((r) => r.id === f.to) ?? runners.find((r) => r.name.toLowerCase() === want) ?? (partly.length === 1 ? partly[0] : undefined);
-  if (!runner) throw new Error(`No runner called ${String(f.to)}. There are: ${runners.map((r) => r.name).join(', ')}.`);
+  // Its id, its name, or a word of its name only it has ("cloud" for
+  // "Hetzner Cloud"), and never a guess between two (moves.ts pickRunner).
+  const runner = pickRunner(String(f.to), runners);
+  if ('problem' in runner) throw new Error(runner.problem);
   const params: Record<string, unknown> = { threadId, runnerId: runner.id };
   if (typeof f.cwd === 'string') params.cwd = f.cwd;
   if (typeof f.account === 'string') params.accountId = f.account;
