@@ -150,7 +150,7 @@ public enum ModelPicker {
             rows.append(Row(id: c.id, title: c.title, subtitle: c.description, isDefault: isDefault, isSelected: matches(c, selected), isOlder: older))
         }
         let isMain = { (c: ModelChoice) -> Bool in
-            !claude || c.id.allSatisfy(\.isLetter) || matches(c, defaultId) || matches(c, selected)
+            codex || c.id.allSatisfy(\.isLetter) || matches(c, defaultId) || matches(c, selected)
         }
         for c in known where isMain(c) { add(c, older: false) }
         if let selected, !selected.isEmpty, !known.contains(where: { matches($0, selected) }) {

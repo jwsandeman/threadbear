@@ -148,9 +148,9 @@ test("a runner moved back onto the owner key: the rows the owner key writes unde
   assert.equal((await shared(s, OWNER, M5)).some((r) => r.runnerId === 'laterkeyed01'), true);
   await s.ctx.db.insert('runnerKeys', { runnerId: 'laterkeyed01', keyHash: await sha256('tbr_later'), name: 'later', createdAt: 3 });
   assert.equal((await shared(s, OWNER, M5)).some((r) => r.runnerId === 'laterkeyed01'), false);
-  // A runner key never writes the mark, even if it tries.
-  await call(s.ctx, sync.upsertAccounts, { key: PIXEL_KEY, runnerId: PIXEL, accounts: [{ ...account('p', MINE, real), byOwnerKey: true } as any], removed: [] });
-  assert.notEqual(s.rows('accounts').find((r) => r.runnerId === PIXEL && r.id === 'p')!.byOwnerKey, true);
+  // A runner key never writes the mark, even if it tries: Convex refuses the field.
+  await assert.rejects(call(s.ctx, sync.upsertAccounts, { key: PIXEL_KEY, runnerId: PIXEL, accounts: [{ ...account('p', MINE, real), byOwnerKey: true } as any], removed: [] }), /byOwnerKey/);
+  assert.equal(s.rows('accounts').some((r) => r.runnerId === PIXEL && r.byOwnerKey === true), false);
 });
 
 test('only the owner key lists logins, only for a runner with a live key, and a new key for the id starts with none', async () => {
