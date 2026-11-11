@@ -124,8 +124,7 @@ export const poolsPart = {
     // only an id nothing else claims means that agent.
     const listed = accounts.find((a) => modelRow(a, model))?.provider;
     if (listed) return listed;
-    // Oh My Pi's ids name their provider ("anthropic/..."); OpenCode's do too,
-    // so only when there's no OpenCode login to mean instead.
+    // A "provider/model" id nothing lists: Oh My Pi, with no OpenCode login.
     if (model.includes('/') && accounts.some((a) => a.provider === 'omp') && !accounts.some((a) => a.provider === 'opencode')) return 'omp';
     return undefined;
   },

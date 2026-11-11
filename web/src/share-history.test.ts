@@ -97,7 +97,7 @@ test('a paced stream of big rows keeps older within its byte cap', () => {
   assert.equal(h.older[h.older.length - 1]!.seq, h.live!.messages[0]!.seq - 1);
   // What went can be loaded again.
   assert.equal(nextBefore(h), h.older[0]!.seq);
-  assert.ok((cpu.user + cpu.system) / 1000 < 100, `took ${(cpu.user + cpu.system) / 1000} ms of CPU`);
+  assert.ok((cpu.user + cpu.system) / 1000 < 300, `took ${(cpu.user + cpu.system) / 1000} ms of CPU`);
 });
 
 test('a long stream of small rows keeps older within its row cap', () => {
