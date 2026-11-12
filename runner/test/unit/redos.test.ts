@@ -3,7 +3,7 @@
 // shapes elsewhere). Each finding has tests of what the code gave before on
 // ordinary input, which must not change, then its pathological input at a
 // size the old regex took a second or more on (on tinker-desk's M2), which
-// must now take well under 100 ms.
+// must now take well under a second of CPU.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
@@ -28,18 +28,24 @@ import { cleanTitle } from '../../src/runner.ts';
 const LS = String.fromCharCode(0x2028);
 const IDEO_SPACE = String.fromCharCode(0x3000);
 
-// Well under 100 ms: the old versions took a second or more on each of
-// these. The best of up to five, so a busy machine's pause isn't taken for
-// backtracking, which would be slow every time.
+// CPU time, not the clock, so a loaded machine's waits don't count; the
+// best of up to five. A second, not 100 ms: each takes under
+// 15 ms on an idle performance core, but on an efficiency core (where
+// `tb land` and the update build run the suite, at background priority) or
+// a busy Mac one took over 100 ms of CPU (forks' update builds, 7 to 9 Nov).
+// The regexes these replaced took seconds to hours on the same inputs, so a
+// second still tells linear from not.
+const CHEAP_MS = 1000;
 function fast<T>(what: string, fn: () => T): T {
   let best = Infinity;
   let out!: T;
-  for (let i = 0; i < 5 && best >= 100; i++) {
-    const t0 = performance.now();
+  for (let i = 0; i < 5 && best >= CHEAP_MS; i++) {
+    const cpu = process.cpuUsage();
     out = fn();
-    best = Math.min(best, performance.now() - t0);
+    const { user, system } = process.cpuUsage(cpu);
+    best = Math.min(best, (user + system) / 1000);
   }
-  assert.ok(best < 100, `${what} took ${Math.round(best)} ms`);
+  assert.ok(best < CHEAP_MS, `${what} took ${Math.round(best)} ms of CPU`);
   return out;
 }
 
@@ -448,12 +454,13 @@ test('a Notion page names its task database as before', async () => {
 test('a Notion page of unclosed database tags is read in linear time', async () => {
   const text = '<database url="x" data-source-url="collection://a"'.repeat(6000);
   let best = Infinity;
-  for (let i = 0; i < 5 && best >= 100; i++) {
-    const t0 = performance.now();
+  for (let i = 0; i < 5 && best >= CHEAP_MS; i++) {
+    const cpu = process.cpuUsage();
     await assert.rejects(findSource(notionPage(text) as never, 'page-1'), /No database/);
-    best = Math.min(best, performance.now() - t0);
+    const { user, system } = process.cpuUsage(cpu);
+    best = Math.min(best, (user + system) / 1000);
   }
-  assert.ok(best < 100, `findSource took ${Math.round(best)} ms`);
+  assert.ok(best < CHEAP_MS, `findSource took ${Math.round(best)} ms of CPU`);
 });
 
 test('a Notion database with long runs reads in linear time', () => {
@@ -490,27 +497,6 @@ test('linear-text helpers give what the regexes they replaced gave', async () =>
 });
 
 // ------------------------------------- review pages (Daybreak, 7 Nov 2026)
-
-// CPU time, not the clock, so a loaded machine's waits don't count; the
-// best of up to five, as in `fast`. A second, not 100 ms: each takes under
-// 15 ms on an idle performance core, but on an efficiency core (where
-// `tb land` and the update build run the suite, at background priority) or
-// a busy Mac one took over 100 ms of CPU (forks' update builds, 7 to 9 Nov).
-// The regexes these replaced took seconds to hours on the same inputs, so a
-// second still tells linear from not.
-const CHEAP_MS = 1000;
-function cheap<T>(what: string, fn: () => T): T {
-  let best = Infinity;
-  let out!: T;
-  for (let i = 0; i < 5 && best >= CHEAP_MS; i++) {
-    const cpu = process.cpuUsage();
-    out = fn();
-    const { user, system } = process.cpuUsage(cpu);
-    best = Math.min(best, (user + system) / 1000);
-  }
-  assert.ok(best < CHEAP_MS, `${what} took ${Math.round(best)} ms of CPU`);
-  return out;
-}
 
 // namedFiles as it was before, to hold the new one to.
 function oldNamedFiles(text: string, base: string, root: string): string[] {
@@ -597,16 +583,16 @@ test("a review page's long runs are read in linear time", () => {
     `srcset="${' ,'.repeat(size / 8)}"`,
     `@import ${' '.repeat(size)}`,
   ];
-  for (const text of texts) cheap(`namedFiles on ${JSON.stringify(text.slice(0, 10))}...`, () => namedFiles(text, '/r', '/r'));
-  assert.deepEqual(cheap('url() of spaces', () => cssUrlCaptures(`url(${' '.repeat(size)})`)), [' ']);
-  assert.equal(cheap('a name of ?', () => cutQueryAndHash(`${'?'.repeat(size)}\n`)), `${'?'.repeat(size)}\n`);
+  for (const text of texts) fast(`namedFiles on ${JSON.stringify(text.slice(0, 10))}...`, () => namedFiles(text, '/r', '/r'));
+  assert.deepEqual(fast('url() of spaces', () => cssUrlCaptures(`url(${' '.repeat(size)})`)), [' ']);
+  assert.equal(fast('a name of ?', () => cutQueryAndHash(`${'?'.repeat(size)}\n`)), `${'?'.repeat(size)}\n`);
 });
 
 // ------------------------------------------- the runner's pinned-page check
 
 test("a pinned page near the 4 MiB it reads is checked in linear time", () => {
   // hasScriptMarks (ced7de1e): every input here is at the cap the runner
-  // reads a page to, and each is linear (`cheap`).
+  // reads a page to, and each is linear (`fast`).
   const size = 4 * 1024 * 1024;
   const pages: [string, boolean][] = [
     ['<'.repeat(size), false],
@@ -621,5 +607,5 @@ test("a pinned page near the 4 MiB it reads is checked in linear time", () => {
     ['javascript'.repeat(size / 10), false],
     ['<scrip'.repeat(size / 6), false],
   ];
-  for (const [html, want] of pages) assert.equal(cheap(`hasScriptMarks on ${JSON.stringify(html.slice(0, 8))}...`, () => hasScriptMarks(html)), want);
+  for (const [html, want] of pages) assert.equal(fast(`hasScriptMarks on ${JSON.stringify(html.slice(0, 8))}...`, () => hasScriptMarks(html)), want);
 });

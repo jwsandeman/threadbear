@@ -6,6 +6,12 @@ import test from "node:test";
 
 import { HELD_BACK, redactSecrets, scrubDoc, scrubText, SCRUB_RULES_VERSION } from "../../src/redaction.ts";
 
+// CPU time excludes the seconds a busy Mac keeps this process off the CPU.
+const cpuMs = () => {
+  const { user, system } = process.cpuUsage();
+  return (user + system) / 1000;
+};
+
 const KEY = "[REDACTED PRIVATE KEY]";
 const END = "-----END PRIVATE KEY-----";
 
@@ -250,11 +256,10 @@ test("the BEGIN-less PEM rule stays linear on long runs", () => {
     `${END} ${"ab ".repeat(100_000)}`,
   ];
   for (const sample of samples) {
-    const started = performance.now();
+    const started = cpuMs();
     redactSecrets(sample);
-    // Tens of ms when it's linear, minutes when it isn't; this repo's checks run
-    // at low priority on a busy Mac, where 1 s flaked.
-    assert.equal(performance.now() - started < 10_000, true);
+    // Tens of ms of CPU when linear, minutes when it isn't.
+    assert.equal(cpuMs() - started < 10_000, true);
   }
 });
 
@@ -354,11 +359,10 @@ test("the DER header rule stays linear on long runs", () => {
     `${line}\n${"+".repeat(100_000)}`,
   ];
   for (const sample of samples) {
-    const started = performance.now();
+    const started = cpuMs();
     redactSecrets(sample);
-    // Tens of ms when it's linear, minutes when it isn't; this repo's checks run
-    // at low priority on a busy Mac, where 1 s flaked.
-    assert.equal(performance.now() - started < 10_000, true);
+    // Tens of ms of CPU when linear, minutes when it isn't.
+    assert.equal(cpuMs() - started < 10_000, true);
   }
 });
 
@@ -451,9 +455,9 @@ test("a key the runner's own cut left short is caught at the very end of the tex
 
 test("the keychain rule stays linear on a long line", () => {
   const text = "security add-generic-password ".repeat(80_000);
-  const started = performance.now();
+  const started = cpuMs();
   redactSecrets(text);
-  assert.ok(performance.now() - started < 10_000);
+  assert.ok(cpuMs() - started < 10_000);
   const secret = `h${"unter2".repeat(3)}`;
   assert.equal(scrubText(`security add-generic-password -a me -s x -w ${secret}`).includes(secret), false);
 });
@@ -462,9 +466,9 @@ test("repeated unclosed PEM lines stay linear", () => {
   const sizes = [20_000, 80_000];
   const times = sizes.map((n) => {
     const text = "-----BEGIN PRIVATE KEY-----\n".repeat(n);
-    const started = performance.now();
+    const started = cpuMs();
     redactSecrets(text);
-    return performance.now() - started;
+    return cpuMs() - started;
   });
   // A 2.2 MB text: quadratic took minutes before.
   assert.ok(times[1]! < 10_000, `${times[1]} ms`);
@@ -514,15 +518,15 @@ test("a block with many unclosed labels in front of it still goes", () => {
 
 test("no rule is slow on a long run of what it's looking for", () => {
   for (const unit of ["prod:a:", "eyJabcdefgh-", "-----BEGIN PRIVATE KEY-----\n", "security add-generic-password ", "eyJabcdefgh.eyJ"]) {
-    // Seconds at worst on a loaded Mac, against many minutes when quadratic.
+    // Seconds of CPU at worst, against many minutes when quadratic.
     const text = unit.repeat(80_000);
-    const started = performance.now();
+    const started = cpuMs();
     redactSecrets(text);
-    assert.ok(performance.now() - started < 30_000, unit);
+    assert.ok(cpuMs() - started < 30_000, unit);
     const end = `${text}!`;
-    const again = performance.now();
+    const again = cpuMs();
     redactSecrets(end);
-    assert.ok(performance.now() - again < 30_000, unit);
+    assert.ok(cpuMs() - again < 30_000, unit);
   }
 });
 
