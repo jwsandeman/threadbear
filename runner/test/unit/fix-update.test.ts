@@ -6,7 +6,9 @@ import { UpdateFixer, type UpdateFailure } from '../../src/fix-update.ts';
 
 function rig(follows = false) {
   const started: { text: string; title: string; why: string }[] = [];
-  const sent: { threadId: string; text: string }[] = [];
+  const sent: { threadId: string; text: string; turnId: string }[] = [];
+  // What's still waiting in each thread's queue, by turn id.
+  const queued = new Set<string>();
   const archived = new Set<string>();
   const home = tmpDir('tb-fix-update-');
   const f = new UpdateFixer({
@@ -17,11 +19,17 @@ function rig(follows = false) {
       return `t${started.length}`;
     },
     open: (id) => !archived.has(id),
-    send: (threadId, text) => sent.push({ threadId, text }),
+    send: (threadId, text) => {
+      const turnId = `turn${sent.length + 1}`;
+      sent.push({ threadId, text, turnId });
+      queued.add(turnId);
+      return turnId;
+    },
+    unqueue: (_threadId, turnId) => queued.delete(turnId),
     followsOrigin: () => follows,
     checkout: '/home/mike/dev/me/threadbear',
   });
-  return { f, home, started, sent, archived };
+  return { f, home, started, sent, queued, archived };
 }
 
 function failure(commit: string, kind: UpdateFailure['kind'] = 'build'): UpdateFailure {
@@ -102,4 +110,30 @@ test('a machine that lands here keeps the usual instructions', () => {
   f.failed(failure('c2'));
   assert.match(started[0].text, /Land the fix on main/);
   assert.doesNotMatch(started[0].text, /Never commit on main/);
+});
+
+// The backend fix thread (2af6de5c, 11 Nov) was woken twice after its fix
+// had gone through, by follow-ups for 37fcdace and 4491e93a queued behind
+// its turn: both commits came before the fix.
+test('a follow-up still queued is dropped once main gets through, or a newer one replaces it', () => {
+  const { f, sent, queued } = rig();
+  f.failed(failure('c2'));
+  f.failed(failure('c3'));
+  f.failed(failure('c4'));
+  assert.equal(sent.length, 2);
+  assert.deepEqual([...queued], ['turn2'], 'only the newest waits');
+  f.through('c5');
+  assert.equal(queued.size, 0);
+  // Already delivered: nothing to take back, and nothing breaks.
+  f.through('c6');
+  // A failure after that still goes to the thread.
+  assert.equal(f.failed(failure('c7')), 'sent');
+  assert.deepEqual([...queued], ['turn3']);
+});
+
+test('a follow-up says to archive when main has already got past it', () => {
+  const { f, sent } = rig();
+  f.failed(failure('c2'));
+  f.failed(failure('c3'));
+  assert.match(sent[0].text, /tb status/);
 });

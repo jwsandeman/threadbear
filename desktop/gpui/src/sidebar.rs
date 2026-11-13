@@ -7,13 +7,13 @@
 // slow thing with no optimistic state, deleting a chat, shows a spinner in its
 // place and stops taking clicks until it lands.
 use crate::app::Threadbear;
+use crate::shell::SidebarMode;
 use crate::{call, icons, now_ms, style};
 use gpui_kit::base::TestSupportExt as _;
 use gpui_kit::component::dialog::DialogButtonProps;
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
 use gpui_kit::component::spinner::Spinner;
-use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{h_flex, v_flex, ActiveTheme as _, Icon, Sizable as _, StyledExt as _, WindowExt as _};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
@@ -25,6 +25,7 @@ use std::time::Duration;
 
 use threadbear_core::inbox::{iso_time, InboxOrder, ThreadSummary};
 use threadbear_core::sidebar::{self as rows, RowAction, RowLook, RowMode, Tile, TrailingKind};
+use crate::tips::Tip as _;
 
 type Clock = threadbear_core::chrono::DateTime<threadbear_core::chrono::Local>;
 
@@ -48,10 +49,101 @@ impl SidebarView {
 
 impl Render for SidebarView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        match self.app.upgrade() {
-            Some(app) => app.update(cx, |t, cx| t.render_threads_panel(window, cx)),
-            None => div().into_any_element(),
+        let Some(app) = self.app.upgrade() else { return div().into_any_element() };
+        let focus = app.read(cx).sidebar.focus.clone();
+        let content = app.update(cx, |t, cx| t.render_threads_panel(window, cx));
+        // A click anywhere in the panel that isn't a field gives it the
+        // keyboard (GPUI focuses the innermost focusable thing pressed), as
+        // clicking a row does the Swift list's.
+        let (up, down, escape) = (self.app.clone(), self.app.clone(), self.app.clone());
+        div()
+            .size_full()
+            .track_focus(&focus)
+            .key_context(LIST_CONTEXT)
+            .on_action(move |_: &SelectPreviousThread, window, cx| {
+                up.update(cx, |t, cx| t.step_thread(-1, window, cx)).ok();
+            })
+            .on_action(move |_: &SelectNextThread, window, cx| {
+                down.update(cx, |t, cx| t.step_thread(1, window, cx)).ok();
+            })
+            .on_action(move |_: &BackToInbox, window, cx| {
+                escape.update(cx, |t, cx| t.list_escape(window, cx)).ok();
+            })
+            .child(content)
+            .into_any_element()
+    }
+}
+
+// The Threads panel's keys (`onMoveCommand`, `onExitCommand`).
+actions!(thread_list, [SelectPreviousThread, SelectNextThread, BackToInbox]);
+
+/// The Threads panel's key context: its keys work while it has the keyboard,
+/// and a field in it (the search) keeps its own arrows and Esc.
+const LIST_CONTEXT: &str = "ThreadList";
+
+pub(crate) fn bind_keys(cx: &mut App) {
+    static BOUND: std::sync::Once = std::sync::Once::new();
+    BOUND.call_once(|| {
+        cx.bind_keys([KeyBinding::new("up", SelectPreviousThread, Some(LIST_CONTEXT)), KeyBinding::new("down", SelectNextThread, Some(LIST_CONTEXT)), KeyBinding::new("escape", BackToInbox, Some(LIST_CONTEXT))]);
+    });
+}
+
+impl Threadbear {
+    /// The threads the arrow keys walk, top to bottom, as drawn: a folded
+    /// section's rows aren't, unless a search draws them, and Archived only
+    /// its few (`order` in SidebarView).
+    pub(crate) fn arrow_order(&self, cx: &App) -> Vec<String> {
+        let now = now_ms();
+        let searching = !self.search.read(cx).value().trim().is_empty();
+        let mut out = Vec::new();
+        for section in self.shown_sections(cx, now) {
+            if !searching && self.folded.contains(section.key) {
+                continue;
+            }
+            let total = section.rows.len();
+            let shown = if section.key == "archived" {
+                let selected = self.selected.as_ref().and_then(|id| section.rows.iter().position(|t| &t.id == id));
+                rows::archive_rows(total, self.sidebar.archive_limit, searching, selected).0
+            } else {
+                total
+            };
+            out.extend(section.rows.into_iter().take(shown).map(|t| t.id));
         }
+        out
+    }
+
+    /// Up or down a thread from the open one (from nothing open, the first
+    /// or the last), kept in view, with the keyboard staying in the list.
+    pub(crate) fn step_thread(&mut self, step: i32, window: &mut Window, cx: &mut Context<Self>) {
+        if self.mode != SidebarMode::Inbox {
+            return;
+        }
+        let order = self.arrow_order(cx);
+        let next = match self.selected.as_ref().and_then(|s| order.iter().position(|id| id == s)) {
+            None if step >= 0 => order.first(),
+            None => order.last(),
+            Some(i) => order.get((i as i32 + step).clamp(0, order.len() as i32 - 1) as usize),
+        };
+        let Some(next) = next.cloned().filter(|n| self.selected.as_ref() != Some(n)) else { return };
+        self.open(next.clone(), window, cx);
+        // Opening puts the cursor in the thread's box; the arrows keep it here.
+        window.focus(&self.sidebar.focus, cx);
+        crate::web_panels::keyboard_to_app(window);
+        self.reveal_row(&next, cx);
+    }
+
+    /// Esc in the Threads panel: the Scheduled, Projects or Librarian view
+    /// goes back to the Inbox.
+    fn list_escape(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.mode != SidebarMode::Inbox {
+            self.set_mode(SidebarMode::Inbox, cx);
+        }
+    }
+
+    /// Scrolls the thread's row into view once it's drawn.
+    pub(crate) fn reveal_row(&mut self, id: &str, cx: &mut Context<Self>) {
+        *self.sidebar.reveal.borrow_mut() = Some((id.to_owned(), 0));
+        cx.notify();
     }
 }
 
@@ -145,18 +237,18 @@ impl MenuRow {
     }
     /// A line of the new-thread box's Runs on menu: `star` marks the default
     /// (`markDefault`'s ★, drawn on the title; this menu has no badge yet).
-    /// A ticked line has no symbol: the kit's menu shows the tick in the
-    /// icon's place, and draws no tick at all beside one.
+    /// A ticked line keeps its symbol: the menu draws the tick in a column of
+    /// its own beside the icon, as macOS's do (desktop/vendor's mac_look.rs).
     pub(crate) fn runner(title: impl Into<String>, symbol: &'static str, checked: bool, star: bool, action: MenuAction) -> Self {
         let mut title: String = title.into();
         if star {
             title.push_str("  ★");
         }
-        Self { title, symbol: (!checked).then_some(symbol), action: Some(action), checked, enabled: true, children: vec![], separator: false }
+        Self { title, symbol: Some(symbol), action: Some(action), checked, enabled: true, children: vec![], separator: false }
     }
     /// A folder on the runner a new thread will start on (Runs on's Folder).
     pub(crate) fn runner_folder(folder: String, checked: bool) -> Self {
-        Self { title: folder.clone(), symbol: (!checked).then_some("folder"), action: Some(MenuAction::DraftFolder(folder)), checked, enabled: true, children: vec![], separator: false }
+        Self { title: folder.clone(), symbol: Some("folder"), action: Some(MenuAction::DraftFolder(folder)), checked, enabled: true, children: vec![], separator: false }
     }
 }
 
@@ -175,12 +267,15 @@ pub(crate) enum MenuAction {
     Rename,
     CopyId,
     Sort(InboxOrder),
+    /// A thread in a panel of its own, and back (thread_panels.rs).
     OpenInPanel,
+    MoveToMainPanel,
     /// The header's ... menu (header.rs).
     CopyTranscript,
     OpenOnWeb,
-    OpenProject,
     ThreadProject { thread: String, add: Option<String>, remove: Option<String> },
+    /// A project's menu, or one of a thread's that acts on projects (projects.rs).
+    Project(crate::projects::ProjectAction),
     /// Runs on: where the new thread starts, its default, and a folder on
     /// the chosen runner (new_thread.rs).
     Runner(Option<String>),
@@ -189,6 +284,11 @@ pub(crate) enum MenuAction {
     /// Move to ▸ a runner, and Cancel Move once it's going (move_sheet.rs).
     MoveTo(String, String),
     CancelMove,
+    /// A schedule's row menu, by its id (scheduled.rs).
+    EditSchedule(String),
+    RunSchedule(String),
+    PauseSchedule(String, bool),
+    DeleteSchedule(String),
 }
 
 /// The sidebar's own state; the app holds one of these (`Threadbear::sidebar`).
@@ -206,21 +306,55 @@ pub(crate) struct SidebarState {
     pub(crate) busy: HashSet<String>,
     /// The runner's first list has come; until then, loading rows.
     pub(crate) loaded: bool,
-    /// A runner restart is waiting (`runner.status`), so the Hibernate menu
-    /// offers "Until the runner restarts".
-    pub(crate) restart_pending: bool,
     /// Each project's icon by id, for the tiles (`projects.list`).
     pub(crate) project_icons: HashMap<String, ProjectIcon>,
     /// The projects themselves, for the new-thread page's chip.
     pub(crate) projects: Vec<ProjectBrief>,
-    scroll: ScrollHandle,
+    /// Headings folding or unfolding, by key (Swift's
+    /// `withAnimation(.snappy(duration: 0.2))`): the rows ease shut or open
+    /// while what's below slides with them.
+    pub(crate) folding: HashMap<&'static str, Fold>,
+    /// Each section's rows' height when last drawn, for a fold to run to or from.
+    heights: HashMap<&'static str, std::rc::Rc<std::cell::Cell<f32>>>,
+    fold_serial: u64,
+    /// A fold was under way when the list was last drawn, and the sections
+    /// folded then (row_motion.rs).
+    was_folding: bool,
+    was_folded: HashSet<&'static str>,
+    pub(crate) scroll: ScrollHandle,
+    /// The Threads panel's keyboard: a click in it takes it, and then the
+    /// arrows move through the threads and Esc goes back to the Inbox
+    /// (`ThreadList`'s focus).
+    pub(crate) focus: FocusHandle,
+    /// A row to bring into view once it's laid out: the arrows', Next Inbox
+    /// Thread's or a thread chip's (`revealSelectionRequests`).
+    pub(crate) reveal: crate::row_motion::Reveal,
+    /// Where the rows were and where they're going (row_motion.rs).
+    pub(crate) motion: std::rc::Rc<crate::row_motion::RowMotion>,
+    /// A row swiped or dragged with the mouse (row_swipe.rs).
+    pub(crate) gestures: crate::row_swipe::RowGestures,
+    /// Where the Inbox's sort button was last drawn, for its menu to hang
+    /// from the button, as a macOS pull-down does, wherever the click was.
+    sort_button: std::rc::Rc<std::cell::Cell<Bounds<Pixels>>>,
     _tick: Task<()>,
 }
+
+/// A heading's fold under way: opening or closing, and which toggle it is,
+/// so a click mid-fold starts a new one rather than finishing the old.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Fold {
+    pub(crate) opening: bool,
+    serial: u64,
+}
+
+/// How long a fold takes, as Swift's `.snappy(duration: 0.2)`.
+const FOLD_TIME: std::time::Duration = std::time::Duration::from_millis(200);
 
 impl SidebarState {
     pub(crate) fn new(cx: &mut Context<Threadbear>) -> Self {
         // Redraws once a second while something ticks (a working row's timer,
         // a sub-agent's duration), otherwise every 20 s so "5m" moves on.
+        bind_keys(cx);
         let tick = cx.spawn(async move |this, cx| {
             let mut n = 0u32;
             loop {
@@ -228,8 +362,13 @@ impl SidebarState {
                 n = n.wrapping_add(1);
                 let alive = this.update(cx, |t, cx| {
                     let ticking = t.threads.values().any(|t| t.busy() || t.subagents.iter().flatten().any(|s| s.get("status").and_then(Value::as_str) == Some("running")));
-                    if n % 20 == 0 || ticking {
+                    let twentieth = n.is_multiple_of(20);
+                    if twentieth || ticking {
                         cx.notify();
+                    }
+                    // A hibernating thread waking changes the badge's count.
+                    if twentieth {
+                        t.refresh_dock_badge();
                     }
                 });
                 if alive.is_err() {
@@ -245,10 +384,19 @@ impl SidebarState {
             menu: None,
             busy: HashSet::new(),
             loaded: false,
-            restart_pending: false,
             project_icons: HashMap::new(),
             projects: Vec::new(),
+            folding: HashMap::new(),
+            heights: HashMap::new(),
+            fold_serial: 0,
+            was_folding: false,
+            was_folded: HashSet::new(),
             scroll: ScrollHandle::new(),
+            focus: cx.focus_handle(),
+            reveal: Default::default(),
+            motion: Default::default(),
+            gestures: Default::default(),
+            sort_button: Default::default(),
             _tick: tick,
         }
     }
@@ -257,28 +405,28 @@ impl SidebarState {
 /// The colours a frame of the sidebar uses, picked once (`cx.theme()` borrows
 /// the whole app, which the row listeners also need).
 #[derive(Clone, Copy)]
-struct Palette {
-    fg: Hsla,
-    secondary: Hsla,
-    faint: Hsla,
-    accent: Hsla,
-    failed: Hsla,
-    hover: Hsla,
-    selected: Hsla,
-    tile: Hsla,
-    tile_empty: Hsla,
-    tile_ring: Hsla,
-    hairline: Hsla,
-    field_fill: Hsla,
-    separator: Hsla,
-    icon_hover: Hsla,
-    icon_pressed: Hsla,
-    guide: Hsla,
-    skeleton: Hsla,
-    side: Hsla,
+pub(crate) struct Palette {
+    pub(crate) fg: Hsla,
+    pub(crate) secondary: Hsla,
+    pub(crate) faint: Hsla,
+    pub(crate) accent: Hsla,
+    pub(crate) failed: Hsla,
+    pub(crate) hover: Hsla,
+    pub(crate) selected: Hsla,
+    pub(crate) tile: Hsla,
+    pub(crate) tile_empty: Hsla,
+    pub(crate) tile_ring: Hsla,
+    pub(crate) hairline: Hsla,
+    pub(crate) field_fill: Hsla,
+    pub(crate) separator: Hsla,
+    pub(crate) icon_hover: Hsla,
+    pub(crate) icon_pressed: Hsla,
+    pub(crate) guide: Hsla,
+    pub(crate) skeleton: Hsla,
+    pub(crate) side: Hsla,
 }
 
-fn palette(cx: &App) -> Palette {
+pub(crate) fn palette(cx: &App) -> Palette {
     let theme = cx.theme();
     Palette {
         fg: theme.sidebar_foreground,
@@ -303,7 +451,7 @@ fn palette(cx: &App) -> Palette {
 }
 
 /// `SectionMetrics` etc: the sidebar's measurements at 100%.
-mod metrics {
+pub(crate) mod metrics {
     /// From the sidebar's edges to a row's highlight.
     pub const OUTER_INSET: f32 = 8.;
     /// Inside a row's highlight, left of its text: wider than the right side
@@ -316,16 +464,16 @@ mod metrics {
     pub const TRUNK: f32 = LEADING + 15.;
     pub const INDENT: f32 = 18.;
 }
-use metrics::*;
+pub(crate) use metrics::*;
 
 /// Under where a button was clicked, where a dropdown opens (`MenuAnchor`'s
 /// `below`), so the first item isn't under the pointer as the mouse lifts.
-fn below(position: Point<Pixels>) -> Point<Pixels> {
+pub(crate) fn below(position: Point<Pixels>) -> Point<Pixels> {
     point(position.x, position.y + px(12.))
 }
 
 /// An SF Symbol's icon, at a point size and in a colour.
-fn icon(name: &str, size: f32, color: Hsla) -> Icon {
+pub(crate) fn icon(name: &str, size: f32, color: Hsla) -> Icon {
     icons::symbol(name).with_size(px(size)).text_color(color)
 }
 
@@ -335,13 +483,14 @@ macro_rules! tipped {
     ($el:expr, $id:expr, $tip:expr) => {{
         let tip_text: SharedString = $tip.into();
         let shown = tip_text.clone();
-        $el.id($id).test_support().aria_label(tip_text).tooltip(move |window, cx| Tooltip::new(shown.clone()).build(window, cx))
+        crate::tips::Tip::tip($el.id($id).test_support().aria_label(tip_text), shown)
     }};
 }
+pub(crate) use tipped;
 
 /// `RowIconButtonStyle`: a 22 pt borderless icon button with its own faint
 /// hover square.
-fn icon_button(id: impl Into<ElementId>, symbol: Icon, tip: impl Into<SharedString>, p: &Palette, on_press: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) -> impl IntoElement {
+pub(crate) fn icon_button(id: impl Into<ElementId>, symbol: Icon, tip: impl Into<SharedString>, p: &Palette, on_press: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) -> impl IntoElement {
     let (hover, pressed, secondary, fg) = (p.icon_hover, p.icon_pressed, p.secondary, p.fg);
     tipped!(div().flex_none().size(px(22.)).rounded(px(5.)).flex().items_center().justify_center().hover(move |s| s.bg(hover).text_color(fg)).text_color(secondary), id, tip)
         .active(move |s| s.bg(pressed))
@@ -362,8 +511,10 @@ impl Threadbear {
         let mut params = params;
         params["threadId"] = json!(id);
         let client = self.client.clone();
+        let remote = before.as_ref().is_some_and(|t| t.runner_id.is_some());
+        let going = crate::call_for_thread(client, remote, "threads.update", params);
         cx.spawn(async move |this, cx| {
-            let res = call(client, "threads.update", params).await;
+            let res = going.await;
             this.update(cx, |this, cx| {
                 if let Err(e) = res {
                     this.list_error = Some(e.message);
@@ -402,7 +553,7 @@ impl Threadbear {
             Some(next) => self.open(next, window, cx),
             None => {
                 self.selected = None;
-                self.pane = None;
+                self.leave_pane(cx);
                 cx.notify();
             }
         }
@@ -415,6 +566,9 @@ impl Threadbear {
 
     pub(crate) fn archive_row(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
         let next = self.neighbour_of(&id, cx, now_ms());
+        // The open thread's page drops into the Archived heading, before the
+        // thread moves and the next one opens (archive_flight.rs).
+        self.launch_flight(&id, crate::archive_flight::Destination::Archive, cx);
         let at = iso_time(now_ms());
         // "Archived" and Undo, at the top of the panel (`ArchivedToast`).
         if let Some(title) = self.threads.get(&id).map(|t| t.title.clone()) {
@@ -445,6 +599,8 @@ impl Threadbear {
     /// Snooze until a moment, moving off it if it's open (`AppModel.snooze`).
     pub(crate) fn snooze_row(&mut self, id: String, until_ms: i64, window: &mut Window, cx: &mut Context<Self>) {
         let next = self.neighbour_of(&id, cx, now_ms());
+        // The open thread's page sinks into the moon (archive_flight.rs).
+        self.launch_flight(&id, crate::archive_flight::Destination::Hibernate, cx);
         let until = iso_time(until_ms);
         let local = until.clone();
         self.update_thread(
@@ -467,8 +623,17 @@ impl Threadbear {
             let res = call(client, "runner.status", json!({})).await;
             this.update(cx, |this, cx| {
                 let status = res.ok();
-                this.sidebar.restart_pending = status.as_ref().is_some_and(|v| v.get("pendingRestart").is_some_and(|p| !p.is_null()));
+                // Which threads a restart waits for (restart.rs). A runner
+                // older than runner.status: its notices are all there is.
+                if let Some(status) = &status {
+                    this.client.restart_status(&status["pendingRestart"]);
+                }
                 this.website_url = status.as_ref().and_then(crate::header::website_url);
+                // Where Investigate's thread works (`ownCheckout`); kept from
+                // the last answer if this one has none.
+                if let Some(checkout) = status.as_ref().and_then(|s| s["update"]["checkout"].as_str()).filter(|c| !c.is_empty()) {
+                    this.runner_checkout = Some(checkout.to_owned());
+                }
                 cx.notify();
             })
             .ok();
@@ -476,9 +641,31 @@ impl Threadbear {
         .detach();
     }
 
+    /// `refresh_restart` in a moment, once for a burst of thread updates
+    /// (`refreshRunnerStatus`'s 300 ms).
+    pub(crate) fn refresh_restart_soon(&mut self, cx: &mut Context<Self>) {
+        self.restart_status_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(std::time::Duration::from_millis(300)).await;
+            this.update(cx, |this, cx| this.refresh_restart(cx)).ok();
+        }));
+    }
+
+    /// A restart under way that goes on past its patience means the runner
+    /// is down, not restarting: the banner says so then, with Try again
+    /// (`restartExpiry`).
+    pub(crate) fn watch_restart_expiry(&mut self, cx: &mut Context<Self>) {
+        let Some(since) = self.client.restart().restarting_since() else { return };
+        let left = threadbear_client::restart::PATIENCE.saturating_sub(since.elapsed()) + std::time::Duration::from_secs(1);
+        self.restart_expiry = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(left).await;
+            this.update(cx, |_, cx| cx.notify()).ok();
+        }));
+    }
+
     /// Hibernate until the runner next starts (`snoozedUntil: "restart"`).
-    fn snooze_until_restart(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn snooze_until_restart(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
         let next = self.neighbour_of(&id, cx, now_ms());
+        self.launch_flight(&id, crate::archive_flight::Destination::Hibernate, cx);
         self.update_thread(
             &id,
             |t| {
@@ -496,6 +683,7 @@ impl Threadbear {
     /// with the runner's reason if it can't.
     pub(crate) fn hibernate_when(&mut self, id: String, said: String, window: &mut Window, cx: &mut Context<Self>) {
         let next = self.neighbour_of(&id, cx, now_ms());
+        self.launch_flight(&id, crate::archive_flight::Destination::Hibernate, cx);
         let before = self.threads.get(&id).cloned();
         if let Some(t) = self.threads.get_mut(&id) {
             t.snoozed_until = Some("9999-12-31T00:00:00.000Z".into());
@@ -547,6 +735,11 @@ impl Threadbear {
                     let (id, busy_key) = (id.clone(), busy_key.clone());
                     entity
                         .update(cx, move |this, cx| {
+                            // The row spins, and the banner says what's going
+                            // on, as the click came from a menu (`whileBusy(note:)`).
+                            if !this.begin_note(&busy_key, "Deleting chat…", cx) {
+                                return;
+                            }
                             this.sidebar.busy.insert(busy_key.clone());
                             cx.notify();
                             let client = this.client.clone();
@@ -555,6 +748,7 @@ impl Threadbear {
                                 let res = call(client, "threads.delete", params).await;
                                 this.update(cx, |this, cx| {
                                     this.sidebar.busy.remove(&busy_key);
+                                    this.end_note(&busy_key, cx);
                                     match res {
                                         Ok(_) => {
                                             this.threads.remove(&id);
@@ -610,6 +804,11 @@ impl Threadbear {
             MenuAction::Runner(runner) => return self.choose_new_thread_runner(runner, true, cx),
             MenuAction::DefaultRunner(runner) => return self.set_default_runner(runner, cx),
             MenuAction::DraftFolder(folder) => return self.change_new_draft(&json!({ "cwd": folder }), cx),
+            MenuAction::EditSchedule(id) => return self.edit_schedule(&id, window, cx),
+            MenuAction::RunSchedule(id) => return self.run_schedule(id, cx),
+            MenuAction::PauseSchedule(id, paused) => return self.set_schedule_paused(id, paused, cx),
+            MenuAction::DeleteSchedule(id) => return self.delete_schedule(id, window, cx),
+            MenuAction::Project(action) => return self.run_project_action(action, window, cx),
             _ => {}
         }
         let Some(id) = thread else { return };
@@ -635,12 +834,17 @@ impl Threadbear {
             MenuAction::PickTime => self.open_pick_time(id, window, cx),
             MenuAction::WakeWhen => self.open_wake_when(id, window, cx),
             MenuAction::Delete => self.delete_row(id, window, cx),
-            MenuAction::Rename => self.open_rename(id, window, cx),
+            // The bar's own title, opened on the thread and selected, as the
+            // Swift menu's Rename does (`startRenaming`).
+            MenuAction::Rename => self.start_renaming(id, window, cx),
             MenuAction::CopyId => cx.write_to_clipboard(ClipboardItem::new_string(id)),
             // BearDock isn't in this app yet, so a thread opens in the main pane.
-            MenuAction::OpenInPanel => self.open(id, window, cx),
+            MenuAction::OpenInPanel => self.open_thread_in_panel(id, cx),
+            MenuAction::MoveToMainPanel => self.move_to_main_panel(id, window, cx),
             MenuAction::CopyTranscript => {
-                if let Some(pane) = &self.pane {
+                // The menu's thread: in the main panel, or a panel of its own.
+                let main = self.pane.clone().filter(|p| p.read(cx).summary.id == id);
+                if let Some(pane) = main.or_else(|| self.thread_panel_pane(&id)) {
                     pane.update(cx, |p, cx| p.copy_transcript(cx));
                 }
             }
@@ -649,22 +853,31 @@ impl Threadbear {
                     crate::open_gate::open_web(&link, cx);
                 }
             }
-            // A project's page isn't in this app yet: the Projects view is
-            // where it will open.
-            MenuAction::OpenProject => self.set_mode(crate::shell::SidebarMode::Projects, cx),
             MenuAction::ThreadProject { thread, add, remove } => self.set_thread_projects(thread, add, remove, cx),
             MenuAction::MoveTo(runner_id, runner_name) => self.open_move(crate::move_sheet::MoveRequest { thread_id: id, runner_id, runner_name }, window, cx),
             MenuAction::CancelMove => self.cancel_move(id, cx),
-            MenuAction::Sort(_) | MenuAction::Runner(_) | MenuAction::DefaultRunner(_) | MenuAction::DraftFolder(_) => {}
+            MenuAction::Sort(_)
+            | MenuAction::Runner(_)
+            | MenuAction::DefaultRunner(_)
+            | MenuAction::DraftFolder(_)
+            | MenuAction::EditSchedule(_)
+            | MenuAction::RunSchedule(_)
+            | MenuAction::PauseSchedule(..)
+            | MenuAction::DeleteSchedule(_)
+            | MenuAction::Project(_) => {}
         }
         cx.notify();
     }
 
     /// `ThreadMenu`: the row's right-click menu.
-    pub(crate) fn thread_menu_rows(&self, t: &ThreadSummary) -> Vec<MenuRow> {
+    pub(crate) fn thread_menu_rows(&self, t: &ThreadSummary, cx: &App) -> Vec<MenuRow> {
         let mut rows = vec![
-            // Greyed out until the window has panels (BearDock).
-            MenuRow::item("Open in New Panel", "rectangle.split.2x1", MenuAction::OpenInPanel).disabled(),
+            // So several threads can be open at once (thread_panels.rs).
+            if self.has_thread_panel(&t.id, cx) {
+                MenuRow::item("Move to Main Panel", "rectangle.portrait.and.arrow.forward", MenuAction::MoveToMainPanel)
+            } else {
+                MenuRow::item("Open in New Panel", "rectangle.split.2x1", MenuAction::OpenInPanel)
+            },
             MenuRow::separator(),
             MenuRow::item("Rename", "pencil", MenuAction::Rename),
             if t.is_starred() { MenuRow::item("Remove Star", "star.slash", MenuAction::Star(false)) } else { MenuRow::item("Star", "star", MenuAction::Star(true)) },
@@ -679,26 +892,29 @@ impl Threadbear {
         } else {
             rows.push(MenuRow::item("Archive", "archivebox", MenuAction::Archive));
         }
-        // Move to ▸ another runner (`ThreadMoveMenu`), behind the experiment;
+        // Projects ▸ (`ThreadProjectsMenu`): projects are this Mac's runner's,
+        // and another runner's threads aren't in them.
+        if self.projects_supported && !t.is_remote() {
+            rows.push(self.thread_projects_menu(t));
+        }
+        // Move to ▸ another runner (`ThreadMoveMenu`);
         // while a move's going, Cancel Move instead.
-        if self.can_move_threads() {
-            let moving = t.moving.as_ref().filter(|m| !matches!(m["state"].as_str(), Some("cancelled") | Some("failed")));
-            if moving.is_some() {
-                rows.push(MenuRow::item("Cancel Move", "xmark.circle", MenuAction::CancelMove));
-            } else {
-                let targets = self.move_targets(t.runner_id.as_deref());
-                if !targets.is_empty() {
-                    let children = targets
-                        .into_iter()
-                        .map(|r| {
-                            let title = if r.online { r.name.clone() } else { format!("{}, offline", r.name) };
-                            let mut row = MenuRow::item(title, crate::icons::runner_symbol(r.icon.as_deref()), MenuAction::MoveTo(r.id, r.name));
-                            row.enabled = r.online;
-                            row
-                        })
-                        .collect();
-                    rows.push(MenuRow::submenu("Move to", "arrow.right.square", children));
-                }
+        let moving = t.moving.as_ref().filter(|m| !matches!(m["state"].as_str(), Some("cancelled") | Some("failed")));
+        if moving.is_some() {
+            rows.push(MenuRow::item("Cancel Move", "xmark.circle", MenuAction::CancelMove));
+        } else {
+            let targets = self.move_targets(t.runner_id.as_deref());
+            if !targets.is_empty() {
+                let children = targets
+                    .into_iter()
+                    .map(|r| {
+                        let title = if r.online { r.name.clone() } else { format!("{}, offline", r.name) };
+                        let mut row = MenuRow::item(title, crate::icons::runner_symbol(r.icon.as_deref()), MenuAction::MoveTo(r.id, r.name));
+                        row.enabled = r.online;
+                        row
+                    })
+                    .collect();
+                rows.push(MenuRow::submenu("Move to", "arrow.right.square", children));
             }
         }
         // "Copy thread id" comes after a divider, as `.iconContextMenu` adds it.
@@ -713,7 +929,7 @@ impl Threadbear {
         let mut items: Vec<MenuRow> = rows::snooze_presets(&now).into_iter().map(|p| MenuRow::item(p.title, p.symbol(), MenuAction::Hibernate(p.id))).collect();
         // Only while a restart is waiting, so a thread holding it up can go
         // away now and come back after (`app.restartPending`).
-        if self.sidebar.restart_pending {
+        if self.client.restart().is_pending() {
             items.push(MenuRow::item(rows::SNOOZE_UNTIL_RESTART, "arrow.clockwise", MenuAction::HibernateUntilRestart));
         }
         items.push(MenuRow::separator());
@@ -749,7 +965,7 @@ impl Threadbear {
 
     pub(crate) fn open_row_menu(&mut self, id: String, position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(t) = self.threads.get(&id).cloned() else { return };
-        let menu_rows = self.thread_menu_rows(&t);
+        let menu_rows = self.thread_menu_rows(&t, cx);
         self.open_menu(Some(id), menu_rows, position, false, window, cx);
     }
 
@@ -781,6 +997,7 @@ impl Threadbear {
         });
         let handle = field_focus.read(cx).focus_handle(cx);
         window.focus(&handle, cx);
+        crate::web_panels::keyboard_to_app(window);
     }
 
     /// "Pick a time…": a calendar and a time, and a word if it's already
@@ -818,30 +1035,6 @@ impl Threadbear {
         });
     }
 
-    /// Rename, from the row's menu (the Swift app makes the header a field;
-    /// this app's header isn't editable yet).
-    fn open_rename(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(current) = self.threads.get(&id).map(|t| t.title.clone()) else { return };
-        let entity = cx.entity().downgrade();
-        let field = cx.new(|cx| InputState::new(window, cx).placeholder("Name this thread").default_value(current));
-        window.open_alert_dialog(cx, move |dialog, _, _| {
-            let (entity, field_read, id) = (entity.clone(), field.clone(), id.clone());
-            dialog.title("Rename thread").width(px(400.)).child(Input::new(&field)).button_props(DialogButtonProps::default().ok_text("Rename").show_cancel(true)).on_ok(move |_, _, cx| {
-                let title = field_read.read(cx).value().trim().to_string();
-                if !title.is_empty() {
-                    let id = id.clone();
-                    entity
-                        .update(cx, |this, cx| {
-                            let local = title.clone();
-                            this.update_thread(&id, move |t| t.title = local, json!({ "title": title }), cx)
-                        })
-                        .ok();
-                }
-                true
-            })
-        });
-    }
-
     /// The projects' icons, for the tiles: on connect and whenever a
     /// project changes (`projects.updated`).
     pub(crate) fn load_projects(&mut self, cx: &mut Context<Self>) {
@@ -851,8 +1044,12 @@ impl Threadbear {
                 this.update(cx, |this, cx| {
                     this.sidebar.project_icons = project_icons(&v["projects"]);
                     this.projects_supported = true;
+                    this.librarian.projects_made = crate::librarian::projects_made(&v["projects"]);
+                    // The librarian is part of projects, so it's asked after them.
+                    this.load_librarian(cx);
                     this.all_projects = crate::app::project_list(&v["projects"]);
                     this.sidebar.projects = project_briefs(&v["projects"]);
+                    this.receive_projects(&v["projects"]);
                     cx.notify();
                 })
                 .ok();
@@ -868,8 +1065,22 @@ impl Threadbear {
         let clock: Clock = rows::local_now();
         let query = self.search.read(cx).value().trim().to_lowercase();
         let searching = !query.is_empty();
-        let sections = self.shown_sections(cx, now);
-        let mut list = v_flex().px(px(OUTER_INSET)).pb(px(32.));
+        let mut sections = self.shown_sections(cx, now);
+        // A thread whose page is on its way to Archived or Hibernating isn't
+        // listed or counted there until it lands (archive_flight.rs).
+        for section in &mut sections {
+            section.rows.retain(|t| !self.flight.holds(section.key, &t.id));
+        }
+        // Where flights can aim, noted afresh as the list draws.
+        crate::archive_flight::sidebar_drawing();
+        // When a schedule next messages each thread, for those under
+        // Hibernating for it (`app.wakes`).
+        let wakes = threadbear_core::inbox::wakes(&self.scheduled.list);
+        // Rows glide to their new place as the list changes (row_motion.rs):
+        // what's drawn, top to bottom, and what a fold is moving already.
+        let motion = self.sidebar.motion.clone();
+        let (mut drawn, mut quiet) = (Vec::<String>::new(), HashSet::<String>::new());
+        let mut list = v_flex().px(px(OUTER_INSET)).pb(px(32.)).child(motion.list_marker());
         let loaded = self.sidebar.loaded;
         if !loaded {
             list = list.child(render_loading_rows(&p));
@@ -891,29 +1102,92 @@ impl Threadbear {
                 } else {
                     (total, 0)
                 };
-                list = list.child(self.render_heading(section.key, section.title, total, folded, searching, &p, cx));
-                if folded {
+                let heading_key = format!("heading:{}", section.key);
+                let heading = self.render_heading(section.key, section.title, total, folded, searching, &p, cx).into_any_element();
+                list = list.child(motion.row(&heading_key, heading));
+                drawn.push(heading_key);
+                // A fold under way draws the rows while they ease shut, and
+                // from the moment they start to open.
+                let fold = (!searching).then(|| self.sidebar.folding.get(section.key).copied()).flatten();
+                if folded && fold.is_none() {
                     continue;
                 }
+                let mut body = v_flex().relative().w_full();
+                let mut place = |key: String, element: AnyElement, body: Div| {
+                    // A section folding or unfolding moves its rows itself.
+                    if fold.is_some() {
+                        quiet.insert(key.clone());
+                    }
+                    let glided = motion.row(&key, element);
+                    drawn.push(key);
+                    body.child(glided)
+                };
                 for t in section.rows.iter().take(shown.0) {
-                    list = list.child(self.render_row(t, section.key, now, &clock, &p, cx));
+                    let wake = (section.key == "hibernating").then(|| wakes.get(&t.id)).flatten();
+                    let mut row = self.render_row(t, section.key, wake, now, &clock, &p, cx);
+                    // The open row closes up as its page flies, lifting the
+                    // heading below it, which the flight allows for.
+                    if self.selected.as_ref() == Some(&t.id) {
+                        row = div().relative().child(row).child(crate::archive_flight::mark(crate::archive_flight::Mark::OpenRow)).into_any_element();
+                    }
+                    body = place(t.id.clone(), row, body);
                     if !matches!(section.key, "hibernating" | "archived") {
-                        for sub in self.render_subagents(t, section.key, now, &p, cx) {
-                            list = list.child(sub);
+                        for (i, sub) in self.render_subagents(t, section.key, now, &p, cx).into_iter().enumerate() {
+                            body = place(format!("sub:{}:{i}", t.id), sub, body);
                         }
                     }
                 }
                 if section.key == "archived" && shown.1 > 0 {
-                    list = list.child(self.render_show_more(shown.1, &p, cx));
+                    let more = self.render_show_more(shown.1, &p, cx).into_any_element();
+                    body = place("more:archived".into(), more, body);
                 }
                 // Under the empty Inbox heading.
                 if section.key == "inbox" && section.rows.is_empty() && !searching {
-                    list = list.child(div().pl(px(LEADING)).pt(px(14.)).text_size(px(style::size::SIDEBAR_PREVIEW)).text_color(p.secondary).child("Nothing in the inbox."));
+                    let empty = div().pl(px(LEADING)).pt(px(14.)).text_size(px(style::size::SIDEBAR_PREVIEW)).text_color(p.secondary).child("Nothing in the inbox.").into_any_element();
+                    body = place("note:inbox-empty".into(), empty, body);
                 }
+                // Its height as drawn, for a fold to run to or from.
+                let height = self.sidebar.heights.entry(section.key).or_default().clone();
+                let measured = height.clone();
+                body = body.child(canvas(move |bounds, _, _| measured.set(f32::from(bounds.size.height)), |_, _, _, _| {}).absolute().top_0().left_0().size_full());
+                list = list.child(match fold {
+                    None => body.into_any_element(),
+                    Some(fold) => div()
+                        .w_full()
+                        .overflow_hidden()
+                        .child(body)
+                        .with_animation(("section-fold", fold.serial as usize), Animation::new(FOLD_TIME).with_easing(ease_out_quint()), move |el, t| {
+                            let open = if fold.opening { t } else { 1. - t };
+                            el.h(gpui_kit::px(height.get() * open)).opacity(open)
+                        })
+                        .into_any_element(),
+                });
             }
         }
+        // A fold moves the rows below it as its height eases, so nothing
+        // glides while one's under way, nor as it ends and its rows go: the
+        // rest are where they'll stay by then. One with no easing (a script's,
+        // or the folds coming from elsewhere) puts them there at once, as the
+        // Swift app's does. Left to glide, the rows under a folded Inbox slid
+        // up from where they'd last been drawn for half a second, and a
+        // scripted click on one of them missed it.
+        let folding = !self.sidebar.folding.is_empty();
+        let was_folding = std::mem::replace(&mut self.sidebar.was_folding, folding);
+        let refolded = self.sidebar.was_folded != self.folded;
+        if refolded {
+            self.sidebar.was_folded = self.folded.clone();
+        }
+        if folding || was_folding || refolded {
+            quiet.extend(drawn.iter().cloned());
+        }
+        if loaded {
+            motion.rows_drawn(drawn, &quiet, cx.reduce_motion());
+        }
+        // Last in the list, so it's laid out after every row (row_motion.rs).
+        if self.sidebar.reveal.borrow().is_some() {
+            list = list.child(motion.reveal_marker(self.sidebar.reveal.clone(), self.sidebar.scroll.clone(), self.sidebar_view.as_ref().map(|v| v.entity_id())));
+        }
         let new_thread_active = self.selected.is_none();
-        let conn_note = self.connection_note();
         let list_error = self.list_error.clone();
         let red = p.failed;
         v_flex()
@@ -922,7 +1196,10 @@ impl Threadbear {
             .bg(p.side)
             // One line: search and New thread (Mike asked 30 Oct).
             .child(h_flex().gap(px(6.)).px(px(OUTER_INSET)).pt(px(4.)).items_stretch().child(self.render_search(&p, cx)).child(self.render_new_thread(new_thread_active, &p, cx)))
-            .when_some(conn_note, |s, note| s.child(div().mx(px(OUTER_INSET)).mt_2().p_2().rounded(px(CORNER)).bg(p.field_fill).text_sm().text_color(p.secondary).child(note)))
+            // Nothing about the connection here: the banner over the thread
+            // says it, as the Swift app's does, and only once it's worth
+            // saying (`connection_banner`). The raw error showed here in the
+            // middle of a restart (Mike, 12 Nov).
             .when_some(list_error, |s, e| s.child(div().mx(px(OUTER_INSET)).mt_2().text_sm().text_color(red).child(e)))
             .child(
                 // The scrolling list, with no scrollbar (the times stay put),
@@ -931,6 +1208,8 @@ impl Threadbear {
                     .relative()
                     .flex_1()
                     .min_h_0()
+                    // A flight with its heading out of sight falls off the list's bottom.
+                    .child(crate::archive_flight::mark(crate::archive_flight::Mark::List))
                     .child(div().id("sidebar-list").size_full().overflow_y_scroll().track_scroll(&self.sidebar.scroll).child(list))
                     .child(div().absolute().left_0().right_0().bottom_0().h(px(34.)).bg(linear_gradient(180., linear_color_stop(p.side.opacity(0.), 0.), linear_color_stop(p.side, 0.88)))),
             )
@@ -938,7 +1217,14 @@ impl Threadbear {
 
     /// The open row or heading menu, drawn over the whole window rather than
     /// inside the sidebar panel (the dock clips what a panel draws).
+    /// Where the open menu is, so a web panel's page (a native view, which
+    /// it can't draw over) gets out of its way (web_panels.rs).
+    pub(crate) fn open_menu_at(&self) -> Option<Point<Pixels>> {
+        self.sidebar.menu.as_ref().map(|m| m.position)
+    }
+
     pub(crate) fn render_open_menu(&self) -> Option<AnyElement> {
+        crate::tips::menu_up(1, self.sidebar.menu.is_some());
         self.sidebar.menu.as_ref().map(|m| deferred(anchored().position(m.position).snap_to_window_with_margin(px(8.)).child(div().occlude().child(m.view.clone()))).with_priority(1).into_any_element())
     }
 
@@ -948,17 +1234,19 @@ impl Threadbear {
         // icon and title, so the Input's own padding is dropped.
         h_flex()
             .id("search-field")
-            .tooltip(|window, cx| Tooltip::new("Search threads").build(window, cx))
+            .tip("Search threads")
             .flex_1()
             .min_w_0()
+            // 29 tall as the Swift field is (6 over and under a 14 pt line):
+            // the kit's small input, a little shorter, sits in the middle.
+            .h(px(29.))
             .pl(px(LEADING - 2.))
             .pr(px(9.))
-            .py(px(3.))
             .gap(px(8.))
             .items_center()
             .rounded(px(CORNER))
             .bg(p.field_fill)
-            .border_1()
+            .border(px(0.5))
             .border_color(p.separator)
             .child(div().flex_none().w(px(16.)).flex().justify_center().child(icon("magnifyingglass", 12.5, p.faint)))
             .child(div().flex_1().min_w_0().child(Input::new(&self.search).appearance(false).small().cleanable(true).pl(px(0.))))
@@ -972,23 +1260,27 @@ impl Threadbear {
         tipped!(div().w(px(32.)).flex_none().flex().items_center().justify_center().rounded(px(CORNER)).when(active, |s| s.bg(selected)).when(!active, |s| s.hover(move |h| h.bg(hover).text_color(fg))), "new-thread", "Start a new thread")
             .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| this.new_thread(cx)))
             .child(icon("square.and.pencil", style::size::SIDEBAR_BUTTON, color))
+            // Its key over the end of the search while ⌘ is held, as the
+            // sidebar's edge is just right of it (key_hints.rs).
+            .relative()
+            .children(crate::key_hints::hint(self.shortcut_display(threadbear_core::shortcuts::ShortcutCommand::NewThread), crate::key_hints::Placement::Before))
     }
 
     /// `app.newThread()`: leaves the open thread for a fresh start, the
     /// cursor in the new box.
     pub(crate) fn new_thread(&mut self, cx: &mut Context<Self>) {
-        if let Some(old) = self.pane.take() {
-            old.read(cx).unsubscribe();
-        }
+        self.leave_pane(cx);
         self.selected = None;
+        self.shows_home = false;
+        self.projects.open = None;
         self.note_navigation();
         self.new_thread.picks.project = None;
         self.new_thread.focus_pending = true;
         cx.notify();
     }
 
-    /// `SectionHeading`: a quiet divider with room above each group, folding
-    /// its rows away when clicked. Folded, it says how many.
+    /// An inbox heading: its symbol, folding the section, and the Inbox's
+    /// sort button at its end.
     fn render_heading(&mut self, key: &'static str, title: &'static str, count: usize, folded: bool, searching: bool, p: &Palette, cx: &mut Context<Self>) -> impl IntoElement {
         let symbol = match key {
             "starred" => "star",
@@ -997,10 +1289,62 @@ impl Threadbear {
             "hibernating" => "moon.zzz",
             _ => "archivebox",
         };
+        let trailing = (key == "inbox").then(|| self.render_sort_button(p, cx).into_any_element());
+        self.section_heading(
+            key,
+            title,
+            symbol,
+            count,
+            folded,
+            !searching,
+            trailing,
+            p,
+            move |this, cx| {
+                let opening = this.folded.remove(key);
+                if !opening {
+                    this.folded.insert(key);
+                }
+                this.start_fold(key, opening, cx);
+                this.sidebar_settings_changed(cx);
+            },
+            cx,
+        )
+    }
+
+    /// Starts a heading's fold, and ends it once it's run, so a closed
+    /// section stops drawing its rows (a click mid-fold starts another).
+    fn start_fold(&mut self, key: &'static str, opening: bool, cx: &mut Context<Self>) {
+        self.sidebar.fold_serial += 1;
+        let serial = self.sidebar.fold_serial;
+        self.sidebar.folding.insert(key, Fold { opening, serial });
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(FOLD_TIME + std::time::Duration::from_millis(30)).await;
+            this.update(cx, |this, cx| {
+                if this.sidebar.folding.get(key).is_some_and(|f| f.serial == serial) {
+                    this.sidebar.folding.remove(key);
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// `SectionHeading`: a quiet divider with room above each group, folding
+    /// its rows away when clicked (unless `foldable` is false, as while
+    /// searching). Folded, it says how many. The Scheduled list's headings
+    /// are these too (scheduled.rs).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn section_heading(&mut self, key: &str, title: &str, symbol: &'static str, count: usize, folded: bool, foldable: bool, trailing: Option<AnyElement>, p: &Palette, on_toggle: impl Fn(&mut Threadbear, &mut Context<Threadbear>) + 'static, cx: &mut Context<Self>) -> AnyElement {
         let group = SharedString::from(format!("heading-{key}"));
         let (fg, secondary, faint, hairline) = (p.fg, p.secondary, p.faint, p.hairline);
         let chevron_group = group.clone();
         let hover_group = group.clone();
+        let title = SharedString::from(title.to_owned());
+        // Folded, its count rolls to a new number as threads come and go
+        // (row_motion.rs), as the Swift heading's does.
+        let count_line = style::natural_line(style::size::SIDEBAR_META);
+        let count_el = (folded && count > 0).then(|| crate::row_motion::rolling(&format!("heading-{key}"), count, count_line, cx.reduce_motion(), |n| div().child(n.to_string()).into_any_element()));
         let label = h_flex()
             .group(group.clone())
             .flex_1()
@@ -1010,17 +1354,26 @@ impl Threadbear {
             .pt(px(18.))
             .pb(px(6.))
             .items_center()
-            .child(icon(symbol, 11., secondary).flex_none())
-            .child(div().flex_none().text_size(px(style::size::SIDEBAR_HEADING)).line_height(px(16.)).font_semibold().text_color(secondary).group_hover(hover_group, move |s| s.text_color(fg)).child(title))
+            .child(match key {
+                // Where an archived or hibernated thread's page lands, bouncing
+                // as it does (archive_flight.rs).
+                "archived" | "hibernating" => {
+                    let kind = if key == "archived" { crate::archive_flight::Mark::ArchiveBox } else { crate::archive_flight::Mark::HibernateBox };
+                    div().relative().flex_none().child(self.flight.landing_icon(key, icon(symbol, 11., secondary), secondary, fg, cx.reduce_motion())).child(crate::archive_flight::mark(kind)).into_any_element()
+                }
+                _ => icon(symbol, 11., secondary).flex_none().into_any_element(),
+            })
+            // Brighter under the pointer, as `SectionHeading`'s title is.
+            .child(style::group_hover_text(div().id(SharedString::from(format!("heading-title-{key}"))).flex_none().text_size(px(style::size::SIDEBAR_HEADING)).line_height(px(16.)).font_semibold().text_color(secondary), hover_group, fg).child(title.clone()))
             .child(div().flex_1().min_w_0().h(px(1.)).mx(px(4.)).bg(hairline))
-            .when(folded && count > 0, |s| s.child(div().flex_none().text_size(px(style::size::SIDEBAR_META)).text_color(faint).child(count.to_string())))
-            .when(!searching, |s| {
+            .when_some(count_el, |s, n| s.child(div().flex_none().text_size(px(style::size::SIDEBAR_META)).text_color(faint).child(n)))
+            .when(foldable, |s| {
                 s.child(div().flex_none().when(!folded, |d| d.invisible()).group_hover(chevron_group, |d| d.visible()).child(icon(if folded { "chevron.right" } else { "chevron.down" }, 9., faint)))
             });
         h_flex()
             .pr(px(TRAILING))
             .items_center()
-            .child(if searching {
+            .child(if !foldable {
                 label.into_any_element()
             } else {
                 // The padding is inside the fold button, so the whole band
@@ -1028,29 +1381,37 @@ impl Threadbear {
                 let tip = if folded { format!("Show {title}") } else { format!("Hide {title}") };
                 tipped!(div().flex_1().min_w_0(), SharedString::from(format!("fold-{key}")), tip)
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                        if !this.folded.remove(key) {
-                            this.folded.insert(key);
-                        }
-                        this.sidebar_settings_changed(cx);
+                        on_toggle(this, cx);
                         cx.notify();
                     }))
                     .child(label)
                     .into_any_element()
             })
-            .when(key == "inbox", |s| s.child(self.render_sort_button(p, cx)))
+            .children(trailing)
+            .into_any_element()
     }
 
     /// `InboxOrderMenu`: the sort button at the end of the Inbox heading.
     fn render_sort_button(&mut self, p: &Palette, cx: &mut Context<Self>) -> impl IntoElement {
         let order = self.sidebar.order;
         let color = if order == InboxOrder::NeedsYou { p.faint } else { p.secondary };
-        let (fg, hover) = (p.fg, p.icon_hover);
-        tipped!(div().flex_none().mt(px(12.)).size(px(16.)).rounded(px(4.)).flex().items_center().justify_center().text_color(color).hover(move |s| s.bg(hover).text_color(fg)), "sort-inbox", format!("Sort: {}", order.title()))
-            .on_click(cx.listener(|this, ev: &ClickEvent, window, cx| {
+        let fg = p.fg;
+        let placed = self.sidebar.sort_button.clone();
+        // A hover brightens the arrows and draws no square behind them, as
+        // `InboxOrderMenu`'s `hovering` does.
+        tipped!(div().flex_none().mt(px(12.)).size(px(16.)).flex().items_center().justify_center().text_color(color).hover(move |s| s.text_color(fg)), "sort-inbox", format!("Sort: {}", order.title()))
+            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                 let menu_rows = this.sort_menu_rows();
-                this.open_menu(None, menu_rows, below(ev.position()), false, window, cx);
+                // As the Swift app's pull-down (a SwiftUI Menu) hangs: its
+                // edge a point left of the button's and 9 below it,
+                // measured off macOS 26's screen (features/tools/menu-shot.ts).
+                let button = this.sidebar.sort_button.get();
+                let at = point(button.left() - px(1.), button.bottom() + px(9.));
+                this.open_menu(None, menu_rows, at, false, window, cx);
             }))
-            .child(icon("arrow.up.arrow.down", 10., color))
+            .child(canvas(move |bounds, _, _| placed.set(bounds), |_, _, _, _| {}).absolute().top_0().left_0().size_full())
+            // In the button's colour, so the hover above brightens it.
+            .child(icons::symbol("arrow.up.arrow.down").with_size(px(10.)))
     }
 
     fn render_show_more(&mut self, more: usize, p: &Palette, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1071,18 +1432,22 @@ impl Threadbear {
     }
 
     /// `ThreadRowView`: tile, title, place line, status or hover buttons.
-    fn render_row(&mut self, t: &ThreadSummary, section: &'static str, now: i64, clock: &Clock, p: &Palette, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn render_row(&mut self, t: &ThreadSummary, section: &'static str, wake: Option<&threadbear_core::inbox::Wake>, now: i64, clock: &Clock, p: &Palette, cx: &mut Context<Self>) -> AnyElement {
         let mode = RowMode::of(section, t, now);
         // The Hibernating and Archived rows read plainly; only live ones say
         // what they're doing (`ThreadRowView.body`).
         let look = if mode == RowMode::Inbox { RowLook::of(t, Some(section)) } else { RowLook::PLAIN };
-        let trailing = rows::trailing(t, &look, mode, clock);
+        let trailing = rows::trailing(t, &look, mode, clock, wake);
         let id = t.id.clone();
-        let selected = self.selected.as_deref() == Some(id.as_str());
+        // Not while a page is in the thread's place: it isn't what's showing.
+        let selected = self.selected.as_deref() == Some(id.as_str()) && self.home_page().is_none() && self.projects.open.is_none();
         // A script's hover wins over the real pointer, which on a shared
         // desktop can be resting on another row (`ThreadRowView.pointerOver`).
         let hovered_row = self.sidebar.hover_override.as_deref().or(self.sidebar.hovered.as_deref());
-        let show_buttons = hovered_row == Some(id.as_str()) || self.sidebar.menu.as_ref().is_some_and(|m| m.thread.as_deref() == Some(id.as_str()));
+        // Not while the row's being swiped: they'd ride along with it.
+        let show_buttons = (hovered_row == Some(id.as_str()) || self.sidebar.menu.as_ref().is_some_and(|m| m.thread.as_deref() == Some(id.as_str()))) && !self.sidebar.gestures.is_moving(&id);
+        // What a swipe left does to it, if anything (row_swipe.rs).
+        let swipe_action = crate::row_swipe::SwipeAction::of(mode);
         let title = if t.title.is_empty() { "Untitled".to_string() } else { t.title.clone() };
         let tip = format!("{title}\n{}", abbreviate_home(&t.cwd));
         let (bg_hover, bg_sel, fg, secondary) = (p.hover, p.selected, p.fg, p.secondary);
@@ -1107,6 +1472,10 @@ impl Threadbear {
         let runner_label = self.runner_label(t);
         let place_tip_text = if byline.is_some() { byline.as_ref().unwrap().tip.clone() } else { rows::place_tip(t) };
         let place_id: ElementId = ElementId::Name(format!("place-{id}").into());
+        // The hover buttons' room: 24 a button, as the Swift row keeps
+        // beside its title, which takes in the 2 between them and leaves a
+        // little gap before the first.
+        let actions_room = mode.actions().len() as f32 * 24.;
 
         let title_el = div()
             .flex_1()
@@ -1128,7 +1497,7 @@ impl Threadbear {
                     .items_baseline()
                     .gap(px(4.))
                     .text_color(secondary)
-                    .tooltip(move |window, cx| Tooltip::new(place_tip_text.clone()).build(window, cx))
+                    .tip(place_tip_text.clone())
                     .when_some(byline.as_ref(), |s, b| s.child(icons::try_symbol(&b.symbol).unwrap_or_else(|| icons::symbol("wrench.and.screwdriver")).with_size(px(style::size::SIDEBAR_META)).text_color(secondary).flex_none()))
                     .child(div().min_w_0().truncate().text_size(px(style::size::SIDEBAR_META + 1.)).line_height(px(15.)).child(place)),
             )
@@ -1147,11 +1516,15 @@ impl Threadbear {
                         .text_size(px(style::size::SIDEBAR_META + 1.))
                         .line_height(px(15.))
                         .text_color(secondary)
-                        .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
+                        .tip(tip.clone())
                         .child(format!("\u{2022} {runner}")),
                 )
             })
-            .child(div().flex_1().min_w(px(6.)))
+            // With the hover buttons up, room for them here as on the title's
+            // line: they're centred on the row, over both lines, so a long
+            // project line ran on under them (Mike, 12 Nov). It's cut short
+            // before them instead.
+            .child(div().flex_1().min_w(px(if show_buttons { actions_room } else { 6. })))
             .when(!show_buttons, |s| s.child(render_trailing(&trailing, id.clone(), p)));
 
         let actions = mode.actions();
@@ -1161,11 +1534,11 @@ impl Threadbear {
             None
         };
 
-        h_flex()
+        let row = h_flex()
             .id(ElementId::Name(format!("row-{id}").into()))
             .test_support()
             .aria_label(tip.clone())
-            .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
+            .tip(tip.clone())
             .when(offline, |s| s.opacity(0.5))
             .relative()
             .items_center()
@@ -1183,16 +1556,32 @@ impl Threadbear {
                 } else if this.sidebar.hovered.as_deref() == Some(hover_id.as_str()) {
                     this.sidebar.hovered = None;
                 }
+                this.sidebar.gestures.row_hovered(&hover_id, *hovered, swipe_action);
                 cx.notify();
             }))
             // Selects on mouse down, as Mail does (`ThreadRowView`); a click
-            // waits for the mouse to come back up.
-            .on_mouse_down(MouseButton::Left, cx.listener(move |this, _: &MouseDownEvent, window, cx| this.open(select_id.clone(), window, cx)))
-            .on_mouse_down(MouseButton::Right, cx.listener(move |this, ev: &MouseDownEvent, window, cx| this.open_row_menu(menu_id.clone(), ev.position, window, cx)))
+            // waits for the mouse to come back up. The press is watched to see
+            // whether it's a drag left (the swipe) or the thread dragged out.
+            .on_mouse_down(MouseButton::Left, cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
+                let before = this.place();
+                this.row_pressed(&select_id, swipe_action, ev.position, before);
+                this.open(select_id.clone(), window, cx);
+            }))
+            // Dragged any way but left, it's the thread, to drop into a
+            // thread's message as its chip (`drag.threadout`).
+            .on_drag(self.dragged_thread(&id), |drag, grabbed, _, cx| crate::row_swipe::RowDragChip::new(drag, grabbed, cx))
+            .on_mouse_down(MouseButton::Right, cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
+                // The row's menu alone: the press went on to the sidebar
+                // panel's own menu (Hide Title, Open in New Window), which
+                // came up over it from a real right-click (12 Nov).
+                cx.stop_propagation();
+                this.open_row_menu(menu_id.clone(), ev.position, window, cx)
+            }))
             .child(tile)
-            .child(v_flex().flex_1().min_w_0().gap(px(3.)).child(h_flex().child(title_el).when(show_buttons, |s| s.child(div().flex_none().w(px(actions.len() as f32 * 24.)).h(px(1.))))).child(second_line))
+            .child(v_flex().flex_1().min_w_0().gap(px(3.)).child(h_flex().child(title_el).when(show_buttons, |s| s.child(div().flex_none().w(px(actions_room)).h(px(1.))))).child(second_line))
             .when_some(buttons, |s, b| s.child(h_flex().absolute().right(px(TRAILING - 5.)).top_0().bottom_0().items_center().gap(px(2.)).child(b)))
-            .into_any_element()
+            .into_any_element();
+        self.swipe_slot(&id, swipe_action, row, cx)
     }
 
     /// `RowActions`: the small buttons a row shows on hover in place of its
@@ -1250,6 +1639,8 @@ impl Threadbear {
 
     /// `SubagentList`: indented rows under the thread with a drawn trunk.
     fn render_subagents(&mut self, t: &ThreadSummary, section: &'static str, now: i64, p: &Palette, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        // The one whose transcript is open is marked, as a selected row is.
+        let selected_sub = self.subagent.as_ref().filter(|(thread, _)| *thread == t.id).map(|(_, id)| id.clone());
         let all = rows::subagents(t);
         if all.is_empty() {
             return vec![];
@@ -1262,7 +1653,7 @@ impl Threadbear {
         shown
             .iter()
             .enumerate()
-            .map(|(i, row)| render_subagent_row(t, row, i == 0, i == last, now, p, cx).into_any_element())
+            .map(|(i, row)| render_subagent_row(t, row, i == 0, i == last, selected_sub.as_deref() == Some(row.subagent.id.as_str()), now, p, cx).into_any_element())
             .collect()
     }
 
@@ -1272,12 +1663,13 @@ impl Threadbear {
         let now = now_ms();
         let clock: Clock = rows::local_now();
         let selected_sub = self.selected.clone();
+        let wakes = threadbear_core::inbox::wakes(&self.scheduled.list);
         let row = |t: &ThreadSummary, section: Option<&str>| -> Value {
             let key = section.unwrap_or("inbox");
             let mode = RowMode::of(key, t, now);
             let look = RowLook::of(t, section);
             let plain = if mode == RowMode::Inbox { look } else { RowLook::PLAIN };
-            let tail = rows::trailing(t, &plain, mode, &clock);
+            let tail = rows::trailing(t, &plain, mode, &clock, (key == "hibernating").then(|| wakes.get(&t.id)).flatten());
             let hovered = self.sidebar.hover_override.as_deref() == Some(t.id.as_str());
             let tile = match rows::tile(t).0 {
                 Tile::Letter(l) => l,
@@ -1308,6 +1700,9 @@ impl Threadbear {
                 "tile": tile,
                 "hoverButtons": hovered.then(|| mode.actions().iter().map(|a| a.tip(t)).collect::<Vec<_>>()),
                 "runner": t.runner_id.as_deref().map(|id| self.runner_place_of(id)),
+                // Laid out within the part of the list that's showing (null
+                // for a row that isn't drawn, as in a folded section).
+                "inView": self.sidebar.motion.in_view(&t.id, &self.sidebar.scroll),
             })
         };
         let shown = self.shown_sections(cx, now);
@@ -1406,7 +1801,7 @@ fn render_tile(t: &ThreadSummary, look: &RowLook, behind: Hsla, project_icon: Op
         .flex_none()
         .size(px(TILE + 4.))
         .id(ElementId::Name(format!("tile-{}", t.id).into()))
-        .tooltip(move |window, cx| Tooltip::new(help.clone()).build(window, cx))
+        .tip(help.clone())
         .when(stacked, |s| {
             // A second project's edge showing behind, up and to the right.
             s.child(div().absolute().left(px(4.)).top_0().size(size).rounded(px(7.)).bg(p.tile)).child(div().absolute().left_0().bottom_0().size(px(TILE + 2.)).rounded(px(8.)).bg(behind))
@@ -1438,7 +1833,7 @@ fn render_trailing(trailing: &rows::Trailing, id: String, p: &Palette) -> AnyEle
             .text_size(meta).line_height(px(15.))
             .font_medium()
             .text_color(p.accent)
-            .child(div().flex_none().size(px(12.)).child(Spinner::new().icon(gpui_kit::assets::IconName::LoaderCircle).color(p.accent).with_size(px(12.))))
+            .child(crate::spinner::TurningArc::new(12., p.accent))
             .child(text)
             .into_any_element(),
         TrailingKind::Background => h_flex()
@@ -1448,15 +1843,21 @@ fn render_trailing(trailing: &rows::Trailing, id: String, p: &Palette) -> AnyEle
             .text_size(meta).line_height(px(15.))
             .font_medium()
             .text_color(p.secondary)
-            .child(div().flex_none().size(px(12.)).child(Spinner::new().icon(gpui_kit::assets::IconName::LoaderCircle).color(p.secondary).with_size(px(12.))))
+            .child(crate::spinner::TurningArc::new(12., p.secondary))
             .child(text)
             .into_any_element(),
         TrailingKind::Failed => gives_way(div()).text_size(meta).line_height(px(15.)).font_medium().text_color(p.failed).child(text).into_any_element(),
         TrailingKind::Stopped => gives_way(div()).text_size(meta).line_height(px(15.)).text_color(p.secondary).child(text).into_any_element(),
         TrailingKind::Woke => gives_way(div()).text_size(meta).line_height(px(15.)).font_medium().text_color(p.accent).child(text).into_any_element(),
     };
+    // A working row's clock and a background one's jobs are short, and keep
+    // their width whatever the folder beside them (SwiftUI gives the shorter
+    // text its size first): giving way, the clock lost its "s" ("18" for
+    // "18s") on a row whose folder filled the line.
+    let keeps_width = matches!(trailing.kind, TrailingKind::Working | TrailingKind::Background);
     match tip {
-        Some(tip) => gives_way(div()).id(ElementId::Name(format!("trailing-{id}").into())).tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx)).child(el).into_any_element(),
+        Some(tip) if keeps_width => div().flex_none().id(ElementId::Name(format!("trailing-{id}").into())).tip(tip.clone()).child(el).into_any_element(),
+        Some(tip) => gives_way(div()).id(ElementId::Name(format!("trailing-{id}").into())).tip(tip.clone()).child(el).into_any_element(),
         None => el,
     }
 }
@@ -1482,22 +1883,23 @@ fn render_loading_rows(p: &Palette) -> impl IntoElement {
 }
 
 /// `SubagentRowView`: one indented row, hanging off the thread's tile.
-fn render_subagent_row(t: &ThreadSummary, row: &rows::SubagentRow, first: bool, last: bool, now: i64, p: &Palette, cx: &mut Context<Threadbear>) -> impl IntoElement {
+fn render_subagent_row(t: &ThreadSummary, row: &rows::SubagentRow, first: bool, last: bool, selected: bool, now: i64, p: &Palette, cx: &mut Context<Threadbear>) -> impl IntoElement {
     let sub = &row.subagent;
     let elbow_end = TRUNK + 6. + INDENT * row.depth as f32;
     let leading = TRUNK + 9. + INDENT * row.depth as f32;
     let (guide, secondary, faint, fg, failed) = (p.guide, p.secondary, p.faint, p.fg, p.failed);
     let running = sub.running();
-    // Selected sub-agents can't be shown yet (no transcript for one in this
-    // app); a click opens its thread instead.
     let glyph: AnyElement = match sub.status.as_str() {
-        "running" => Spinner::new().icon(gpui_kit::assets::IconName::LoaderCircle).color(secondary).with_size(px(11.)).into_any_element(),
+        "running" => crate::spinner::TurningArc::new(11., secondary).into_any_element(),
         "completed" => icon("checkmark", 9., faint).into_any_element(),
         "failed" => icon("xmark", 9., failed).into_any_element(),
         _ => icon("minus", 9., faint).into_any_element(),
     };
     let tip = {
         let mut parts = vec![rows::subagent_status_text(sub).to_string()];
+        if let Some(model) = rows::subagent_model_text(sub) {
+            parts.insert(0, model);
+        }
         if let Some(kind) = sub.agent_type.as_deref().filter(|k| !k.is_empty()) {
             parts.insert(0, kind.to_string());
         }
@@ -1506,21 +1908,22 @@ fn render_subagent_row(t: &ThreadSummary, row: &rows::SubagentRow, first: bool, 
         }
         parts.join(" · ")
     };
-    let thread_id = t.id.clone();
-    let shown_tip: SharedString = tip.into();
+    let (thread_id, sub_id) = (t.id.clone(), sub.id.clone());
+    let shown_tip: SharedString = format!("{tip}. Click to read its transcript.").into();
     let tooltip_text = shown_tip.clone();
     let hover = p.hover;
     div()
         .id(ElementId::Name(format!("sub-{}-{}", t.id, sub.id).into()))
-        .tooltip(move |window, cx| Tooltip::new(tooltip_text.clone()).build(window, cx))
+        .tip(tooltip_text.clone())
         .relative()
         .pt(px(5.))
         .pb(px(6.))
         .pl(px(leading))
         .pr(px(TRAILING))
         .rounded(px(CORNER))
+        .when(selected, |s| s.bg(p.selected))
         .hover(move |s| s.bg(hover))
-        .on_mouse_down(MouseButton::Left, cx.listener(move |this, _: &MouseDownEvent, window, cx| this.open(thread_id.clone(), window, cx)))
+        .on_mouse_down(MouseButton::Left, cx.listener(move |this, _: &MouseDownEvent, window, cx| this.open_subagent(thread_id.clone(), sub_id.clone(), window, cx)))
         // A faint line down from the thread's tile with an elbow into the
         // glyph, like a file tree (`SubagentGuide`).
         .child(render_guide(first, last, elbow_end, guide))
@@ -1603,7 +2006,12 @@ pub(crate) fn automation(app: &Entity<Threadbear>, cmd: &Value, window: &mut Win
     };
     match name {
         "hover" => {
-            let id = cmd["id"].as_str().map(|id| app.read(cx).thread_id_from(id)).transpose()?;
+            // A schedule's row in the Scheduled view, by its id; else a thread.
+            let id = match cmd["id"].as_str() {
+                Some(id) if app.read(cx).schedule(id).is_some() => Some(id.to_owned()),
+                Some(id) => Some(app.read(cx).thread_id_from(id)?),
+                None => None,
+            };
             app.update(cx, |t, cx| {
                 t.sidebar.hover_override = id.clone();
                 cx.notify();
@@ -1684,7 +2092,20 @@ pub(crate) fn automation(app: &Entity<Threadbear>, cmd: &Value, window: &mut Win
             };
             window.render_frame(cx);
             let matches = |label: &str| if prefix { label.starts_with(tip) } else { label == tip };
-            let found = window.elements().into_iter().filter(|e| e.visible() && e.label().is_some_and(&matches)).collect::<Vec<_>>();
+            let shown = |window: &Window| window.elements().into_iter().filter(|e| e.visible() && e.label().is_some_and(&matches)).collect::<Vec<_>>();
+            let mut found = shown(window);
+            // One drawn wholly or partly out of sight in Settings' pane is
+            // scrolled to first, as a person would, so the click's middle
+            // lands on it (settings_window::scroll_into_view). Partly counts
+            // as shown above, with its middle maybe past the pane's edge.
+            if cmd["settings"].as_bool() == Some(true) {
+                let target = found.last().cloned().or_else(|| window.elements().into_iter().filter(|e| e.label().is_some_and(&matches)).last());
+                if target.is_some_and(|t| crate::settings_window::scroll_into_view(app, t.bounds(), cx)) {
+                    window.refresh();
+                    window.render_frame(cx);
+                    found = shown(window);
+                }
+            }
             let Some(target) = found.last() else { return Err(format!("no control with the tip {tip:?}")) };
             let at = target.bounds().center();
             window.pointer_move(at, None, cx);
@@ -1692,21 +2113,36 @@ pub(crate) fn automation(app: &Entity<Threadbear>, cmd: &Value, window: &mut Win
             window.pointer_up(at, MouseButton::Left, cx);
             Ok(json!("ok"))
         }
-        // The row's right-click menu, opened the way a right-click does and
-        // read back; `tipPrefix` names the row by the start of its tip.
+        // A row's right-click menu or a button's menu, opened the way a click
+        // does and read back; `tipPrefix` names the control by the start of
+        // its tip. As the Swift app's: `right` right-clicks (a left click otherwise,
+        // the sort button's) and `ticks` puts "[x] " before a ticked line.
         "realMenu" => {
             let prefix = cmd["tipPrefix"].as_str().ok_or("realMenu here takes tipPrefix")?;
-            // A right-click through real events and hit testing, as a person's
-            // goes, on the row whose tooltip starts with this.
+            let button = if cmd["right"].as_bool() == Some(true) { MouseButton::Right } else { MouseButton::Left };
+            // A click through real events and hit testing, as a person's
+            // goes, on the control whose tooltip starts with this.
             window.render_frame(cx);
             let Some(row) = window.elements().into_iter().filter(|e| e.visible() && e.label().is_some_and(|l| l.starts_with(prefix))).last() else {
                 return Err(format!("no row with the tip {prefix:?} on screen"));
             };
             let at = row.bounds().center();
             window.pointer_move(at, None, cx);
-            window.pointer_down(at, MouseButton::Right, cx);
-            window.pointer_up(at, MouseButton::Right, cx);
-            let titles: Vec<String> =app.read(cx).sidebar.menu.iter().flat_map(|m| m.rows.iter()).filter(|r| !r.separator).map(|r| if r.children.is_empty() { r.title.clone() } else { format!("{} >", r.title) }).collect();
+            window.pointer_down(at, button, cx);
+            window.pointer_up(at, button, cx);
+            let ticks = cmd["ticks"].as_bool() == Some(true);
+            let titles: Vec<String> = app
+                .read(cx)
+                .sidebar
+                .menu
+                .iter()
+                .flat_map(|m| m.rows.iter())
+                .filter(|r| !r.separator)
+                .map(|r| format!("{}{}{}", if ticks && r.checked { "[x] " } else { "" }, r.title, if r.children.is_empty() { "" } else { " >" }))
+                .collect();
+            if titles.is_empty() {
+                return Err("no menu opened".into());
+            }
             app.update(cx, |t, cx| {
                 t.sidebar.menu = None;
                 cx.notify();

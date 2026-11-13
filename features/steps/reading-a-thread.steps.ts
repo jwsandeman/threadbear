@@ -1,4 +1,4 @@
-import { Then, When } from '@cucumber/cucumber';
+import { Given, Then, When } from '@cucumber/cucumber';
 import assert from 'node:assert/strict';
 import type { ThreadbearWorld } from '../support/world.ts';
 import type { Row } from '../support/driver.ts';
@@ -152,4 +152,31 @@ Then('the clipboard holds {string}', async function (this: ThreadbearWorld, word
     await new Promise((done) => setTimeout(done, 100));
   }
   assert.fail(`the clipboard says ${last}`);
+});
+
+// mock.wakes: a reply, then two turns the agent started by itself as
+// background jobs finished, one 44 s later and one 3 min later.
+Given('a thread the agent picked up twice as background jobs finished, called {string}', async function (this: ThreadbearWorld, title: string) {
+  const id = 'thread_wakes';
+  await this.app.do({ cmd: 'mock', method: 'thread', params: { id, title } });
+  await this.app.do({ cmd: 'mock', method: 'wakes', params: { threadId: id } });
+  await this.until(`"${title}" in the sidebar`, (d) => this.thread(d, title));
+});
+
+Then('the transcript shows a wait line starting {string}', async function (this: ThreadbearWorld, words: string) {
+  await this.until(`a wait line "${words}"`, (d) => d.transcript.rows.some((r) => r.kind === 'gap' && r.text.startsWith(words)));
+});
+
+// The row's height is fixed, so words taller than it are drawn over the rows
+// either side: each label must start and end inside its row, on one line.
+Then('each wait line\'s words are one line inside its own row', async function (this: ThreadbearWorld) {
+  const gaps = (await this.app.dump()).transcript.rows.filter((r) => r.kind === 'gap');
+  assert.equal(gaps.length, 2, `wait lines: ${gaps.map((r) => r.text).join(' | ')}`);
+  for (const gap of gaps) {
+    await this.app.do({ cmd: 'scroll', row: gap.id, offset: 0 });
+    const row = await this.until(`the wait line "${gap.text.slice(0, 20)}" drawn`, (d) => d.transcript.rows.find((r) => r.id === gap.id && r.onScreen !== false && r.label && r.height));
+    const { top, height } = row.label!;
+    assert.ok(height <= 20, `"${gap.text.slice(0, 40)}" is ${height} points tall, more than a line`);
+    assert.ok(top >= 0 && top + height <= row.height!, `"${gap.text.slice(0, 40)}" is drawn from ${top} to ${top + height} in a row ${row.height} tall`);
+  }
 });

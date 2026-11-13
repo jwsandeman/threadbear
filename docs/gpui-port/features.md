@@ -37,6 +37,7 @@ It comes from reading code, not from running anything, so "(unverified)" means n
 | `foundation.icons` | Icon set | About 116 distinct literal SF Symbols (a floor, from my grep) | Bundled icon set, with a name map so each symbol use moves across. | build | M | Every view |
 | `foundation.bear` | Bear glyphs | The mascot as stroked paths at any size | Port `BearGeometry` to GPUI path drawing, keeping it geometry-driven (unverified that stroke joins match). | build | M | `BearGeometry`, `Bear` |
 | `foundation.logos` | Provider logos | Model picker marks from SVG path data | Ship the marks as SVG assets beside the icon set. | build | S | `ProviderLogo` |
+| `foundation.webruntime` | Web runtime | None to port: WebKit comes with macOS | CEF's official build fetched from Spotify's CDN the first time something needs it ("Install web runtime", with Not now), checked against its pinned size and hashes before it's unpacked into the data folder, and started in the app's own process; until then pages show their source and panels offer the browser. Mac first. | web | L | none (WebKit) |
 | `foundation.tooltips` | Tooltips on every control | One app-wide tip panel, also used to name clicks in the activity log | `Tooltip` behind one project helper, and a rule check like `TipsTests`. | kit | M | `Tips` |
 | `foundation.infotip` | ⓘ InfoTip | Popover on click, tip on hover, selectable text | `Popover` on click and `Tooltip` on hover. | kit | S | `Tips` (`InfoTip`) |
 | `foundation.menus` | Menus with icons | Built-in-code menus, ticks, submenus, section headers | gpui-kit menus drawn in-window, which also makes the private image-visibility call unnecessary. | kit | M | `MenuItems`, `ComposerControls` |
@@ -68,6 +69,7 @@ It comes from reading code, not from running anything, so "(unverified)" means n
 | `dock.menu` | Panel context menu | Open in New Window, Put Back, Hide or Show Title | gpui-kit menu, in-window. | kit | S | `DockView` |
 | `dock.titlebar` | No title bar | Traffic lights in the top-left bar, drag bar to move, double-click to zoom | gpui-kit `title-bar` (platform-dependent) and `start_window_move`, with client-side decorations on Windows and Linux (unverified how far it goes). | kit | M | `WindowDock`, `ActivityBar` (`WindowGrip`) |
 | `dock.frame` | Window frame memory | Reopens where left | Save bounds in the config file and recentre an off-screen frame. | build | S | `MainWindowFrame` |
+| `dock.motion` | Panels glide open and closed | A panel opening fades in where it goes as the others glide and resize to make room (`withAnimation(settle)`, a spring of 0.34 s response and 0.86 damping, with each group's `matchedGeometryEffect`); closing, it fades out as they take its room back | GPUI can't animate a flex layout: while a glide runs the dock places its groups by hand at frames worked out from the layout (`group_frames`), sampled from the spring by time. A closing panel fades out as a blank of the panel's colour, not its content. | build | S | `DockController`, `DockView` |
 | `dock.reset` | Default layout and Reset | Three panels, View > Reset Panel Layout | Build the default tree in the crate. | build | S | `WindowDock` |
 | `dock.threadpanel` | Thread in its own panel | Beside the main one, from the row menu | A dock panel holding a second thread view. | build | M | `ThreadPanels` |
 | `dock.openelsewhere` | Open elsewhere note | Main panel says it's open elsewhere, with Go to it and Show it here | Drawn in the thread panel. | build | S | `ThreadPanels` |
@@ -112,7 +114,8 @@ It comes from reading code, not from running anything, so "(unverified)" means n
 | `sidebar.mousedrag` | Mouse drag to archive | Drag left past the line | GPUI mouse drag on the row, sharing the swipe's end state. | build | S | `RowSwipe` |
 | `sidebar.rowmotion` | Row slide and count roll | Section changes animate | `Animation` by hand, as GPUI has no matched geometry we know of. | build | M | `Juice` |
 | `sidebar.starredorder` | Reorder within Starred | Not present: starred keeps star order | Not ported: the app doesn't have it. | drop | none | none |
-| `sidebar.move` | Move to another runner | Sheet with login choice, Cancel Move | gpui-kit sheet (experiment `moveToRunner`). | kit | S | `MoveSheet`, `AppModel+Moves` |
+| `sidebar.keys` | Sidebar keys | Up and down move through the threads once the list is clicked, Esc goes back to the Inbox from the Scheduled, Projects and Librarian views, and the arrows, Next Inbox Thread and a thread chip scroll the row into view | A key context on the Threads panel, which takes the keyboard when clicked, and a scroll to the row once it's laid out (`row_motion.rs`). | build | S | `SidebarView` (`ThreadList`), `ScheduledList`, `LibrarianView` |
+| `sidebar.move` | Move to another runner | Sheet with login choice, Cancel Move | gpui-kit sheet. | kit | S | `MoveSheet`, `AppModel+Moves` |
 
 ## 4. Thread header, banners, toasts
 
@@ -136,6 +139,8 @@ It comes from reading code, not from running anything, so "(unverified)" means n
 | `toast.milestone` | Milestone toast | Thread count passes 100 and each thousand | `Toast`, using time since the last in-app input in place of the system idle time. | kit | S | `DetailView`, `AppModel+Milestones` |
 | `thread.newpage` | New-thread page | Centred composer, heading, project chip, note, room card | Drawn page reusing the composer. | build | M | `DetailView` (`ComposerPlacement`, `NewThreadHeading`, `AccountRoomCard`) |
 | `thread.loadfailure` | Load failure states | Couldn't load, Try again, no record, Nothing yet | Drawn. | build | S | `DetailView` |
+| `thread.loading` | Reading a thread | A small spinner in the middle of the transcript, no words, until its rows are read | Kit spinner over the list while the pane isn't loaded. | build | S | `DetailView` |
+| `thread.kept` | Threads kept loaded | The last 24 threads opened stay loaded, so switching back shows one at once and catches up from its last seq | `PaneCache` of panes, still subscribed; least recently shown goes first. | build | M | `AppModel+Selection` (`sessions`, `maxSessions`) |
 
 ## 5. Transcript row kinds
 
@@ -195,6 +200,7 @@ It comes from reading code, not from running anything, so "(unverified)" means n
 | `rich.fullsize` | Full-size rich window | Most of the screen | Own GPUI window holding the web runtime's page. | web | S | `RichBlockWindow` |
 | `rich.draft` | Draft blocks | Slack, email, draft as it'll go out, Slack formatting | Our own block element from `DraftBlock`. | build | M | `DraftBlock`, `DraftBlockCell` |
 | `rich.draft.copy` | Draft copy | Copies with links and bold, "Copied" bubble | GPUI's clipboard is simpler than this, so the HTML flavour needs code on macOS, Windows and Linux (unverified). | shim | S | `DraftBlockCell`, `CopiedBubble` |
+| `rich.draft.select` | Draft words selected | A draft's lines select like the reply's words, with the bar over them and ⌘C | Its lines as one text of the window's selection, its own in the box; a drag from outside takes the box whole. | build | S | `MarkdownRenderer.draftBlock`, `TextKit` |
 | `rich.replybuttons` | Reply buttons | Agent-made pill buttons in the text, live states | Drawn pills as blocks, or inline once `foundation.richtext` settles that. | build | M | `MarkdownRenderer` (`replyButton`), `ReplyButton` |
 | `rich.threadchips` | Thread chips | Ids become chips, hover card, click opens | Drawn chip with `Popover` card, depending on `foundation.richtext` for inline placement. | build | S | `ThreadChips`, `ThreadRefs` |
 | `rich.cardchips` | Card chips | Notion card mentions, click opens | Drawn chip, depending on `foundation.richtext`. | build | S | `CardChips`, `CardMentions` |
@@ -220,7 +226,7 @@ It comes from reading code, not from running anything, so "(unverified)" means n
 | `composer.return` | Return, Shift-Return | Send, new line | Key bindings on `Textarea`. | build | S | `ComposerView` |
 | `composer.listcontinue` | List continuation | "2. " after "1. x", empty item ends it, one undo | Port the rule on `Textarea` (unverified that it can make one undo step). | build | S | `ComposerView` (`insertLineContinuingList`) |
 | `composer.picturechips` | Picture chips | Paste, drop or + goes in at the cursor, thumbnails over the words | Stock since gpui-kit 0.9.0: inline tokens on `TextareaState` (`InlineToken`), atomic in editing and undo, drawn by our own renderer. Ghostex forked for this before they existed. The runner converts pasted HEIC and TIFF (`media.import`). | kit | L | `ComposerView`, `PictureChips` |
-| `composer.chiphover` | Chip hover and × | Peek, remove chip and picture | `Popover` on hover and a drawn ×, on top of `composer.picturechips`. | build | S | `ComposerView` |
+| `composer.chiphover` | Chip hover and × | Peek, remove chip and picture, a click opens it | `Popover` on hover and a drawn ×, on top of `composer.picturechips`; a click on a chip or thumbnail opens the viewer. | build | S | `ComposerView` |
 | `composer.chipcopy` | Copy or cut chips | Paste brings the pictures back | Keep chip data in app memory, matched to the plain text on the clipboard, so no private pasteboard type is needed. | build | S | `ComposerView` |
 | `composer.filedrop` | File path drop | Video, PDF, folder go in as a path | GPUI file drop, on every OS. | kit | S | `ComposerView`, `DroppedFiles` |
 | `composer.threadid` | Thread id paste or drop | Becomes a chip | Paste rule and an in-app drag, on top of inline chips. | build | S | `ComposerView`, `ThreadDrag` |
@@ -248,7 +254,7 @@ It comes from reading code, not from running anything, so "(unverified)" means n
 | ID | Feature | What it does | How in GPUI | Route | Size | Swift |
 |---|---|---|---|---|---|---|
 | `card.done` | Done card | Archive, Or carry on list, tick and ? | Drawn card with `TextView`. | build | M | `ComposerCard`, `RowRenderer` (`asksText`) |
-| `composer.recap` | Recap box | Above the message box on a thread quiet for 12 hours: what it's for, where it stands, × to put away | Drawn box from `recap`, same rule as `Recap.swift`. | build | S | `RecapBox` |
+| `card.review` | Review findings | Another lab's findings on the card, each with fixed, disputed or left, and a line opening the review thread | Added section in `card.done` and `card.needsyou`, from `turn.completed`'s `review`. | build | S | `RowRenderer` (`reviewText`) |
 | `card.needsyou` | Needs you card | Outlined asks, button rows | Drawn card with blocks for each ask, holding its thread identity (a security fix). | build | L | `ComposerCard`, `RowRenderer` |
 | `card.paging` | Paging | ‹ 1 of 3 ›, moves on after a pick | Drawn, with a slide from `Animation`. | build | S | `ComposerCard` (`CardDeck`) |
 | `card.collapse` | Collapse | Chevron to heading | Drawn. | build | S | `ComposerCard` (`CardCollapseButton`) |
@@ -284,7 +290,7 @@ It comes from reading code, not from running anything, so "(unverified)" means n
 | `patches.icons` | Patch icons | Image file or `.app` icon | Image files drawn as is; `.app` icons need macOS code, and Windows and Linux use a generic icon. | shim | S | `PatchImage` |
 | `panel.list` | List panel | Native rows refreshed by the runner | gpui-kit list. | kit | S | `PanelsView` (`ListPanel`) |
 | `panel.image` | Image panel | Refreshed picture, Open Simulator | Drawn image that refreshes. | build | S | `PanelsView` (`ImagePanel`) |
-| `panel.web` | Web panel | Web view kept loaded between visits | Web runtime page in a `CefElement`-style layout slot (Ghostex's approach), X11 only on Linux, and in-window menus can't draw over the page. | web | L | `PanelsView` (`WebPanel`, `WebPanelPool`) |
+| `panel.web` | Web panel | Web view kept loaded between visits, its sound paused while it's out of sight; a link to another site opens where Default says, not over the patch's page | Web runtime page in a `CefElement`-style layout slot (Ghostex's approach), X11 only on Linux, and in-window menus can't draw over the page. | web | L | `PanelsView` (`WebPanel`, `WebPanelPool`) |
 | `panel.bar` | Panel bar buttons | Reload, Open in browser, Back | Drawn in the panel's bar. | build | S | `PanelsView` (`DockPaneButtons`) |
 | `panel.convex` | Convex panel | Dashboard, Dev/Prod switch, sign-in states | Web runtime page with the deploy key injected, and the sign-in states drawn in GPUI. | web | L | `PanelsView` (`ConvexPanel`, `ConvexWebPage`) |
 | `panel.requests` | Panel requests | Agent opens a panel for you | Port the logic. | build | S | `PanelRequestModel`, `PanelRequests` |
@@ -305,8 +311,8 @@ It comes from reading code, not from running anything, so "(unverified)" means n
 |---|---|---|---|---|---|---|
 | `file.host` | Preview host | File or page replaces the panel, Back | Drawn pane state. | build | M | `PaneModel`, `HighlightsView` (`PreviewBody`) |
 | `file.picture` | Picture view | Copy Image, drag out | Drawn image, with original bytes on the clipboard and drag out through `drag.fileout`. | build | S | `HighlightsView` (`FilePreviewView`) |
-| `file.video` | Video view | Plays in pane | Risk: GPUI has no video player, so it's a page in the optional web runtime (codecs in the CEF build unverified) or a player per OS. | hard | L | `HighlightsView` (`FilePreviewView`) |
-| `file.quicklook` | Quick Look fallback | PDFs and anything else | Risk: no cross-platform equivalent, so we write an in-app viewer for images, video and PDF, and everything else opens in its default app under the same code-runner rule. | hard | L | `HighlightsView` (`QuickLookView`) |
+| `file.video` | Video view | Plays in pane | On a Mac, AVKit's player over the pane (`media_view.rs`), as the Swift pane's: the web runtime's Chromium has no H.264. Windows and Linux open it in its app for now. | hard | L | `HighlightsView` (`FilePreviewView`) |
+| `file.quicklook` | Quick Look fallback | PDFs and anything else | On a Mac, PDFs in PDFKit's view over the pane (`media_view.rs`); everything else, and PDFs on Windows and Linux, opens in its default app under the same code-runner rule. | hard | L | `HighlightsView` (`QuickLookView`) |
 | `file.textview` | Text viewer | Selectable, coloured code | gpui-kit code editor, read-only. | kit | M | `TextFileView` |
 | `file.markdown` | Markdown preview | Drawn, comfortable width, remembers mode | `TextView`. | kit | M | `TextFileView`, `HighlightsView` (`MarkdownViewMenu`) |
 | `file.editor` | Text editor | Edit raw, autosave, ⌘S, line numbers | gpui-kit code editor, with autosave ours (unverified that it shows line numbers). | kit | L | `TextFileView`, `LineNumberRuler` |
@@ -338,7 +344,9 @@ It comes from reading code, not from running anything, so "(unverified)" means n
 | `projects.home` | Projects home | Cards, New project, search | Drawn cards with `Input`. | build | M | `ProjectsHome`, `ProjectCards` |
 | `projects.list` | Projects list | Sidebar view, Archive, Merge, Delete, copy id | gpui-kit list and menus. | kit | M | `ProjectsList`, `ProjectSections` |
 | `projects.page` | Project page | Title, goals, state, notes editing, folders, threads | Drawn page using `Input` and `Textarea`. | build | L | `ProjectPage`, `Projects` |
-| `projects.decisions` | Decisions on the Projects page | Experiment `projectDecisions`: "N decisions" on a project's card and sidebar heading, and at the top of its page a card per thread waiting on a card of asks (title, a line on what it's doing, the asks as the composer draws them, Open thread), answered with the thread's own `threads.send` and showing "Sending to" until the thread takes it | Drawn cards reusing the composer card's asks rendering. | build | M | `ProjectDecisionsView`, `ProjectDecisions` |
+| `projects.decisions` | Decisions on the Projects page | Experiment `projectDecisions`: "N decisions" on a project's card and sidebar heading, and at the top of its page a card per thread waiting on a card of asks (title, a line on what it's doing, the asks as the composer draws them, Open thread), answered with the thread's own `threads.send` and showing "Sending to" until the thread takes it; the sidebar's Projects view folded to one row a project (icon, name, its decisions or thread count, a chevron that shows its threads, folded by default and remembered), Not in a project too | Drawn cards reusing the composer card's asks rendering; the folded rows in the sidebar's virtual list. | build | M | `ProjectDecisionsView`, `ProjectDecisions`, `ProjectsList` (`ProjectFoldRow`), `ProjectFolds` |
+| `projects.parts` | Parts of a project | A project can be a part of another (one level): in the sidebar a part nests under its parent's row and folds with it; on the Projects page it's named inside its parent's card, which counts its threads and decisions; the parent's page has a Parts section, a part's page links up with "Part of"; the ... menu's Make a Part of and Make Its Own Project | Drawn rows and a section; the menu items in the project menu. | build | M | `ProjectsList`, `ProjectPage` (`PartsSection`), `ProjectSections`, `ProjectCards` |
+| `projects.tabs` | Project page tabs | Experiment `projectDecisions`: a project's page in two tabs under its header, Decisions (with its count in orange, parts' too) and Project (everything else); opens on Decisions when something's waiting, keeps the tab picked per project while the app runs, says "Nothing waiting" when they empty rather than jumping; ⇧⌘[ and ⇧⌘] in the Go menu | Drawn tab bar; the two commands in the Go menu. | build | S | `ProjectPage` (`ProjectTabBar`), `ProjectTabs` |
 | `projects.icon` | Project icon | Choose or librarian's | GPUI path prompt, with Reveal going through the open gate. | kit | S | `ProjectPage`, `ProjectIconView` |
 | `projects.tasks` | Tasks board page | Status columns from Notion | Drawn columns. | build | M | `ProjectPage` (`TasksSection`) |
 | `projects.newthread` | New thread in project | "In" chip | Drawn chip. | build | S | `DetailView` (`NewThreadProjectChip`) |
@@ -353,13 +361,14 @@ It comes from reading code, not from running anything, so "(unverified)" means n
 | `runners.panel` | Runners panel | Online, commit, threads, CPU, memory, disk, reorder | Drawn, with `foundation.reorder`. | build | M | `RunnersPanel`, `RunnersText`, `RemoteRunners` |
 | `connectors.panel` | Connectors panel | Services, Connect, check again | Drawn. | build | S | `ConnectorsPanel`, `ConnectorsModel`, `ConnectorsText` |
 | `updates.panel` | Updates panel | App, runner, CLIs, From Mike, Bring Them In, Discuss | Drawn. | build | M | `UpdatesPanel`, `UpdatesText` |
+| `updates.popover` | Updates popover | Right-click the Updates icon: the app's update in a line, with Restart to Update once it's ready (Return takes it) or Show the Log once a build failed | Drawn popover beside the icon. | build | S | `UpdatesPanel` (`AppUpdatePopover`) |
 | `pocket.phoneonly` | Pocket and phone-only items | Not on the Mac | Not ported: these are phone features. | drop | none | none |
 
 ## 15. Settings
 
 | ID | Feature | What it does | How in GPUI | Route | Size | Swift |
 |---|---|---|---|---|---|---|
-| `settings.window` | Settings window | Tabbed, width draggable | Own GPUI window with gpui-kit tabs and a resizable width. | kit | M | `SettingsView` |
+| `settings.window` | Settings window | Tabbed, width draggable, up and down move through the sections | Own GPUI window with gpui-kit tabs and a resizable width. | kit | M | `SettingsView` |
 | `settings.general` | General | Appearance, ding with sound and volume, default folder, activity log, Updates from Mike | gpui-kit form, but GPUI has no sound API, so the ding needs an audio crate or code on macOS, Windows and Linux. | shim | M | `SettingsView`, `DingPlayer`, `CompletionSound` |
 | `settings.models` | Models | Small-jobs pool, private folders | gpui-kit form and GPUI path prompts. | kit | S | `SettingsView` |
 | `settings.pools` | Pools | List, rename, order, icon, logins, folders | Drawn, with `foundation.reorder`. | build | L | `SettingsView`, `PoolsModel` |
@@ -377,7 +386,7 @@ It comes from reading code, not from running anything, so "(unverified)" means n
 | `review.zoom` | Zoom and pan | Scroll or pinch to pointer, ⌘0, double-click, Esc | Scroll and keys drawn by us; pinch needs per-OS input on macOS, Windows and Linux (unverified through GPUI's gesture hook). | shim | L | `ReviewWindow` (`ReviewImageScroll`) |
 | `review.minimap` | Minimap | Jump to part | Drawn. | build | S | `ReviewWindow` (`ReviewMinimap`) |
 | `review.holdspace` | Hold Space compare | Flick to today's version | Key handling, drawn. | build | S | `ReviewWindow` |
-| `review.media` | Video and HTML shots | Loop, muted among many | Risk: GPUI has no video player and many looping pages in the optional web runtime may be too heavy (unverified). | hard | L | `ReviewWindow` (`ReviewVideo`) |
+| `review.media` | Video and HTML shots | Loop, muted among many | On a Mac, clips loop in AVKit's player (`media_view.rs`), with controls and sound on the stage and muted among many. Pages, and clips on Windows and Linux, are a still with a button for now. | hard | L | `ReviewWindow` (`ReviewVideo`) |
 | `review.picks` | Picks and notes | Tick, None, Send, drafts | Drawn, with `Textarea`. | build | M | `ReviewSession`, `ReviewWindow` |
 | `review.openlive` | Open live | Tries a running option | Through the open gate. | build | S | `ReviewWindow` |
 
@@ -391,8 +400,10 @@ It comes from reading code, not from running anything, so "(unverified)" means n
 | `nav.nextinbox` | Next Inbox Thread | ⌥⌘↓ | GPUI key binding. | kit | S | `AppModel+Selection` |
 | `nav.hints` | Hold ⌘ hints | Keys appear beside buttons | Modifier change handler that draws the keys. | build | M | `ShortcutHints` |
 | `nav.deeplink` | Deep link | `threadbear://thread/<id>` | `register_url_scheme` and `on_open_urls`. | kit | S | `ThreadbearApp`, `ThreadLink` |
-| `menu.app` | App menu | About, Restart to Update, Settings… | `set_menus`: NSMenu on macOS, drawn by `AppMenuBar` on Windows and Linux (inferred). | kit | S | `ThreadbearApp` |
-| `menu.file` | File menu | New Thread | `set_menus`, as `menu.app`. | kit | S | `ThreadbearApp` |
+| `menu.app` | App menu | About, Restart to Update, Settings…, Services | `set_menus`: NSMenu on macOS, drawn by `AppMenuBar` on Windows and Linux (inferred). | kit | S | `ThreadbearApp` |
+| `menu.file` | File menu | New Thread, Close (⌘W); closing the main window quits, as the last window | `set_menus`, as `menu.app`, with Close as AppKit's `performClose:` on a Mac. | kit | S | `ThreadbearApp`, `AppDelegate` |
+| `menu.edit` | Edit menu | Undo, Redo, Cut, Copy, Paste, Delete, Select All; on a Mac AppKit adds Writing Tools, AutoFill, Start Dictation and Emoji & Symbols | `set_menus` with gpui-kit's text actions, the Mac's own selectors for Cut, Copy, Paste and Select All. | kit | S | SwiftUI's standard menus |
+| `menu.window` | Window menu | Minimize, Zoom, Bring All to Front; on a Mac AppKit adds Fill, Center, Move & Resize and the open windows (a panel's own too), and View's Enter Full Screen | `set_menus`, the menu named Window being AppKit's windows menu. | kit | S | SwiftUI's standard menus |
 | `menu.view` | View menu | Zoom In, Out, Actual, Show Threads, Panels, Terminal, Reset | `set_menus`, as `menu.app`. | kit | S | `ThreadbearApp` |
 | `menu.go` | Go menu | Back, Forward, Next Inbox Thread | `set_menus`, as `menu.app`. | kit | S | `ThreadbearApp` |
 | `menu.thread` | Thread menu | Archive, Hibernate submenu, Stop, Copy Transcript, Show Inbox, Scheduled, Projects, Librarian, Hibernating, Archived | `set_menus`, as `menu.app`. | kit | S | `ThreadbearApp` |
@@ -422,7 +433,9 @@ It comes from reading code, not from running anything, so "(unverified)" means n
 | `system.handover` | Seamless handover | New build under the old window, no flicker | Risk: it needs window ordering, alpha and a takeover signal that GPUI doesn't expose, and GPUI's `restart()` is only wait-then-reopen. | hard | L | `Handover` |
 | `system.crash` | Crash reporting | Sentry from installed release | sentry-rust (inferred), installed releases only and no user text. | build | S | `CrashReporting` |
 | `system.hangwatch` | Hang watch | Samples the stuck main thread | Watchdog thread is ours, but sampling is per OS (`sample` is macOS only), and GPUI's `profiler/hang.rs` gives tasks rather than stacks. | shim | M | `HangWatch`, `HangSample` |
+| `system.applog` | App log | The connection coming and going, failed requests, notices and scripted commands, for an agent to read | A file: the installed app's `~/Library/Logs/Threadbear/desktop.log`, a scripted app's beside its automation file. | build | S | `AppLog` |
 | `system.activitylog` | Activity log | What you click, off by default | GPUI event hook naming controls through the tooltip helper, off by default. | build | M | `ActivityRecorder`, `Activity` |
+| `system.swiftimport` | Bringing the Swift app's settings across | Zoom, folded sections, Inbox order, appearance, panel layout, window, the ding, Ask before quitting, link clicks, file views and unsent drafts, once, with a note | Reads the Swift app's defaults with `defaults export` (macOS only, as only the Mac had the Swift app) and its `app-drafts.json`. The port's own: the Swift app has nothing to bring. | shim | S | none |
 | `system.testharness` | Scripted test harness | `dev-app.sh` do, dump, shot | `#[gpui_kit::test]`, `TestAppContext` and `render_to_image` (macOS and Linux only), plus our own debug command channel and `dump`. | build | XL | `Automation`, `Automation+Commands`, `Automation+Waiting`, `AppDump`, `Screenshots`, `Perf` |
 
 ## 20. Tour, setup, about, juice
@@ -433,8 +446,8 @@ It comes from reading code, not from running anything, so "(unverified)" means n
 | `tour.intros` | One-card intros | First open of a page, pools | Drawn. | build | S | `Tour` (`TourIntro`) |
 | `tour.setup` | Finish setting up | Checklist, self-ticking | Drawn. | build | S | `SetupChecklist` |
 | `tour.about` | About (the Den) | Waving bear, build, numbers | Own GPUI window, drawn. | build | S | `DenWindow` |
-| `juice.archiveflight` | Archive flight | Page snapshot drops into the heading | Risk: GPUI animates from the foreground thread and the same click opens the next thread, so it needs a free main thread or a different flight design. | hard | M | `ArchiveFlight`, `ArchiveFlightPath` |
-| `juice.hibernateflight` | Hibernate flight | Sinks into the moon | Risk: same foreground-thread problem as `juice.archiveflight`. | hard | S | `ArchiveFlight` |
+| `juice.archiveflight` | Archive flight | Page snapshot drops into the heading | Built (`archive_flight.rs`, the path in core's `archive_flight`): GPUI can't picture a view or scale and turn one, so a card the page's colour with a transcript's shape on it flies the Swift path, level, in a view of its own over the window, timed by the clock; the next thread fades in under it and the box bounces. Drawn on the main thread, so a stall there holds it where Core Animation's carries on. | hard | M | `ArchiveFlight`, `ArchiveFlightPath` |
+| `juice.hibernateflight` | Hibernate flight | Sinks into the moon | Built with `juice.archiveflight`: sinks, dimming, into the moon, which dips as it lands. The next thread doesn't rise as it fades in (8 pt in the Swift app). | hard | S | `ArchiveFlight` |
 | `juice.inboxzero` | Inbox zero bear | Rises and waves, asleep after bedtime | Bear geometry with `Animation`. | build | M | `Juice`, `InkLayers` |
 | `juice.panebear` | Pane bear | Waves over new thread page | Bear geometry with `Animation`. | build | S | `Juice` (`PaneBear`) |
 | `juice.workingbear` | Working bear secrets | Waves back on hover, hops on click | Bear geometry with `Animation`. | build | S | `WavingBearView` |
@@ -457,11 +470,11 @@ Size is `none` throughout: the planning docs don't size these, and work the app 
 | `planned.sync.remotebodies` | Other machines' tool output | Tool output, diffs and pictures stay on that Mac for now | `transcript.heldback` fetches them today, and `sync.full` lifts the limit. | build | none | none |
 | `planned.exp.labreview` | Lab review (`labReview` setting) | Another provider reviews code changes; standard since 10 Nov, with a switch in Settings > General | The thread hibernates and a note row links the review; the settings window needs the Code review switch. | build | none | none |
 | `planned.exp.richblocks` | Rich blocks | Agents are told about mermaid and html blocks (standard since 10 Nov) | Needs `rich.mermaid` and `rich.html` in the web runtime and their sandbox. | web | none | none |
-| `planned.exp.schedulechecks` | Schedule checks (`scheduleChecks`) | A shell check gates a schedule run | Agents write the `check` field, and `schedule.editor` must keep it on save (unverified how saves treat a missing field). | build | none | none |
+| `planned.exp.schedulechecks` | Schedule checks (standard since 11 Nov) | A shell check gates a schedule run | Agents write the `check` field, and `schedule.editor` must keep it on save (unverified how saves treat a missing field). | build | none | none |
 | `planned.exp.looseends` | Loose ends (`looseEnds`) | "Still open" and "Coming back" on the done card | Added sections in `card.done`. | build | none | none |
-| `planned.exp.replybuttons` | Reply buttons (`replyButtons`) | Pills in replies that agents create and update | `rich.replybuttons`, gated on the experiment. | build | none | none |
-| `planned.exp.instructions` | Standing instructions (`standingInstructions`) | A Settings box applied to every session | `settings.instructions`, gated on the experiment. | kit | none | none |
-| `planned.exp.movetorunner` | Move to runner (`moveToRunner`) | Move a thread to another machine | `sidebar.move` plus the row menu and moving row, started only from the first Mac today. | build | none | none |
+| `planned.exp.replybuttons` | Reply buttons | Pills in replies that agents create and update (standard since 11 Nov) | `rich.replybuttons`. | build | none | none |
+| `planned.exp.instructions` | Standing instructions | A Settings box applied to every session (standard since 11 Nov) | `settings.instructions`. | kit | none | none |
+| `planned.exp.movetorunner` | Move to runner (standard since 12 Nov) | Move a thread to another machine | `sidebar.move` plus the row menu and moving row, started only from the first Mac today. | build | none | none |
 | `planned.exp.acpagents` | ACP agents (`acpAgents`) | OpenCode and Cursor threads | Drive every provider choice from `ProviderInfo` rather than hardcoding two, and don't copy the web's `modelLabel`. | build | none | none |
 | `planned.exp.cardreviewer` | Card reviewer (`cardReviewer`) | Opus pre-reviews Auto cards | No new UI: a transcript note says "Allowed by the reviewer". | build | none | none |
 | `planned.exp.fastmode` | Fast mode (`fastMode`) | Standard or Fast per Claude thread, `/fast` | The Speed row in `composer.modelpicker` and a chip suffix. | build | none | none |
@@ -475,21 +488,21 @@ Size is `none` throughout: the planning docs don't size these, and work the app 
 | kit | 65 | 1 | 66 |
 | build | 197 | 16 | 213 |
 | web | 6 | 1 | 7 |
-| shim | 23 | 0 | 23 |
+| shim | 24 | 0 | 24 |
 | hard | 13 | 0 | 13 |
 | drop | 3 | 0 | 3 |
-| Total | 306 | 18 | 324 |
+| Total | 307 | 18 | 325 |
 
 **Per size**
 
 | Size | Inventory | Planned | All |
 |---|---|---|---|
-| S | 169 | 0 | 169 |
+| S | 170 | 0 | 170 |
 | M | 95 | 0 | 95 |
 | L | 33 | 0 | 33 |
 | XL | 5 | 0 | 5 |
 | none | 4 | 18 | 22 |
-| Total | 306 | 18 | 324 |
+| Total | 307 | 18 | 325 |
 
 **The `hard` rows**
 

@@ -28,7 +28,7 @@ pub use card_text::{ApprovalText, PlanCardText, PlanSummary};
 pub use diff::{DiffBuilder, DiffDisplayLine, DiffLineKind};
 pub use event::*;
 pub use feed::{FeedAction, ThreadFeed};
-pub use format::{cost_text, duration, token_line, TurnTokens};
+pub use format::{cost_text, duration, token_line, TurnTokens, short_tokens};
 pub use groups::{BackgroundStatus, BackgroundWork, ChangedFile, ChangedFiles, DiffPreview, WorkGroup, WorkSummary, WorkingStatus};
 pub use model::{PrependResult, TranscriptChange, TranscriptModel};
 pub use pending::PendingMessage;

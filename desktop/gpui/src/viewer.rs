@@ -37,6 +37,12 @@ impl ViewerState {
 }
 
 impl ViewerState {
+    /// Up over the window: a video or PDF view in the pane hides under it
+    /// (media_view.rs), as it would be drawn over it.
+    pub(crate) fn is_open(&self) -> bool {
+        self.open
+    }
+
     fn current_path(&self) -> Option<&str> {
         self.pictures.get(self.index).map(|p| p.0.as_str())
     }
@@ -66,6 +72,27 @@ pub(crate) fn open_from_tile(images: &[ImageRef], index: usize, window: &mut Win
         .ok();
 }
 
+/// A click on a picture in the message box (its chip among the words or its
+/// thumbnail over them): the viewer on `chosen`, stepping through the box's
+/// other real pictures, as a transcript tile's does. Says what it shows (the
+/// paths and the place of `chosen` among them), or None when `chosen` isn't
+/// one that opens here.
+///
+/// The opening waits for the click's turn to end: the click comes from inside
+/// the composer's update, and the side pane can read the composer and the app
+/// back while it opens, which would be a double lease.
+pub(crate) fn open_from_composer(paths: Vec<String>, chosen: &str, window: &mut Window, cx: &mut App) -> Option<(Vec<String>, usize)> {
+    cx.try_global::<ViewerHandle>()?;
+    let shown: Vec<String> = paths.into_iter().filter(|p| opens_here(p)).collect();
+    let index = shown.iter().position(|p| p == chosen)?;
+    let (paths, chosen) = (shown.clone(), chosen.to_owned());
+    window.defer(cx, move |window, cx| {
+        let Some(handle) = cx.try_global::<ViewerHandle>().cloned() else { return };
+        handle.0.update(cx, |pane, cx| pane.open_viewer(paths, &chosen, window, cx)).ok();
+    });
+    Some((shown, index))
+}
+
 impl SidePane {
     pub(crate) fn open_viewer(&mut self, paths: Vec<String>, chosen: &str, window: &mut Window, cx: &mut Context<Self>) {
         let index = paths.iter().position(|p| p == chosen).unwrap_or(0);
@@ -74,6 +101,7 @@ impl SidePane {
         self.viewer.open = true;
         // The overlay holds the keys: Escape closes, the arrows step.
         window.focus(&self.viewer.focus, cx);
+        crate::web_panels::keyboard_to_app(window);
         self.read_viewer_picture(index, cx);
         cx.notify();
     }
@@ -198,7 +226,7 @@ impl SidePane {
 
 /// The image format from its bytes, so a mislabelled file still decodes as
 /// what it really is, and a non-picture is refused.
-fn format_of(path: &str, bytes: &[u8]) -> Option<ImageFormat> {
+pub(crate) fn format_of(path: &str, bytes: &[u8]) -> Option<ImageFormat> {
     if bytes.starts_with(b"\x89PNG") {
         return Some(ImageFormat::Png);
     }
@@ -242,16 +270,17 @@ pub(crate) fn viewer_command(side: &Entity<SidePane>, cmd: &Value, cx: &mut App)
 
 /// The thread's action chips, for the thread pane to draw over the composer
 /// (the chips live with the patches, patches.rs).
-pub(crate) fn action_chips(thread: &threadbear_core::inbox::ThreadSummary, cx: &mut App) -> Option<AnyElement> {
+pub(crate) fn action_chips(thread: &threadbear_core::inbox::ThreadSummary, room: f32, project_icons: &std::collections::HashMap<String, crate::sidebar::ProjectIcon>, window: &mut Window, cx: &mut App) -> Option<AnyElement> {
     if !SidePane::has_action_chips(thread) {
         return None;
     }
     let handle = cx.try_global::<ViewerHandle>()?.clone();
     let entity = handle.0.upgrade()?;
-    entity.update(cx, |pane, cx| pane.render_action_chips(thread, cx))
+    entity.update(cx, |pane, cx| pane.render_action_chips(thread, room, project_icons, window, cx))
 }
 
-/// The tile's tooltip words on a transcript row (`transcript.images`).
+/// The tile's tooltip words on a transcript row (`transcript.images`), and on
+/// the message box's thumbnails.
 pub(crate) const TILE_TIP: &str = "Open the picture";
 
 pub(crate) fn viewer_handle_global(entity: WeakEntity<SidePane>, cx: &mut App) {

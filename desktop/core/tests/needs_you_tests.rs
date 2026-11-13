@@ -174,6 +174,42 @@ fn testLooseEndsGoOnTheirOwnDoneCard() {
     assert_eq!(decoded.ends.first().and_then(|e| e.thread_id.clone()).as_deref(), Some("b"));
 }
 
+/// The check arrives on the thread's summary (`threads.list`,
+/// `thread.updated`), which the GPUI app's summary used to drop on the floor:
+/// the Swift app's done card said "Still open" and the GPUI one didn't (12
+/// Nov, "State machines").
+#[test]
+fn testLooseEndsComeOnTheSummary() {
+    let summary: threadbear_core::inbox::ThreadSummary = serde_json::from_value(json!({
+        "id": "t", "status": "idle", "needs": "nothing",
+        "looseEnds": {"seq": 1, "at": "2026-11-12T00:00:00Z", "ends": [{"kind": "unpushed", "text": "4 commits it made in convex-native-v7 aren't pushed"}]},
+    }))
+    .expect("summary");
+    let mut model = from_events(vec![needs_nothing(1, "t1", json!([]))]);
+    model.set_loose_ends(summary.loose_ends_check());
+    assert_eq!(card(&model, "ak:1").and_then(|c| c.loose_ends.clone()).map(|e| e.iter().map(|x| x.text.clone()).collect::<Vec<_>>()), Some(vec!["4 commits it made in convex-native-v7 aren't pushed".to_owned()]));
+    // A summary without it (a turn running, the experiment off) takes it away.
+    let bare: threadbear_core::inbox::ThreadSummary = serde_json::from_value(json!({"id": "t", "status": "idle"})).expect("summary");
+    model.set_loose_ends(bare.loose_ends_check());
+    assert_eq!(card(&model, "ak:1").and_then(|c| c.loose_ends.clone()), None);
+    // One it can't read leaves the rest of the summary standing.
+    let odd: threadbear_core::inbox::ThreadSummary = serde_json::from_value(json!({"id": "t", "title": "Kept", "looseEnds": "what"})).expect("summary");
+    assert_eq!((odd.title.as_str(), odd.loose_ends_check()), ("Kept", None));
+}
+
+/// A booked check-in is the runner's `scheduled` kind: it doesn't count as
+/// open, and its line says when it comes back (looseEndsText).
+#[test]
+fn testABookedCheckInSaysWhenItComesBack() {
+    let end = LooseEnd { at: Some("2026-11-13T01:30:00Z".to_owned()), ..LooseEnd::new("scheduled", "Review the week") };
+    assert!(end.is_booked());
+    let utc = threadbear_core::chrono::Utc;
+    assert_eq!(end.line(&utc), "Fri 13 Nov, 1:30 am: Review the week");
+    let open = LooseEnd { at: Some("2026-11-13T01:30:00Z".to_owned()), ..LooseEnd::new("unlanded", "1 commit on thread/x isn't on main") };
+    assert!(!open.is_booked());
+    assert_eq!(open.line(&utc), "1 commit on thread/x isn't on main");
+}
+
 /// A follow-up's "?" toggles like its tick and goes with the ticks.
 #[test]
 fn testFollowUpsAskedAboutGoWithTheTicks() {
@@ -231,4 +267,73 @@ fn testTheOpenCardGoesOnceHisReplyIsOnItsWay() {
     assert!(model.open_card().is_none());
     model.set_pending(vec![]);
     assert_eq!(model.open_card().map(|r| r.id.as_str()), Some("ak:1"));
+}
+
+#[test]
+fn an_asks_link_opens_a_page_a_file_or_a_review_and_nothing_else() {
+    use threadbear_core::reducer::AskLink;
+    let link = |url: &str| AskLink { title: "Look".into(), url: url.into() };
+    assert_eq!(link("https://example.com/a").target("/Users/m").as_deref(), Some("https://example.com/a"));
+    assert_eq!(link("~/dev/notes.md").target("/Users/m").as_deref(), Some("/Users/m/dev/notes.md"));
+    assert_eq!(link("/tmp/shot.png").target("").as_deref(), Some("/tmp/shot.png"));
+    assert_eq!(link("review:abc123").target("").as_deref(), Some("review:abc123"));
+    assert_eq!(link("review:").target(""), None);
+    assert_eq!(link("javascript:alert(1)").target(""), None);
+    assert_eq!(link("notes.md").target("/Users/m"), None);
+}
+
+/// The turn that answered another lab's findings carries the ledger on its
+/// `turn.completed`, read leniently, and it shows as a quiet row in the
+/// transcript over the reply (Mike moved it off the done card, 12 Nov;
+/// docs/protocol.md, "Review by another lab").
+#[test]
+fn a_reviewed_turns_ledger_is_a_row_over_the_reply() {
+    let review = json!({
+        "reviewer": "Codex (codex-1)", "independent": true, "rounds": 2, "threadId": "rev-1", "passed": false,
+        "findings": [
+            {"id": 1, "round": 1, "severity": "high", "claim": "Drops the session on refresh.", "where": "auth.ts:40", "outcome": "fixed"},
+            {"id": 2, "round": 2, "claim": "Keeps the old token after sign-out.", "outcome": "left"},
+            {"id": 3, "claim": ""},
+            "not a finding"
+        ]
+    });
+    let mut fields = json!({"turnId": "t1", "outcome": "completed", "durationMs": 1000, "needs": "nothing"});
+    fields["review"] = review;
+    let model = from_events(vec![
+        event(1, "turn.started", json!({"turnId": "t1"})),
+        call(2, "c1"),
+        text(3, "m1", "Fixed the refresh."),
+        event_turn(4, "turn.completed", fields, Some("t1")),
+    ]);
+    assert_eq!(ids(&model), ["g:t:c1", "lr:t1", "a:m1", "f:t1", "ak:4"]);
+    let Some(RowContent::LabReview(review)) = model.row("lr:t1").map(|r| &r.content) else { panic!("no review row") };
+    assert_eq!(review.findings.len(), 2, "a finding with no claim, or no object, isn't one");
+    assert_eq!(review.findings[0].severity, "high");
+    assert_eq!(review.findings[1].severity, "medium", "medium by default");
+    assert_eq!(review.heading(), "Reviewed by Codex, 2 rounds: 1 open");
+    let fresh = LabReview { independent: false, rounds: 1, passed: true, findings: vec![], ..review.clone() };
+    assert_eq!(fresh.heading(), "Reviewed by a fresh Codex session: nothing found");
+    assert_eq!(LabReview { unchecked: true, ..review.clone() }.heading(), "Reviewed by Codex, 2 rounds: last fixes not re-reviewed");
+    // With no work folded it still goes over the reply; a turn with no
+    // review has no row.
+    let mut asks = json!({"turnId": "t2", "outcome": "completed", "durationMs": 1000, "needs": "you", "asks": [{"action": "Sign out?"}]});
+    asks["review"] = json!({"reviewer": "Codex", "findings": []});
+    let model = from_events(vec![event_turn(1, "assistant.text", json!({"itemId": "m1", "text": "Over to you."}), Some("t2")), event_turn(2, "turn.completed", asks, Some("t2"))]);
+    assert_eq!(ids(&model)[..2], ["lr:t2", "a:m1"]);
+    assert_eq!(model.row("lr:t2").and_then(|r| match &r.content { RowContent::LabReview(r) => Some(r.heading()), _ => None }).as_deref(), Some("Reviewed by Codex: all answered"));
+    assert!(from_events(vec![needs_nothing(1, "t3", json!([]))]).row("lr:t3").is_none());
+    // A runner's turn carries on the stretch before it: the line goes over
+    // the reviewed turn's own reply, not the earlier one's.
+    let mut reviewed = json!({"turnId": "t2", "outcome": "completed", "durationMs": 1000, "needs": "nothing"});
+    reviewed["review"] = json!({"reviewer": "Claude (claude-2)", "independent": false, "findings": [{"id": 1, "claim": "x", "outcome": "left"}]});
+    let carried = from_events(vec![
+        event(1, "user.message", json!({"text": "Tidy the imports", "images": []})),
+        text(2, "m1", "Sorted them."),
+        needs_nothing(3, "t1", json!([])),
+        event_turn(4, "turn.started", json!({"turnId": "t2"}), Some("t2")),
+        event_turn(5, "assistant.text", json!({"itemId": "m2", "text": "Fixed the refresh."}), Some("t2")),
+        event_turn(6, "turn.completed", reviewed, Some("t2")),
+    ]);
+    let ids = ids(&carried);
+    assert_eq!(ids.iter().position(|i| i == "lr:t2").map(|p| p + 1), ids.iter().position(|i| i == "a:m2"), "{ids:?}");
 }

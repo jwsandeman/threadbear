@@ -110,7 +110,8 @@ pub fn clock<Tz: TimeZone>(d: &DateTime<Tz>) -> String {
     }
 }
 
-fn day_name<Tz: TimeZone>(d: &DateTime<Tz>, now: &DateTime<Tz>) -> String {
+/// `AccountUsageText.dayName`: "tomorrow", "yesterday", else "Thu".
+pub fn day_name<Tz: TimeZone>(d: &DateTime<Tz>, now: &DateTime<Tz>) -> String {
     if d.date_naive() == (now.clone() + Duration::days(1)).date_naive() {
         return "tomorrow".to_owned();
     }
@@ -225,8 +226,10 @@ pub fn account_label(id: &str, accounts: &[Account]) -> String {
 
 // ---- Picking ----
 
-/// `AccountUsageText.pickFloor` and `chipWarning`.
-pub const PICK_FLOOR: f64 = 10.;
+/// The runner's `MIN_ROOM_PERCENT` (1%, so a login is used until it's
+/// all but out rather than leaving 10% of each week unspent) and the Swift
+/// app's `chipWarning`. The frozen Swift app's `pickFloor` stays at 10.
+pub const PICK_FLOOR: f64 = 1.;
 pub const CHIP_WARNING: f64 = 25.;
 
 fn is_eligible(account: &Account) -> bool {
@@ -401,18 +404,31 @@ pub fn pool_chip_badge(pool: &Pool, accounts: &[Account]) -> Option<ChipBadge> {
 /// go: the login with the most room (known, and at least the floor), on the
 /// same provider first, never one with a note or at its limit.
 pub fn switch_target<'a>(accounts: &'a [Account], from: &str) -> Option<&'a Account> {
+    switch_targets(accounts, from).into_iter().next()
+}
+
+/// Every login `switch_target` could pick, best first: the same provider's,
+/// then the rest, each by most room. The limit box's Continue now on menu
+/// (Mike, 12 Nov: a drop-down of the logins to carry on with).
+pub fn switch_targets<'a>(accounts: &'a [Account], from: &str) -> Vec<&'a Account> {
     let room_of = |a: &Account| usage_of(a).as_ref().and_then(room);
-    let others: Vec<&'a Account> = accounts.iter().filter(|a| a.id != from && is_eligible(a) && room_of(a).is_some()).collect();
-    let best = |list: Vec<&'a Account>| -> Option<&'a Account> {
-        let top = list.iter().filter_map(|a| room_of(a)).fold(None, |m: Option<f64>, r| Some(m.map_or(r, |m| m.max(r))))?;
-        list.into_iter().find(|a| room_of(a) == Some(top))
-    };
-    if let Some(provider) = accounts.iter().find(|a| a.id == from).map(|a| a.provider_id()) {
-        if let Some(same) = best(others.iter().copied().filter(|a| a.provider_id() == provider).collect()) {
-            return Some(same);
-        }
+    let provider = accounts.iter().find(|a| a.id == from).map(|a| a.provider_id());
+    let mut list: Vec<&'a Account> = accounts.iter().filter(|a| a.id != from && is_eligible(a) && room_of(a).is_some()).collect();
+    // Stable, so a tie keeps the logins' own order.
+    list.sort_by(|a, b| {
+        let other = |x: &Account| Some(x.provider_id()) != provider;
+        other(a).cmp(&other(b)).then(room_of(b).partial_cmp(&room_of(a)).unwrap_or(std::cmp::Ordering::Equal))
+    });
+    list
+}
+
+/// A row of that menu: "mike (78% left)".
+pub fn continue_title(target: &Account, accounts: &[Account]) -> String {
+    let mut title = short_account_name(&target.id, accounts);
+    if let Some(left) = usage_of(target).as_ref().and_then(room) {
+        title.push_str(&format!(" ({} left)", percent(left)));
     }
-    best(others)
+    title
 }
 
 /// `AccountUsageText.switchTitle`: "Switch to mike (78% left)".
@@ -812,7 +828,7 @@ mod tests {
         RunnerLogins::from_hello(&json!({
             "accounts": [
                 { "id": "claude-main", "provider": "claude", "email": "mike@gmail.com", "usage": usage(52.0, 67.0) },
-                { "id": "claude-2", "provider": "claude", "email": "mike@convex.dev", "note": "Convex work only", "usage": usage(90.0, 90.0) },
+                { "id": "claude-2", "provider": "claude", "email": "mike@work.example", "note": "Convex work only", "usage": usage(90.0, 90.0) },
                 { "id": "claude-3", "provider": "claude", "email": "mike@bearworks.io", "usage": usage(20.0, 88.0) },
                 { "id": "codex-main", "provider": "codex", "title": "Codex · sam@example.com" }
             ],
@@ -831,6 +847,15 @@ mod tests {
         assert_eq!(switch_title(target, &l.accounts), "Switch to mike@gmail.com (52% left)");
         // The noted one is never offered, and codex has no room known.
         assert_eq!(switch_target(&l.accounts, "claude-main").map(|a| a.id.as_str()), Some("claude-3"));
+        assert_eq!(continue_title(target, &l.accounts), "mike@gmail.com (52% left)");
+        // The Continue now on menu: the same choice first, then the rest.
+        let ids: Vec<&str> = switch_targets(&l.accounts, "claude-3").into_iter().map(|a| a.id.as_str()).collect();
+        assert_eq!(ids, vec!["claude-main"]);
+        // Codex with more room still comes after the same provider's.
+        let mut l = l;
+        l.accounts.iter_mut().find(|a| a.id == "codex-main").unwrap().usage = Some(usage(90., 95.));
+        let ids: Vec<&str> = switch_targets(&l.accounts, "claude-3").into_iter().map(|a| a.id.as_str()).collect();
+        assert_eq!(ids, vec!["claude-main", "codex-main"]);
     }
 
     #[test]
@@ -1050,7 +1075,7 @@ mod tests {
         assert_eq!(account_label("claude-main", &l.accounts), "gmail");
         assert_eq!(account_label("claude-3", &l.accounts), "bearworks");
         assert_eq!(account_label("codex-main", &l.accounts), "Codex");
-        assert_eq!(login_name("claude-2", &l.accounts), "convex");
+        assert_eq!(login_name("claude-2", &l.accounts), "work");
     }
 
     #[test]

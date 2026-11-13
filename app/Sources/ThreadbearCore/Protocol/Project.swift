@@ -103,13 +103,17 @@ public struct Project: Sendable, Hashable, Decodable, Identifiable {
     /// board as the runner last read it (docs/protocol.md, "Project tasks").
     public var notion: String?
     public var tasks: ProjectTasks?
+    /// The project it's a part of (docs/protocol.md, Projects, "Parts"),
+    /// nil for a project of its own and from a runner before parts.
+    public var parentId: String?
 
     public init(
         id: String, title: String, folders: [String] = [], goals: String = "", state: String = "", notes: String = "",
         links: [ProjectLink] = [], createdBy: ProjectAuthor = .librarian, createdByThread: String? = nil, createdAt: Date = Date(), updatedAt: Date = Date(),
         stateUpdatedAt: Date? = nil, archived: Bool = false, icon: ProjectIcon? = nil, threadCount: Int = 0, lastActivityAt: Date? = nil,
-        notion: String? = nil, tasks: ProjectTasks? = nil
+        notion: String? = nil, tasks: ProjectTasks? = nil, parentId: String? = nil
     ) {
+        self.parentId = parentId
         self.id = id
         self.title = title
         self.folders = folders
@@ -152,11 +156,12 @@ public struct Project: Sendable, Hashable, Decodable, Identifiable {
         lastActivityAt = date(.lastActivityAt)
         notion = string(.notion).flatMap { $0.isEmpty ? nil : $0 }
         tasks = (try? c.decodeIfPresent(ProjectTasks.self, forKey: .tasks)).flatMap { $0 }
+        parentId = string(.parentId).flatMap { $0.isEmpty ? nil : $0 }
     }
 
     enum CodingKeys: String, CodingKey {
         case id, title, folders, goals, state, notes, links, createdBy, createdByThread, createdAt, updatedAt, stateUpdatedAt
-        case archived, icon, threadCount, lastActivityAt, notion, tasks
+        case archived, icon, threadCount, lastActivityAt, notion, tasks, parentId
     }
 }
 

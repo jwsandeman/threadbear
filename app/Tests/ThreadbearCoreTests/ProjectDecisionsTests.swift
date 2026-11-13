@@ -42,16 +42,12 @@ final class ProjectDecisionsTests: XCTestCase {
         XCTAssertEqual(ProjectDecisions.heading(decisions: 2, threads: 2), "2 decisions")
     }
 
-    func testTheRecapLineIsWhatTheThreadIsForElseItsHeadline() {
+    func testTheStatusLineIsTheThreadsHeadline() {
         var thread = asking("t", asks: one)
         thread.preview = "Batching is in (#67).\nMore after"
-        XCTAssertEqual(ProjectDecisions.recapLine(thread), "Batching is in (#67).")
-        thread.recap = "Speeds up the landing queue.\n- Batching is in"
-        XCTAssertEqual(ProjectDecisions.recapLine(thread), "Speeds up the landing queue.")
-        thread.recap = "- Only bullets, from before purposes"
-        XCTAssertEqual(ProjectDecisions.recapLine(thread), "Batching is in (#67).")
+        XCTAssertEqual(ProjectDecisions.statusLine(thread), "Batching is in (#67).")
         thread.preview = ""
-        XCTAssertNil(ProjectDecisions.recapLine(thread))
+        XCTAssertNil(ProjectDecisions.statusLine(thread))
     }
 
     func testSendingLastsUntilTheThreadTakesTheAnswer() {

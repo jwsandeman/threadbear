@@ -1,7 +1,7 @@
 #!/bin/bash
 # The nightly parity run, from Mike's main Mac: copies main to Tinker Desk,
 # runs scripts/parity/run.sh there in its desktop session (the simulator and
-# the debug Mac app need one), and brings the pictures back to
+# the GPUI app's window need one), and brings the pictures back to
 # ~/Library/Caches/Threadbear/parity/<time>/ (index.html shows them side by
 # side). The last 7 runs are kept.
 #
@@ -16,7 +16,8 @@
 set -uo pipefail
 # The Mac to run it on: THREADBEAR_PARITY_HOST, else the first check host in
 # runner.json (checkHosts, as check.sh reads it). It needs Xcode, Chrome and
-# Desk Runner (~/.local/bin/desk) for the simulator and the debug app.
+# Desk Runner (~/.local/bin/desk) for the simulator and the GPUI app, and
+# Rust (remote.sh's, in ~/.cache/threadbear-check/gpui) to build it.
 RUNNER_JSON="${THREADBEAR_HOME:-$HOME/Library/Application Support/Threadbear}/runner.json"
 HOST=${THREADBEAR_PARITY_HOST:-$(/usr/bin/python3 -c 'import json,sys
 try:

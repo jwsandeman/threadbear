@@ -3,7 +3,6 @@
 // guess of the librarian's is undone where it's seen (`ProjectWhyButton`).
 use crate::highlights::{icon, Palette, SidePane};
 use crate::{call, style};
-use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{h_flex, v_flex, ActiveTheme as _};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
@@ -13,6 +12,7 @@ use serde_json::{json, Value};
 use std::path::PathBuf;
 use threadbear_core::highlights::{can_keep, project_why, ProjectInfo, ProjectRow};
 use threadbear_core::inbox::{Project, ThreadSummary};
+use crate::tips::Tip as _;
 
 /// The project's icon, as `ProjectIconView` draws it: a picture, else a
 /// symbol, else its letter on a tile.
@@ -61,7 +61,7 @@ pub(crate) fn why_button(row: &ProjectRow, p: Palette, cx: &mut Context<SidePane
         .justify_center()
         .cursor_pointer()
         .child(icon("info.circle", 11., p.secondary))
-        .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
+        .tip(tip.clone())
         .on_click(cx.listener(move |this, ev: &ClickEvent, _, cx| {
             let position = ev.position();
             this.project_why = match &this.project_why {
@@ -90,8 +90,19 @@ impl SidePane {
         let (id, t) = (project_id.clone(), thread.id.clone());
         buttons = buttons.child(self.why_action("Take out", format!("Take it out of {title}; the librarian won't put it back"), p, cx, move |this, cx| this.set_project_membership(t.clone(), vec![], vec![id.clone()], cx)));
         buttons = buttons.child(div().flex_1());
-        // Project pages are a later slice (`panel.projectpage`); it's greyed until then.
-        buttons = buttons.child(div().text_size(px(style::size::DETAIL)).text_color(p.faint).child("Open project"));
+        // A link to the project's page (project_page.rs), in the main panel.
+        let (open, link) = (project_id.clone(), style::link_text(cx));
+        buttons = buttons.child(
+            crate::highlights::tipped(div().id("hl-why-open").cursor_pointer().text_size(px(style::size::DETAIL)).text_color(link).hover(|s| s.underline()), format!("Open {title}'s page"))
+                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                    this.project_why = None;
+                    if let Some(app) = this.app.upgrade() {
+                        app.update(cx, |app, cx| app.open_project_page(&open, cx));
+                    }
+                    cx.notify();
+                }))
+                .child("Open project"),
+        );
         let card = v_flex()
             .w(px(280.))
             .p(px(14.))

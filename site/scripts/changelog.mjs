@@ -2,8 +2,9 @@
 // Threadbear rather than people reading its commits. Mike picked this layout on 10 Nov 2026
 // ("release days") after seeing Wayne Sutton's bearfooding changelog
 // (tame-weasel-262.convex.site): a thread runs down the page with a sewn button at each
-// release, the release's biggest changes get a card with a before/after or a short clip, and
-// the rest are plain Added / Changed / Fixed lines.
+// release, the release's main changes (4 to 8) get a card with a short clip or a picture, and
+// the rest are plain Added / Changed / Fixed lines. Clips, not before/after sliders: Mike found
+// a video shows a change better (11 Nov).
 //
 // Each release is a file in site/changelog/<YYYY-MM-DD>.json, written by the daily changelog
 // thread (docs/changelog.md has how). Its pictures and clips aren't in the repo, so every fork
@@ -16,9 +17,8 @@
 //     "release": "2026-11-09",
 //     "highlights": [
 //       { "kind": "added" | "changed" | "fixed", "title": "...", "text": "...", "credit"?: "Wayne Sutton",
-//         "media"?: { "type": "compare", "before": "x-before.webp", "after": "x-after.webp", "width": 1240, "height": 820, "alt": "..." }
-//                 | { "type": "image", "src": "x.webp", "width", "height", "alt" }
-//                 | { "type": "clip", "src": "x.mp4", "poster": "x.webp", "width", "height", "alt" } }
+//         "media"?: { "type": "clip", "src": "x.mp4", "poster": "x.webp", "width", "height", "alt" }
+//                 | { "type": "image", "src": "x.webp", "width", "height", "alt" } }
 //     ],
 //     "added": ["..."], "changed": ["..."], "fixed": ["..."]
 //   }
@@ -55,9 +55,11 @@ export function readReleases(dir) {
       if (!KINDS.includes(h.kind)) throw new Error(`${at}: kind should be added, changed or fixed`);
       if (!h.title?.trim() || !h.text?.trim()) throw new Error(`${at}: needs a title and a text`);
       const m = h.media;
-      if (!m) return;
-      const names = m.type === "compare" ? [m.before, m.after] : m.type === "image" ? [m.src] : m.type === "clip" ? [m.src, m.poster] : null;
-      if (!names) throw new Error(`${at}: media type should be compare, image or clip`);
+      // A card is for something you can see (Mike, 11 Nov: "More videos and screenshots please",
+      // about a card that had none). If it can't be filmed, it's a plain line instead.
+      if (!m) throw new Error(`${at}: a highlight needs a clip or a picture; make it a plain line if it can't have one`);
+      const names = m.type === "image" ? [m.src] : m.type === "clip" ? [m.src, m.poster] : null;
+      if (!names) throw new Error(`${at}: media type should be clip or image`);
       if (names.some((n) => !MEDIA_NAME.test(n ?? ""))) throw new Error(`${at}: media names are lower-case-with-dashes files (.webp, .png, .jpg or .mp4)`);
       if (!(m.width > 0 && m.height > 0)) throw new Error(`${at}: media needs its width and height`);
       if (!m.alt?.trim()) throw new Error(`${at}: media needs alt text saying what it shows`);
@@ -99,14 +101,7 @@ function media(release, m) {
     // Muted and playsinline so phones play it in place; site.js only plays one that's on screen.
     return `<video class="cl-shot" src="${src(m.src)}" poster="${src(m.poster)}" ${size} muted loop playsinline preload="none" aria-label="${alt}"></video>`;
   }
-  // Before and after: the after picture, with the before one over it cut off at the slider
-  // (site.js moves the cut; without it, it stays halfway, so both still show).
-  return `<div class="cl-compare" role="group" aria-label="${alt}">
-              <img class="cl-after" src="${src(m.after)}" alt="After: ${alt}" ${size} loading="lazy" decoding="async">
-              <img class="cl-before" src="${src(m.before)}" alt="Before: ${alt}" ${size} loading="lazy" decoding="async">
-              <span class="cl-tag cl-tag-before">Before</span><span class="cl-tag cl-tag-after">After</span>
-              <input class="cl-slider" type="range" min="0" max="100" value="50" aria-label="Slide between before and after">
-            </div>`;
+  throw new Error(`Unknown media type ${m.type}`);
 }
 
 function highlight(release, h) {

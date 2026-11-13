@@ -104,6 +104,26 @@ impl TurnTokens {
         })
     }
 
+    /// The footer's tip (`TurnTokens.tip`): "1.7k tokens out, 381k in (337k
+    /// cache reads, 44k cache writes, 16 uncached). $0.45 at API prices, not
+    /// what a subscription charges."
+    pub fn tip(self, cost_usd: Option<f64>) -> String {
+        let parts: Vec<String> = [(self.cache_read, "cache reads"), (self.cache_write, "cache writes"), (self.input, "uncached")]
+            .into_iter()
+            .filter(|(n, _)| *n > 0)
+            .map(|(n, what)| format!("{} {what}", short_tokens(n)))
+            .collect();
+        let mut text = format!("{} tokens out, {} in", short_tokens(self.output), short_tokens(self.read()));
+        if parts.len() > 1 {
+            text += &format!(" ({})", parts.join(", "));
+        }
+        text.push('.');
+        if let Some(cost) = cost_text(cost_usd) {
+            text += &format!(" {cost} at API prices, not what a subscription charges.");
+        }
+        text
+    }
+
     pub fn add(self, other: TurnTokens) -> TurnTokens {
         TurnTokens {
             input: self.input.saturating_add(other.input),
@@ -111,6 +131,24 @@ impl TurnTokens {
             cache_read: self.cache_read.saturating_add(other.cache_read),
             cache_write: self.cache_write.saturating_add(other.cache_write),
         }
+    }
+}
+
+/// `UsageStatsMath.tokens`: 950, "1.7k", "381k", "4.2M".
+pub fn short_tokens(n: i64) -> String {
+    let value = n as f64;
+    let short = |v: f64, suffix: &str| {
+        let text = if v < 10. { format!("{v:.1}") } else { format!("{}", v.round() as i64) };
+        format!("{}{suffix}", text.strip_suffix(".0").unwrap_or(&text))
+    };
+    if value >= 1e9 {
+        short(value / 1e9, "B")
+    } else if value >= 1e6 {
+        short(value / 1e6, "M")
+    } else if value >= 1e3 {
+        short(value / 1e3, "k")
+    } else {
+        n.to_string()
     }
 }
 
@@ -163,5 +201,18 @@ fn thousands(n: i64) -> String {
         format!("-{body}")
     } else {
         body
+    }
+}
+
+#[cfg(test)]
+mod tip_tests {
+    use super::*;
+
+    #[test]
+    fn the_footer_tip_breaks_the_tokens_out_with_the_dollars() {
+        let t = TurnTokens { input: 16, output: 1_700, cache_read: 337_000, cache_write: 44_000 };
+        assert_eq!(t.tip(Some(0.45)), "1.7k tokens out, 381k in (337k cache reads, 44k cache writes, 16 uncached). $0.45 at API prices, not what a subscription charges.");
+        let plain = TurnTokens { input: 900, output: 40, ..TurnTokens::default() };
+        assert_eq!(plain.tip(None), "40 tokens out, 900 in.", "one kind of input isn't broken out");
     }
 }

@@ -45,7 +45,11 @@ public enum Turns {
                 out += shownWhole(body)
                 continue
             }
-            let reply = replies(body)
+            // A plan stays out of the fold wherever it is in the turn: it's
+            // what Go ahead approves, and a sent-back one is what he asked
+            // to change.
+            let replyOnly = replies(body)
+            let reply = replyOnly.isEmpty ? [] : Array(Set(replyOnly).union(body.indices.filter { body[$0].plan }))
             if reply.isEmpty {
                 out += shownWhole(body)
                 continue

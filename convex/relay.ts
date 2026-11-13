@@ -13,7 +13,7 @@ import { ConvexError, v } from 'convex/values';
 import { internalMutation, internalQuery, mutation, query, type MutationCtx, type QueryCtx } from './_generated/server';
 import type { Id } from './_generated/dataModel';
 import { checkRunnerId, forbidden, pageLimit, runnerAuth, sha256, withoutCredentials } from './lib';
-import { docBytes } from './runnerAccess';
+import { docBytes, isThreadId } from './runnerAccess';
 import { messageButton } from './schema';
 import { deleteIfUnused, MAX_COMMAND_FILES, MAX_RUNNER_UPLOAD_BYTES, storageInUse } from './sync';
 
@@ -31,6 +31,8 @@ const relayRow = v.object({
   origin: v.optional(v.string()),
   toolKind: v.optional(v.string()),
   summary: v.optional(v.boolean()),
+  plan: v.optional(v.boolean()),
+  planDecision: v.optional(v.union(v.literal('go'), v.literal('revise'))),
   turn: v.optional(v.string()),
   wokeBy: v.optional(v.array(v.object({ kind: v.string(), description: v.string() }))),
   // The reply buttons its text links (API 59), as the phone gets them; the
@@ -40,7 +42,7 @@ const relayRow = v.object({
 });
 
 type Button = { id: string; title: string; kind: 'start' | 'send'; target?: string; pressedThreadId?: string; failed?: string };
-type Row = { seq: number; role: 'user' | 'assistant' | 'tool'; text: string; origin?: string; toolKind?: string; summary?: boolean; turn?: string; wokeBy?: { kind: string; description: string }[]; buttons?: Button[]; at: string };
+type Row = { seq: number; role: 'user' | 'assistant' | 'tool'; text: string; origin?: string; toolKind?: string; summary?: boolean; plan?: boolean; planDecision?: 'go' | 'revise'; turn?: string; wokeBy?: { kind: string; description: string }[]; buttons?: Button[]; at: string };
 function toRow(m: Row): Row {
   return {
     seq: m.seq,
@@ -49,6 +51,10 @@ function toRow(m: Row): Row {
     ...(m.origin ? { origin: m.origin } : {}),
     ...(m.toolKind ? { toolKind: m.toolKind } : {}),
     ...(m.summary ? { summary: true } : {}),
+    // A Plan first plan (API 72's row), which another Mac draws as its plan card.
+    ...(m.plan ? { plan: true } : {}),
+    // What became of it, once that runner knows (API 76).
+    ...(m.plan && m.planDecision ? { planDecision: m.planDecision } : {}),
     ...(m.turn ? { turn: m.turn } : {}),
     ...(m.wokeBy ? { wokeBy: m.wokeBy } : {}),
     ...(m.buttons?.length ? { buttons: m.buttons } : {}),
@@ -416,8 +422,7 @@ const REQUESTS_KEPT_MAX = 50;
 const REQUEST_KEEP_MS = 7 * 24 * 60 * 60 * 1000;
 const REQUEST_ID = /^[A-Za-z0-9-]{8,64}$/;
 // The asking thread's id goes into the first line the main Mac's runner
-// writes on the new thread, so nothing but an id's characters.
-const THREAD_ID = /^[A-Za-z0-9_-]{1,64}$/;
+// writes on the new thread, so nothing but an id's characters (isThreadId).
 const STATES = ['pending', 'claimed', 'allowed', 'denied', 'closed'] as const;
 const stateV = v.union(...STATES.map((x) => v.literal(x)));
 
@@ -467,7 +472,7 @@ export const fileRequest = mutation({
       if (request[f] !== undefined && docBytes(request[f]) > REQUEST_FIELD_MAX) throw bad(`${f} is too long`);
     }
     if (!target.trim() || docBytes(target) > 128) throw bad('name the runner to start it on');
-    if (!THREAD_ID.test(threadId)) throw bad("that isn't a thread id");
+    if (!isThreadId(threadId)) throw bad("that isn't a thread id");
     // Asked from one of its own threads, so the card and its answer are its own.
     const t = await ctx.db.query('threads').withIndex('by_threadId', (q) => q.eq('threadId', threadId)).unique();
     if (!t || t.runnerId !== caller.runnerId) throw forbidden("ask for that: the thread isn't this runner's");

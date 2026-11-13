@@ -4,7 +4,7 @@
 // SecretRowCell, PlanCardCell and ReviewRowCell in Cells.swift).
 use super::metrics::*;
 use super::work::{self, icon};
-use super::{row_wrap, tip};
+use super::row_wrap;
 use crate::style::{self, size};
 use crate::thread::ThreadPane;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
@@ -19,6 +19,7 @@ use std::collections::HashMap;
 use threadbear_core::reducer::{
     ApprovalDecision, ApprovalItem, ApprovalOption, ApprovalRequest, ApprovalText, DesignReview, DiffBuilder, PathDisplay, PlanCard, PlanCardState, PlanCardText, PlanSummary, Question, QuestionItem, QuestionRequest, Row, SecretItem, StartRequest, ToolCall, ToolKind, ToolPresentation,
 };
+use crate::tips::Tip as _;
 
 /// `PillButton` in the shape all the cards' buttons share: a capsule, the
 /// prominent one filled with the accent colour, the others a hairline outline.
@@ -259,7 +260,7 @@ impl ThreadPane {
             let (id, decision_str) = (id.clone(), decision.to_owned());
             let start_allow = start && option == ApprovalOption::Allow;
             let start_card = start;
-            let mut button = pill(("approve", ix * 10 + n), title, prominent, !busy, if !start && option == ApprovalOption::Allow { Some("⏎") } else { None }, cx).tooltip(tip(tip_text));
+            let mut button = pill(("approve", ix * 10 + n), title, prominent, !busy, if !start && option == ApprovalOption::Allow { Some("⏎") } else { None }, cx).tip(tip_text);
             if !busy {
                 button = button.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                     if start_card {
@@ -309,8 +310,8 @@ impl ThreadPane {
             let step = if ticked { 1. } else { 0.45 };
             let (tick_id, cross_id, aid) = (ids[i].clone(), ids[i].clone(), approval_id.clone());
             let aid2 = aid.clone();
-            let mut tick = pill(("tick", ix * 100 + i), "✓", ticked, !busy, None, cx).min_w(px(stacked::TOGGLE_WIDTH)).w(px(stacked::TOGGLE_WIDTH)).h(px(stacked::TOGGLE_HEIGHT)).px(px(0.)).tooltip(tip("Allow this one"));
-            let mut cross = pill(("cross", ix * 100 + i), "✕", !ticked, !busy, None, cx).min_w(px(stacked::TOGGLE_WIDTH)).w(px(stacked::TOGGLE_WIDTH)).h(px(stacked::TOGGLE_HEIGHT)).px(px(0.)).tooltip(tip("Don't allow this one; the agent is told no"));
+            let mut tick = pill(("tick", ix * 100 + i), "✓", ticked, !busy, None, cx).min_w(px(stacked::TOGGLE_WIDTH)).w(px(stacked::TOGGLE_WIDTH)).h(px(stacked::TOGGLE_HEIGHT)).px(px(0.)).tip("Allow this one");
+            let mut cross = pill(("cross", ix * 100 + i), "✕", !ticked, !busy, None, cx).min_w(px(stacked::TOGGLE_WIDTH)).w(px(stacked::TOGGLE_WIDTH)).h(px(stacked::TOGGLE_HEIGHT)).px(px(0.)).tip("Don't allow this one; the agent is told no");
             if !busy {
                 tick = tick.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.set_ticked(&aid, &tick_id, true, cx)));
                 cross = cross.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.set_ticked(&aid2, &cross_id, false, cx)));
@@ -323,12 +324,12 @@ impl ThreadPane {
         let allow_words = format!("Allow {count}");
         let allow_tip = if count == ids.len() { "Let it do all of these (Return)" } else { "Let it do the ticked ones; the rest are refused (Return)" };
         let id_for_allow = approval_id.clone();
-        let mut allow = pill(("stack-allow", ix), &allow_words, true, !busy && count > 0, Some("⏎"), cx).tooltip(tip(allow_tip));
+        let mut allow = pill(("stack-allow", ix), &allow_words, true, !busy && count > 0, Some("⏎"), cx).tip(allow_tip);
         if !busy && count > 0 {
             allow = allow.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.respond_queued(&id_for_allow, "allow", cx)));
         }
         let id_for_deny = approval_id.clone();
-        let mut deny = pill(("stack-deny", ix), "Deny all", false, !busy, None, cx).tooltip(tip("Don't let it do any of these; the agent is told no"));
+        let mut deny = pill(("stack-deny", ix), "Deny all", false, !busy, None, cx).tip("Don't let it do any of these; the agent is told no");
         if !busy {
             deny = deny.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.respond_queued(&id_for_deny, "deny", cx)));
         }
@@ -376,6 +377,7 @@ impl ThreadPane {
             return;
         }
         self.rows.answering.insert(approval_id.to_owned());
+        crate::activity::answered(&self.summary.id, decision);
         cx.notify();
         let mut params = json!({ "threadId": self.summary.id, "approvalId": approval_id, "decision": decision });
         if let Some((answers, message)) = answers {
@@ -432,6 +434,7 @@ impl ThreadPane {
         if !self.rows.answering.insert(approval_id.to_owned()) {
             return;
         }
+        crate::activity::answered(&self.summary.id, if allow { "allow" } else { "deny" });
         cx.notify();
         let mut params = json!({ "threadId": self.summary.id, "approvalId": approval_id, "allow": allow });
         if allow {
@@ -487,7 +490,7 @@ impl ThreadPane {
                     .id(("answered", ix))
                     .h(px(ANSWER_HEIGHT))
                     .items_center()
-                    .when_some(message, |d, m| d.tooltip(tip(&m)))
+                    .when_some(message, |d, m| d.tip(&m))
                     .child(div().flex_none().w(px(TITLE_INDENT)).child(icon(symbol, 14., tint)))
                     .child(div().min_w_0().truncate().text_size(px(size::WORK)).text_color(color).child(text)),
             );
@@ -497,7 +500,7 @@ impl ThreadPane {
             let answers = question_answers(&item.request, &chosen, &typed);
             let ready = !busy && !answers.is_empty();
             let (id, request) = (approval_id.clone(), item.request.clone());
-            let mut send = pill(("send-answer", ix), "Send answer", true, ready, None, cx).min_w(px(110.)).tooltip(tip("Send your answers to the agent"));
+            let mut send = pill(("send-answer", ix), "Send answer", true, ready, None, cx).min_w(px(110.)).tip("Send your answers to the agent");
             if ready {
                 send = send.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.send_question_answer(&id, &request, cx)));
             }
@@ -517,6 +520,9 @@ impl ThreadPane {
             return input.clone();
         }
         let input = cx.new(|cx| InputState::new(window, cx).placeholder("Something else"));
+        // Its words are only here until they're sent: an update's restart
+        // waits for them (unsent.rs).
+        crate::unsent::watch(&input, cx);
         let id = approval_id.to_owned();
         let subscription = cx.subscribe(&input, move |this, input, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
@@ -568,7 +574,7 @@ impl ThreadPane {
             .child(div().text_size(px(size::CARD_TITLE)).line_height(px(20.)).font_weight(FontWeight::SEMIBOLD).text_color(label).child(item.request.label.clone()))
             .when(!item.request.reason.is_empty(), |d| d.child(div().text_size(px(size::DETAIL)).line_height(px(19.)).text_color(quiet).child(item.request.reason.clone())));
         let (id, for_save) = (approval_id.clone(), field.clone());
-        let mut save = pill(("secret-save", ix), "Save securely", true, can_save, None, cx).min_w(px(110.)).tooltip(tip("Save it to a private file for the agent (Return)"));
+        let mut save = pill(("secret-save", ix), "Save securely", true, can_save, None, cx).min_w(px(110.)).tip("Save it to a private file for the agent (Return)");
         if can_save {
             save = save.on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                 let value = for_save.read(cx).value().to_string();
@@ -583,7 +589,7 @@ impl ThreadPane {
         };
         let note_tint = if matches!(state, SecretState::Failed(_)) { failed } else { faint_icon };
         let (id, tooltip_text) = (approval_id.clone(), if matches!(state, SecretState::Failed(_)) { note_text.clone() } else { PROMISE_TIP.to_owned() });
-        let mut decline = div().id(("decline", ix)).role(Role::Button).aria_label(SharedString::from("Decline")).flex_none().ml(px(6.)).text_size(px(size::LABEL)).text_color(quiet).tooltip(tip("Don't give it; the agent is told you declined")).child("Decline");
+        let mut decline = div().id(("decline", ix)).role(Role::Button).aria_label(SharedString::from("Decline")).flex_none().ml(px(6.)).text_size(px(size::LABEL)).text_color(quiet).tip("Don't give it; the agent is told you declined").child("Decline");
         if !busy {
             decline = decline.cursor_pointer().on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.answer_secret(&id, None, window, cx)));
         }
@@ -592,7 +598,7 @@ impl ThreadPane {
             .mt(px(10.))
             .items_start()
             .justify_between()
-            .tooltip(tip(&tooltip_text))
+            .tip(&tooltip_text)
             .child(h_flex().flex_1().min_w_0().items_start().child(div().flex_none().w(px(TITLE_INDENT)).child(icon(note_symbol, 14., note_tint))).child(div().min_w_0().text_size(px(size::SMALL)).line_height(px(16.)).text_color(note_color).child(note_text)))
             .child(decline.test_support());
         let content = v_flex().child(text).child(controls).child(footer);
@@ -609,6 +615,8 @@ impl ThreadPane {
             state.set_masked(true, window, cx);
             state
         });
+        // A secret pasted and not yet saved: an update's restart waits for it.
+        crate::unsent::watch(&input, cx);
         let id = approval_id.to_owned();
         let subscription = cx.subscribe_in(&input, window, move |this, input, event: &InputEvent, window, cx| match event {
             InputEvent::Change => cx.notify(),
@@ -638,6 +646,8 @@ impl ThreadPane {
             field.update(cx, |s, cx| s.set_value("", window, cx));
         }
         self.rows.secret_states.insert(approval_id.to_owned(), SecretState::Sending);
+        // Declined or answered, never what was typed.
+        crate::activity::answered(&self.summary.id, if value.is_some() { "answered" } else { "deny" });
         cx.notify();
         let mut params = json!({ "threadId": self.summary.id, "approvalId": approval_id });
         match value {
@@ -683,7 +693,7 @@ impl ThreadPane {
                     .items_center()
                     .gap(px(4.))
                     .child(div().text_size(px(size::CARD_TITLE)).line_height(px(20.)).font_weight(FontWeight::MEDIUM).text_color(label).child(title))
-                    .child(div().id(("plan-info", ix)).flex_none().tooltip(tip(PLAN_INFO)).child(icon("info.circle", 14., style::faint_icon(cx)))),
+                    .child(div().id(("plan-info", ix)).flex_none().tip(PLAN_INFO).child(icon("info.circle", 14., style::faint_icon(cx)))),
             )
             .child(div().flex_none().text_size(px(size::LABEL)).text_color(secondary).child(status));
         // The plan (its start, until it's opened), or once approved its
@@ -697,32 +707,40 @@ impl ThreadPane {
             body = body.child(super::plan_steps(ix, &plan.entries, cx));
         }
         if let Some(doc) = doc {
-            body = body.child(div().when(!plan.entries.is_empty(), |d| d.mt(px(23.))).text_size(px(size::BODY)).line_height(px(size::BODY_LINE)).child(self.linked_text(&doc, &row.id, cx).selectable(true).style(text_style).code_block_highlighter(super::plain_code_blocks)));
+            body = body.child(div().when(!plan.entries.is_empty(), |d| d.mt(px(23.))).text_size(px(size::BODY)).line_height(px(size::BODY_LINE)).child(self.linked_text(&doc, &row.id, cx).selectable(true).style(text_style).shared_code_block_highlighter(super::plain_code_blocks())));
         }
         content = content.child(body);
         let has_footer = waiting || !plan.entries.is_empty() || clipped;
         if has_footer {
             let busy = waiting && self.rows.answering.contains(&plan.item_id);
             let mut footer = h_flex().mt(px(12.)).items_center().gap(px(8.));
+            // Another Mac's plan can't be approved from here (plans.approve
+            // doesn't go through Convex, docs/parity.md): only Send back,
+            // rather than a Go ahead that always fails.
+            let remote = self.summary.runner_id.is_some();
             if waiting {
-                let (item_id_a, thread_a) = (plan.item_id.clone(), self.summary.id.clone());
-                let mut go = pill(("plan-go", ix), "Go ahead", true, !busy, None, cx).tooltip(tip("Approve the plan and let it start"));
-                if !busy {
-                    go = go.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                        this.rows.answering.insert(item_id_a.clone());
-                        cx.notify();
-                        let (item, params) = (item_id_a.clone(), json!({ "threadId": thread_a, "itemId": item_id_a }));
-                        this.request_then("plans.approve", params, move |this, _, cx| {
-                            this.rows.answering.remove(&item);
+                let go = (!remote).then(|| {
+                    let (item_id_a, thread_a) = (plan.item_id.clone(), self.summary.id.clone());
+                    let mut go = pill(("plan-go", ix), "Go ahead", true, !busy, None, cx).tip("Approve the plan and let it start");
+                    if !busy {
+                        go = go.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            this.rows.answering.insert(item_id_a.clone());
+                            crate::activity::answered(&thread_a, "allow");
                             cx.notify();
-                        }, cx);
-                    }));
-                }
-                let mut back = pill(("plan-back", ix), "Send back…", false, !busy, None, cx).tooltip(tip("Tell it what to change; it plans again"));
+                            let (item, params) = (item_id_a.clone(), json!({ "threadId": thread_a, "itemId": item_id_a }));
+                            this.request_then("plans.approve", params, move |this, _, cx| {
+                                this.rows.answering.remove(&item);
+                                cx.notify();
+                            }, cx);
+                        }));
+                    }
+                    go.test_support()
+                });
+                let mut back = pill(("plan-back", ix), "Send back…", false, !busy, None, cx).tip("Tell it what to change; it plans again");
                 if !busy {
                     back = back.on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.focus_composer(window, cx)));
                 }
-                footer = footer.child(go.test_support()).child(back.test_support()).children(card_spinner(self, busy, cx));
+                footer = footer.children(go).child(back.test_support()).children(card_spinner(self, busy, cx));
             }
             let toggle_title: Option<&str> = if !plan.entries.is_empty() {
                 Some(if expanded { "Hide plan" } else { "Show plan" })
@@ -741,7 +759,7 @@ impl ThreadPane {
                         .cursor_pointer()
                         .text_size(px(size::LABEL))
                         .text_color(secondary)
-                        .tooltip(tip(if expanded { "Show less of it" } else { "Show the whole plan" }))
+                        .tip(if expanded { "Show less of it" } else { "Show the whole plan" })
                         .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.toggle_row(&row_for_toggle, cx)))
                         .child(toggle_title.to_owned())
                         .test_support(),
@@ -767,12 +785,13 @@ impl ThreadPane {
         };
         let detail = format!("{} images · {state}", review.options.len());
         let open_title = if review.is_pending() { format!("Compare {} images", review.options.len()) } else { "Open review".to_owned() };
+        let open_tip = if review.is_pending() { "Open the images side by side to pick and reply" } else { "Open the review to look at the images and what was sent" };
+        let opened = review.clone();
         let content = v_flex()
             .child(h_flex().items_center().gap(px(6.)).child(div().flex_none().w(px(18.)).child(icon("rectangle.on.rectangle", 14., secondary))).child(div().min_w_0().truncate().text_size(px(size::WORK)).line_height(px(22.)).font_weight(FontWeight::SEMIBOLD).text_color(label).child(review.title.clone())))
             .child(div().mt(px(4.)).text_size(px(size::DETAIL)).line_height(px(20.)).text_color(quiet).child(detail))
-            // The window that compares the images isn't ported yet, so this
-            // doesn't pretend it opens one (options window, stage 2).
-            .child(h_flex().mt(px(10.)).child(pill(("open-review", ix), &open_title, false, false, None, cx).min_w(px(140.)).tooltip(tip("Comparing images isn't ported to this app yet; use the Swift app's review window"))));
+            // Its window (review_window.rs).
+            .child(h_flex().mt(px(10.)).child(pill(("open-review", ix), &open_title, false, true, None, cx).min_w(px(140.)).tip(open_tip).on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.open_review(opened.clone(), window, cx))).test_support()));
         row_wrap(row, div().py(px(ROW_TOP)).child(card_frame(content, accent, cx)))
     }
 }

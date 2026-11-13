@@ -4,6 +4,12 @@
 # for each to download from the run's artifacts.
 # Nothing is signed: the Mac app needs right-click Open the first time, and
 # Windows SmartScreen asks once.
+#
+# tb land holds a landing that changes what this checks while its last run on
+# main failed (runner/src/land-gate.ts, docs/thread-worktrees.md): it was red
+# for two days of GPUI landings (10 to 12 Nov) over what only GitHub's Macs,
+# Linux and Windows see, which tb land's quick check on Tinker Desk can't.
+# tb land: hold while red
 name: Desktop app
 
 on:
@@ -33,9 +39,15 @@ on:
 permissions:
   contents: read
 
+# A PR's newer push cancels its run in progress. Main's don't: on 12 Nov main
+# was pushed about every 7 minutes, each run takes about 40, and every run was
+# cancelled by the next, so main went hours with no verdict and tb land's gate
+# held on an old red one. Now main's runs go one at a time; GitHub keeps one
+# waiting per group and a newer push replaces it, so a busy morning batches
+# into the newest commit rather than piling up Mac and Windows minutes.
 concurrency:
   group: desktop-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   build:

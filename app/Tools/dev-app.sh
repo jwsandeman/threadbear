@@ -394,7 +394,18 @@ launch_app() {
   local env_args=() bear_home=""
   [ -f "$I_DIR/browserbear.home" ] && bear_home="$(cat "$I_DIR/browserbear.home")"
   [[ -n "$bear_home" ]] && env_args+=(--env "BROWSERBEAR_HOME=$bear_home")
-  open -g -n ${env_args[@]+"${env_args[@]}"} "$I_BUNDLE" --stdout "$I_DIR/app.stdout" --stderr "$I_DIR/app.stderr" --args "${app_args[@]}"
+  [ -x "$I_BUNDLE/Contents/MacOS/Threadbear" ] && [ -f "$I_BUNDLE/Contents/Info.plist" ] ||
+    die "the bundle at $I_BUNDLE is incomplete (no executable or Info.plist); start again"
+  # Registered with LaunchServices first, and handed to open as the
+  # application (-a) rather than as a path. Run under taskpolicy -b on a
+  # busy Mac (11 Nov), open took the bundle for a plain folder (no
+  # registration for it reached lsd) and asked a new Finder (-n) to show it,
+  # which macOS refuses: "Launchd job spawn failed", POSIX error 162, which
+  # launchctl error reads as a code signing issue. With -a, open can only
+  # launch it as an app or say why it can't.
+  "$LSREGISTER" -f "$I_BUNDLE" >/dev/null 2>&1 || true
+  open -g -n ${env_args[@]+"${env_args[@]}"} -a "$I_BUNDLE" --stdout "$I_DIR/app.stdout" --stderr "$I_DIR/app.stderr" --args "${app_args[@]}" ||
+    die "open couldn't launch $I_BUNDLE (if it says error 162, it took the bundle for a folder; start again)"
   for i in $(seq 1 200); do
     pid="$(bundle_pid "$I_BUNDLE")"
     [ -n "$pid" ] && break

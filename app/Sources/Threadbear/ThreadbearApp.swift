@@ -114,6 +114,14 @@ struct ThreadbearApp: App {
                     Divider()
                     Button("Next Inbox Thread", systemImage: "chevron.down") { app.nextInboxThread() }
                         .shortcut(.nextInboxThread)
+                    // A project's page tabs (the projectDecisions experiment).
+                    Divider()
+                    Button("Show Previous Tab", systemImage: "chevron.backward.square") { app.stepProjectTab(by: -1) }
+                        .shortcut(.previousTab)
+                        .disabled(!app.canStepProjectTab(by: -1))
+                    Button("Show Next Tab", systemImage: "chevron.forward.square") { app.stepProjectTab(by: 1) }
+                        .shortcut(.nextTab)
+                        .disabled(!app.canStepProjectTab(by: 1))
                 }
             }
             // Help has no help book to open: the tour is what there is.
@@ -219,6 +227,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         MainActor.assumeIsolated {
+            Self.current = self
             let app = AppModel.shared
             let arguments = CommandLine.arguments
             // Before any window draws. Automation's --appearance comes later and wins.
@@ -317,6 +326,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             let app = AppModel.shared
             app.draftStore?.save(app, leaving: true)
             AppUpdater.shared.applyAtQuit()
+            Terminals.shared.endAllNow()
         }
     }
 
@@ -346,11 +356,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     /// does from a notification. Opening BrowserBear's pill on an agent's
     /// Chrome tab sends one.
     func application(_ application: NSApplication, open urls: [URL]) {
-        MainActor.assumeIsolated {
-            guard let threadId = urls.lazy.compactMap(ThreadLink.threadId(from:)).last else { return }
-            NSApp.activate()
-            if AppModel.shared.threadsLoaded { show(threadId: threadId) } else { linkedThread = threadId }
-        }
+        MainActor.assumeIsolated { openLinks(urls, activate: true) }
+    }
+
+    /// The app's delegate, for the automation's `open-url`, which hands a
+    /// link over as macOS does.
+    @MainActor static weak var current: AppDelegate?
+
+    /// The last thread link's thread, in front (a scripted run's window
+    /// stays behind, so it isn't brought forward).
+    @MainActor func openLinks(_ urls: [URL], activate: Bool) {
+        guard let threadId = urls.lazy.compactMap(ThreadLink.threadId(from:)).last else { return }
+        if activate { NSApp.activate() }
+        if AppModel.shared.threadsLoaded { show(threadId: threadId) } else { linkedThread = threadId }
     }
 
     @MainActor private func show(threadId: String) {

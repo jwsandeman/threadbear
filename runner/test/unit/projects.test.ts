@@ -7,7 +7,7 @@ import { checkSummary } from '../helpers/protocol-check.ts';
 import { Projects, drainProjectMethods, projectMethods, BRIEF_MAX, NOTES_LONG, type ProjectHost } from '../../src/projects.ts';
 import { projectRouter, type PrimaryLink } from '../../src/handover.ts';
 import type { PocketCardInput, PocketCardSummary } from '../../src/sync.ts';
-import { Librarian, type LibrarianPocket, librarianMethods, saysNoFit, disclaims, mainCheckout, PICK_CHECKS_PER_LOOK, SETTLE_MS, CATCH_UP_MS, CATCH_UP_MIN_CHARS, FIRST_MESSAGE_MS, SWEEP_MS } from '../../src/librarian.ts';
+import { Librarian, type LibrarianPocket, librarianMethods, saysNoFit, disclaims, mainCheckout, PICK_CHECKS_PER_LOOK, SETTLE_MS, CATCH_UP_MS, CATCH_UP_MIN_CHARS, FIRST_MESSAGE_MS, SWEEP_MS, KEYWORDS_SYSTEM } from '../../src/librarian.ts';
 import { buildThreadbearTools } from '../../src/threadbear-mcp.ts';
 import { FakeClock } from '../../src/clock.ts';
 import { nullLogger, type Logger } from '../../src/log.ts';
@@ -38,6 +38,8 @@ function setup(opts: { pocket?: () => LibrarianPocket | undefined; models?: (p: 
   const models = opts.models
     ? {
         generate: async (p: GenerateParams) => {
+          // The keyword sweep's batches (keywords.test.ts), apart from the looks.
+          if (p.system === KEYWORDS_SYSTEM) return { ok: true, value: '{}', model: 'haiku' } as ModelResult<string>;
           if (p.strong) {
             checks.push(p);
             return opts.check ? opts.check(p) : ({ ok: true, value: '{"belongs":true}', model: 'opus' } as ModelResult<string>);
@@ -835,8 +837,94 @@ test('a git worktree counts as its main checkout, never as a folder of its own',
   assert.equal(librarian.status().queue[0].reason, 'catch-up');
 });
 
+test("the librarian never gives a project another project's repo, a folder holding others, or a worktree's subfolder", async () => {
+  let answer: unknown = {};
+  const s = setup({ models: () => reply(answer) });
+  const { h, repo, root, create, finish, librarian, projects } = s;
+  const tb = repo('dev/threadbear');
+  const videos = repo('dev/videos');
+  const interview = repo('dev/videos/interview');
+  const fresh = repo('dev/browserbear');
+  const wtMain = repo('dev/app');
+  const wt = path.join(root, 'dev/app-wt');
+  fs.mkdirSync(path.join(wtMain, '.git/worktrees/wt'), { recursive: true });
+  fs.mkdirSync(path.join(wt, 'ios'), { recursive: true });
+  fs.writeFileSync(path.join(wt, '.git'), `gitdir: ${path.join(wtMain, '.git/worktrees/wt')}\n`);
+  fs.writeFileSync(path.join(wt, 'ios/Package.swift'), '');
+  const threadbear = projects.create({ title: 'Threadbear', folders: [tb], by: 'mike' });
+  projects.create({ title: 'Interview', folders: [interview], by: 'mike' });
+  // A new project on another project's repo alone isn't made: the thread is
+  // that project's (Threadbear Android app, 10 Nov).
+  answer = { projects: [], new: { title: 'Threadbear Android', folders: ['~/dev/threadbear'], goals: 'x', state: 'y' } };
+  const one = create('Build the Android client').thread;
+  await finish(one.id);
+  h.clock.advance(SETTLE_MS);
+  await tick(8);
+  assert.equal(projects.list().length, 2);
+  assert.equal(h.runner.get(one.id).projects, undefined);
+  // One with a free repo is made, keeping only that: not the other
+  // project's repo, nor the folder holding Interview's.
+  answer = { projects: [], new: { title: 'BrowserBear', folders: ['~/dev/browserbear', '~/dev/threadbear', '~/dev/videos'], goals: 'x', state: 'y' } };
+  const two = create('A Chrome extension').thread;
+  await finish(two.id);
+  h.clock.advance(SETTLE_MS);
+  await tick(8);
+  const bb = projects.list().find((p) => p.title === 'BrowserBear')!;
+  assert.deepEqual(bb.folders, [fresh]);
+  // A project with no folders at all (a house job) is still made.
+  answer = { projects: [], new: { title: 'Crypto', folders: [], goals: 'x', state: 'y' } };
+  const three = create('Move the crypto').thread;
+  await finish(three.id);
+  h.clock.advance(SETTLE_MS);
+  await tick(8);
+  assert.ok(projects.list().some((p) => p.title === 'Crypto'));
+  // Nor one whose only folder is in a worktree of another project's repo
+  // (the main checkout's copy is Threadbear's), or reaches its repo by a
+  // symlink or another casing.
+  const tbWt = path.join(root, 'dev/tb-wt');
+  fs.mkdirSync(path.join(tb, '.git/worktrees/tw'), { recursive: true });
+  fs.mkdirSync(path.join(tbWt, 'android'), { recursive: true });
+  fs.writeFileSync(path.join(tbWt, '.git'), `gitdir: ${path.join(tb, '.git/worktrees/tw')}\n`);
+  fs.writeFileSync(path.join(tbWt, 'android/package.json'), '{}');
+  fs.symlinkSync(tb, path.join(root, 'dev/tb-link'));
+  const caseBlind = fs.existsSync(path.join(root, 'DEV/threadbear'));
+  // A worktree whose .git file names its main checkout through a symlink,
+  // and one of a repo no project has, with a folder only on its branch.
+  const viaLink = path.join(root, 'dev/link-wt');
+  fs.mkdirSync(path.join(viaLink, 'web'), { recursive: true });
+  fs.writeFileSync(path.join(viaLink, '.git'), `gitdir: ${path.join(root, 'dev/tb-link/.git/worktrees/tw')}\n`);
+  fs.writeFileSync(path.join(viaLink, 'web/package.json'), '{}');
+  const loose = repo('dev/loose');
+  const looseWt = path.join(root, 'dev/loose-wt');
+  fs.mkdirSync(path.join(loose, '.git/worktrees/lw'), { recursive: true });
+  fs.mkdirSync(path.join(looseWt, 'branch-only'), { recursive: true });
+  fs.writeFileSync(path.join(looseWt, '.git'), `gitdir: ${path.join(loose, '.git/worktrees/lw')}\n`);
+  fs.writeFileSync(path.join(looseWt, 'branch-only/package.json'), '{}');
+  for (const folder of ['~/dev/tb-wt/android', '~/dev/tb-link', '~/dev/link-wt/web', '~/dev/loose-wt/branch-only', ...(caseBlind ? ['~/dev/Threadbear'] : [])]) {
+    answer = { projects: [], new: { title: `Copy ${folder}`, folders: [folder], goals: 'x', state: 'y' } };
+    const t = create('More Threadbear work').thread;
+    await finish(t.id);
+    h.clock.advance(SETTLE_MS);
+    await tick(8);
+    assert.ok(!projects.list().some((p) => p.title === `Copy ${folder}`), `${folder} made a project`);
+  }
+  // addFolders: the same ones are refused (a repo cloned inside a worktree
+  // doesn't hide it), and a free repo is added.
+  const free = repo('dev/sentry-watch');
+  repo('dev/app-wt/vendor/tool');
+  answer = { projects: [bb.id], reasons: { [bb.id]: 'Works on the extension' }, addFolders: { [bb.id]: ['~/dev/threadbear', '~/dev/videos', '~/dev/app-wt/ios', '~/dev/app-wt/vendor/tool', '~/dev/tb-link', '~/dev/sentry-watch'] } };
+  h.runner.send(two.id, 'more');
+  await tick();
+  await finish(two.id, [path.join(fresh, 'x.ts')]);
+  h.clock.advance(CATCH_UP_MS + SETTLE_MS);
+  await tick(8);
+  assert.deepEqual(projects.record(bb.id)?.folders, [fresh, free]);
+  assert.deepEqual(projects.record(threadbear.id)?.folders, [tb]);
+  assert.ok(librarian.status().recent.some((e) => e.text.includes('Added ~/dev/sentry-watch to BrowserBear')));
+});
+
 test('the librarian keeps its line on where the thread is up to as the thread\'s brief', async () => {
-  const s = setup({ models: () => reply({ projects: [], new: null, state: {}, thread: 'Waiting on Mike to pick a layout.', purpose: 'A mockup for the landing page.', why: 'A one-off' }) });
+  const s = setup({ models: () => reply({ projects: [], new: null, state: {}, thread: 'Waiting on Mike to pick a layout.', why: 'A one-off' }) });
   const { h, create, finish, librarian } = s;
   const { thread } = create('Make a mockup');
   await finish(thread.id, []);
@@ -844,7 +932,6 @@ test('the librarian keeps its line on where the thread is up to as the thread\'s
   await tick(6);
   assert.equal(librarian.status().recent[0]?.text, 'Nothing to change: a one-off', 'the brief is not a project change');
   assert.equal(h.runner.highlights(thread.id).brief?.text, 'Waiting on Mike to pick a layout.');
-  assert.equal((h.runner.highlights(thread.id).brief as { purpose?: string }).purpose, 'A mockup for the landing page.', 'what the recap box says it is for');
   assert.ok(h.runner.get(thread.id).highlightsAt);
 });
 
@@ -1477,4 +1564,108 @@ test('a look from the first message alone leaves the Pocket to its agent, and a 
   await tick(8);
   assert.match(s.asked.at(-1)!.prompt, /The Pocket is not available/);
   assert.equal(fake.saved.length, 0);
+});
+
+// ------------------------------------------------------- parts
+
+test('parts: a project can be a part of another, one level only, and taken out again', () => {
+  const { projects } = setup();
+  const tb = projects.create({ title: 'Threadbear', goals: 'The app', by: 'mike' });
+  const gpui = projects.create({ title: 'GPUI port', by: 'mike' });
+  const android = projects.create({ title: 'Android app', parent: tb.id, by: 'mike' });
+  assert.equal(android.parentId, tb.id, 'made as a part');
+  assert.equal(projects.update(gpui.id, { parent: 'threadbear' }).parentId, tb.id, 'by title, any case');
+  assert.throws(() => projects.update(gpui.id, { parent: gpui.id }), /can't be a part of itself/);
+  assert.throws(() => projects.update(tb.id, { parent: gpui.id }), /has parts of its own/);
+  const other = projects.create({ title: 'Other', by: 'mike' });
+  assert.throws(() => projects.update(other.id, { parent: android.id }), /is a part of "Threadbear" already/);
+  assert.throws(() => projects.update(other.id, { parent: 'nope' }), /No project/);
+  assert.equal(projects.update(gpui.id, { parent: '' }).parentId, undefined, 'empty makes it its own project');
+  // Deleting the parent leaves its parts as projects of their own.
+  projects.delete(tb.id);
+  assert.equal(projects.record(android.id)?.parentId, undefined);
+});
+
+test('parts: merging moves a project\'s parts to the one kept, or frees them when that one is a part', () => {
+  const { projects } = setup();
+  const a = projects.create({ title: 'A', by: 'mike' });
+  const b = projects.create({ title: 'B', by: 'mike' });
+  const partOfA = projects.create({ title: 'A1', parent: a.id, by: 'mike' });
+  projects.merge(a.id, b.id);
+  assert.equal(projects.record(partOfA.id)?.parentId, b.id);
+  const c = projects.create({ title: 'C', by: 'mike' });
+  const partOfC = projects.create({ title: 'C1', parent: c.id, by: 'mike' });
+  projects.merge(c.id, partOfA.id);
+  assert.equal(projects.record(partOfC.id)?.parentId, undefined, 'a part has no parts');
+  // A part merged into its own parent goes, and nothing points at it.
+  projects.merge(partOfA.id, b.id);
+  assert.equal(projects.record(b.id)?.parentId, undefined);
+});
+
+test("parts: a thread in a part is told its parent's title and goals; one in the parent hears the parts' names", () => {
+  const { projects, create, h } = setup();
+  const tb = projects.create({ title: 'Threadbear', goals: 'One agent app for everything', state: 'Projects next', notes: 'LONG PARENT NOTES', by: 'mike' });
+  const port = projects.create({ title: 'GPUI port', goals: 'Rust desktop app', state: 'Settings next', parent: tb.id, by: 'mike' });
+  const { thread: inPart } = create('port work');
+  const { thread: inParent } = create('app work');
+  projects.changeMembership(inPart.id, { add: [port.id], by: 'mike' });
+  projects.changeMembership(inParent.id, { add: [tb.id], by: 'mike' });
+  const partBrief = projects.brief(rec(h, inPart.id))!;
+  assert.match(partBrief, /## GPUI port \(p_[0-9a-f]+\), a part of Threadbear \(p_[0-9a-f]+\)/);
+  assert.match(partBrief, /Threadbear's goals: One agent app for everything/);
+  assert.match(partBrief, /\nGoals: Rust desktop app\nState: Settings next/);
+  assert.doesNotMatch(partBrief, /Projects next|LONG PARENT NOTES/, "not the parent's state or notes");
+  const parentBrief = projects.brief(rec(h, inParent.id))!;
+  assert.match(parentBrief, /Parts: GPUI port \(p_[0-9a-f]+\)/);
+  assert.match(projects.joinedLine(projects.record(port.id)!), /a part of "Threadbear"/);
+});
+
+test('parts: the RPC sets and clears parentId, and the agent tools take parent and show parts', async () => {
+  const { h, projects, create } = setup();
+  const m = projectMethods(projects);
+  const { project: tb } = m['projects.create']({ title: 'Threadbear' }) as any;
+  const { project: port } = m['projects.create']({ title: 'GPUI port', parentId: tb.id }) as any;
+  assert.equal(port.parentId, tb.id);
+  assert.equal((m['projects.update']({ projectId: port.id, parentId: null }) as any).project.parentId, undefined);
+  assert.equal((m['projects.update']({ projectId: port.id, parentId: tb.id }) as any).project.parentId, tb.id);
+  assert.equal((m['projects.update']({ projectId: port.id, title: 'GPUI' }) as any).project.parentId, tb.id, 'left out leaves it');
+  const { thread } = create();
+  const tools = buildThreadbearTools(h.runner, thread.id, Date.now, undefined, projects);
+  const call = async (name: string, args: Record<string, unknown>) => {
+    const t = tools.find((x) => x.name === name)!;
+    const r = await t.handler(args as never, {} as never);
+    return { text: r.content.map((c: any) => c.text).join(''), error: Boolean(r.isError) };
+  };
+  const made = await call('create_project', { title: 'Android', parent: 'threadbear', join: false });
+  assert.match(made.text, /Made the project "Android" \(p_[0-9a-f]+\), a part of "Threadbear"\./);
+  const list = (await call('list_projects', {})).text.split('\n');
+  const at = list.findIndex((l) => l.includes('"Threadbear"'));
+  assert.ok(list[at + 1].startsWith('  ') && list.slice(at + 1, at + 3).some((l) => l.includes('"GPUI"')), 'parts under their parent, indented:\n' + list.join('\n'));
+  assert.match((await call('read_project', { project: 'GPUI' })).text, /\nPart of: Threadbear \(p_[0-9a-f]+\)\n/);
+  assert.match((await call('read_project', { project: 'Threadbear' })).text, /\nParts: .*GPUI \(p_[0-9a-f]+\)/);
+  assert.match((await call('update_project', { project: 'GPUI', parent: '' })).text, /^Updated "GPUI"/);
+  assert.equal(projects.record(port.id)?.parentId, undefined);
+  assert.equal((await call('update_project', { project: 'Threadbear', parent: 'Android' })).error, true, 'a part has no parts, said as an error');
+});
+
+test('parts: a projects.json with a cycle or three levels loads with nothing hidden', () => {
+  const home = tmpDir();
+  const at = { createdAt: '2026-11-01T00:00:00.000Z', updatedAt: '2026-11-01T00:00:00.000Z', createdBy: 'mike' };
+  fs.writeFileSync(path.join(home, 'projects.json'), JSON.stringify({ projects: [
+    { id: 'p_a', title: 'A', parentId: 'p_b' }, { id: 'p_b', title: 'B', parentId: 'p_a' },
+    { id: 'p_top', title: 'Top' }, { id: 'p_mid', title: 'Mid', parentId: 'p_top' }, { id: 'p_low', title: 'Low', parentId: 'p_mid' },
+    { id: 'p_self', title: 'Self', parentId: 'p_self' }, { id: 'p_lost', title: 'Lost', parentId: 'p_gone' },
+  ].map((p) => ({ ...at, ...p })) }));
+  const projects = new Projects({ home, clock: new FakeClock(), log: nullLogger });
+  const h = makeHarness(home, {}, { projects });
+  projects.start(h.runner);
+  const parentOf = Object.fromEntries(projects.list().map((p) => [p.id, p.parentId ?? null]));
+  assert.deepEqual(parentOf, { p_a: null, p_b: null, p_top: null, p_mid: 'p_top', p_low: null, p_self: null, p_lost: null });
+});
+
+test("parts: a session that joins a parent mid-way hears its parts' names too", () => {
+  const { projects } = setup();
+  const tb = projects.create({ title: 'Threadbear', by: 'mike' });
+  projects.create({ title: 'GPUI port', parent: tb.id, by: 'mike' });
+  assert.match(projects.joinedLine(projects.record(tb.id)!), /Parts: GPUI port \(p_[0-9a-f]+\)\./);
 });

@@ -1,5 +1,5 @@
 // The parity run's page (scripts/parity/run.sh): each scenario in a row,
-// with the Mac app (another runner's thread, through Convex), the iPhone app
+// with the Mac app (the GPUI one; another runner's thread, through Convex), the iPhone app
 // and the website side by side, and the words each didn't show in red. Also
 // writes results.json, prints one line per failure, and exits 1 if any
 // surface missed a word or a picture.
@@ -22,7 +22,7 @@ const mac = read('mac.json', []);
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
 const surfaces = [
   // checked: whether its words are checked. The iPhone's are only looked at.
-  ['Mac, another runner', (i) => ({ file: `mac-${i + 1}.png`, missing: mac[i]?.missing, checked: true })],
+  ['Mac (GPUI), another runner', (i) => ({ file: `mac-${i + 1}.png`, missing: mac[i]?.missing, checked: true })],
   ['iPhone', (i) => ({ file: `iphone-${i + 1}.png`, missing: undefined, checked: false })],
   ['Website', (i) => ({ file: `web-${i + 1}.png`, missing: web[i]?.missing, checked: true })],
 ];

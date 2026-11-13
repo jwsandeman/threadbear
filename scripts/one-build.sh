@@ -28,8 +28,10 @@ lock="$dir/build.lock"
 export THREADBEAR_BUILD_LOCK_HELD=1
 
 if [ -x /usr/bin/lockf ]; then
-  # A quick try first, only to say why it's waiting.
-  /usr/bin/lockf -s -t 0 "$lock" true 2>/dev/null || echo "Waiting for another Threadbear build on this machine to finish..." >&2
+  # A quick try first, only to say why it's waiting. It keeps the file too (-k):
+  # without it lockf unlinks the file as `true` ends, and a build already waiting
+  # on that file would take a lock on nothing, beside the one made next.
+  /usr/bin/lockf -k -s -t 0 "$lock" true 2>/dev/null || echo "Waiting for another Threadbear build on this machine to finish..." >&2
   exec /usr/bin/lockf -k "$lock" "$@"
 elif command -v flock >/dev/null 2>&1; then
   flock -n "$lock" true 2>/dev/null || echo "Waiting for another Threadbear build on this machine to finish..." >&2

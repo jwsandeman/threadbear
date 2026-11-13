@@ -156,3 +156,24 @@ fn testPendingRowsSurviveAnUpdateInPlace() {
     model.set_expanded("g:t:c1", false);
     assert_eq!(ids(&model), ["u:2", "g:t:c1", "a:m1", "f:t1", "p:a"]);
 }
+
+/// Two of the same words on their way: the one event that lands the first
+/// can't be taken for the second as well when the list is given again (the
+/// app's outbox gives it after every change), nor by a transcript opened
+/// later on the same events (Codex's review, 12 Nov: two held `/compact`s).
+#[test]
+fn testOneEchoLandsOnlyOneOfTwoIdenticalMessages() {
+    let mut model = history();
+    let (a, b) = (PendingMessage::new("a", "/compact", 4), PendingMessage::new("b", "/compact", 4));
+    model.set_pending(vec![a, b]);
+    model.apply(vec![event_turn(5, "turn.started", json!({"turnId": "t2"}), Some("t2")), event_turn(6, "user.message", json!({"text": "/compact", "images": []}), Some("t2"))]);
+    assert_eq!(pending_ids(&model), ["b"]);
+    // The list as the outbox keeps it, given back again.
+    let kept = model.pending().to_vec();
+    model.set_pending(kept.clone());
+    assert_eq!(pending_ids(&model), ["b"], "the same echo landed it a second time");
+    // And a transcript read afresh, as a pane opened later is.
+    let mut fresh = from_events(vec![event(1, "turn.started", json!({"turnId": "t1"})), user(2, "yes"), text(3, "m1", "Done."), done(4), event_turn(5, "turn.started", json!({"turnId": "t2"}), Some("t2")), event_turn(6, "user.message", json!({"text": "/compact", "images": []}), Some("t2"))]);
+    fresh.set_pending(kept);
+    assert_eq!(pending_ids(&fresh), ["b"]);
+}

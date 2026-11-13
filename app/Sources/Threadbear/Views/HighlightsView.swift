@@ -911,16 +911,25 @@ final class FilePreviewView: NSView {
     #if DEBUG
     /// The one in the pane, for the scripted app (AppDump's `pane`).
     nonisolated(unsafe) static weak var current: FilePreviewView?
-    /// What it's showing: "picture 1200x800", "video", "quickLook".
+    /// What it's showing: "picture 1200x800", "video 1600x1058" (just
+    /// "video" until its track has said its size), "quickLook".
     var debugShows: String {
         switch content {
         case .picture(let view):
             let rep = view.image?.representations.first
             return "picture \(rep?.pixelsWide ?? Int(view.image?.size.width ?? 0))x\(rep?.pixelsHigh ?? Int(view.image?.size.height ?? 0))"
-        case .video: return "video"
+        case .video: return videoSize.map { "video \(Int($0.width.rounded()))x\(Int($0.height.rounded()))" } ?? "video"
         case .quickLook: return "quickLook"
         case nil: return "nothing"
         }
+    }
+
+    /// The scripted app's press of the film's play button: false when
+    /// there's no film.
+    func debugPlay() -> Bool {
+        guard case .video(let view) = content, let player = view.player else { return false }
+        player.play()
+        return true
     }
     #endif
 

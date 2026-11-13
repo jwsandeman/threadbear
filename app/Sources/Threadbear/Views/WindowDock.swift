@@ -238,6 +238,12 @@ extension AppModel {
         Terminals.shared.open(TerminalTarget.for(selectedThread) { runnerName(of: $0) })
     }
 
+    /// The panel up with nothing started in it, for the automation: what it
+    /// says before a shell is asked for.
+    func showTerminalPanel() {
+        bringUpTerminal()
+    }
+
     /// Whether a ```bash block in `threadId`'s transcript may put its
     /// command in the Terminal: only when that thread is the one the main
     /// panel shows (so the Terminal panel is its shell, in front of Mike),

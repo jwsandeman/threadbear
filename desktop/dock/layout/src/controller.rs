@@ -822,3 +822,34 @@ pub fn resized(f: &[f64], i: usize, delta: f64, min: f64) -> Vec<f64> {
     f[i + 1] = pair - f[i];
     f
 }
+
+/// Where each group is drawn in `bounds`, as the dock's splits lay them out:
+/// each split's shown children share its length less the `gap`s between them,
+/// in their fractions (`SplitLayout.placeSubviews`). For a layout change's
+/// glide (the view's `LayoutMotion`), which needs to know where the groups are
+/// going before they've been laid out there.
+pub fn group_frames(root: &DockNode, bounds: Rect, available: &dyn Fn(&str) -> bool, gap: f64) -> Vec<(String, Rect)> {
+    let mut out = Vec::new();
+    place_groups(root, bounds, available, gap, &mut out);
+    out
+}
+
+fn place_groups(node: &DockNode, r: Rect, available: &dyn Fn(&str) -> bool, gap: f64, out: &mut Vec<(String, Rect)>) {
+    match node {
+        DockNode::Group(g) => out.push((g.id.clone(), r)),
+        DockNode::Split(s) => {
+            let shown = shown_indices(s, available);
+            let fractions = normalized(&shown.iter().map(|&i| s.fractions[i]).collect::<Vec<_>>());
+            let horizontal = s.axis == SplitAxis::Horizontal;
+            let length = if horizontal { r.width } else { r.height };
+            let room = (length - gap * shown.len().saturating_sub(1) as f64).max(0.);
+            let mut at = 0.;
+            for (k, &i) in shown.iter().enumerate() {
+                let size = room * fractions[k];
+                let child = if horizontal { Rect::new(r.x + at, r.y, size, r.height) } else { Rect::new(r.x, r.y + at, r.width, size) };
+                place_groups(&s.children[i], child, available, gap, out);
+                at += size + gap;
+            }
+        }
+    }
+}

@@ -176,9 +176,13 @@ struct AsksCard: View {
 /// (end_turn's `next`) under "Or carry on". A tap ticks one (again
 /// unticks it), so he can pick several, as on the Mac (30 Oct); Send on
 /// the card sends them, and the composer's Send takes them with what's
-/// typed.
+/// typed. What the runner found still open (loose ends) goes between,
+/// under "Still open", or "Coming back" when it's only booked check-ins,
+/// as on the Mac: plain lines, and a thread one opens that thread.
 struct DoneCard: View {
     let next: [String]
+    var looseEnds: [PhoneLooseEnd] = []
+    var openThread: @MainActor (String) -> Void = { _ in }
     @Binding var picked: Set<Int>
     /// The ticked ones are on their way: Send spins, and nothing more to press.
     var busy: Bool
@@ -202,6 +206,7 @@ struct DoneCard: View {
                 .controlSize(.small)
                 .accessibilityLabel("Archive")
             }
+            if !looseEnds.isEmpty { looseEndsList }
             if !next.isEmpty {
                 Text("Or carry on").font(.footnote).foregroundStyle(.secondary)
                 ForEach(Array(next.enumerated()), id: \.offset) { index, step in
@@ -240,6 +245,46 @@ struct DoneCard: View {
         .sensoryFeedback(.selection, trigger: tickTaps)
         .sensoryFeedback(.impact(weight: .light), trigger: sendTaps)
     }
+
+    /// Open ones first, then the check-ins, each with its time.
+    private var looseEndsList: some View {
+        let ordered = looseEnds.filter { !$0.isBooked } + looseEnds.filter(\.isBooked)
+        return VStack(alignment: .leading, spacing: 6) {
+            Text(looseEnds.contains { !$0.isBooked } ? "Still open" : "Coming back")
+                .font(.footnote).foregroundStyle(.secondary)
+            ForEach(Array(ordered.enumerated()), id: \.offset) { _, end in
+                let row = HStack(alignment: .firstTextBaseline, spacing: 10) {
+                    Image(systemName: end.isBooked ? "clock" : "exclamationmark.circle")
+                        .foregroundStyle(end.isBooked ? Color.secondary : Color.orange)
+                        .accessibilityLabel(end.isBooked ? "Booked" : "Still open")
+                    Text(Self.line(end)).multilineTextAlignment(.leading)
+                        .foregroundStyle(end.threadId != nil ? Color.accentColor : Color.primary)
+                    Spacer(minLength: 0)
+                }
+                if let id = end.threadId {
+                    Button { openThread(id) } label: { row.contentShape(Rectangle()) }
+                        .buttonStyle(.plain)
+                } else {
+                    row
+                }
+            }
+        }
+    }
+
+    /// "Fri 13 Nov, 9:30 am: the check-in" for a booked one, else its text.
+    static func line(_ end: PhoneLooseEnd) -> String {
+        guard end.isBooked, let at = end.at, let when = ISO8601DateFormatter.fractional.date(from: at) ?? ISO8601DateFormatter().date(from: at) else { return end.text }
+        return "\(when.formatted(.dateTime.weekday(.abbreviated).day().month(.abbreviated).hour().minute())): \(end.text)"
+    }
+}
+
+private extension ISO8601DateFormatter {
+    /// The runner's ISO times, with milliseconds.
+    static let fractional: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
+    }()
 }
 
 /// A finished turn's work, folded into one line that opens to it, as the

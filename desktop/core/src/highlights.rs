@@ -588,6 +588,122 @@ pub fn panel_symbol(panel: &Panel) -> &str {
     }
 }
 
+/// Where a panel or an action chip came from (`PanelOrigin`), for the small
+/// badge on its rail button and its tab, and for the shelf its chip sits on:
+/// two Convex buttons, one from the thread's folder and one from a project's,
+/// look alike without it.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PanelOrigin {
+    /// One of the thread's projects' folders: the badge is that project's icon.
+    Project(String),
+    /// A tool patch (`appliesTo`), here for these paths.
+    Tool(Vec<String>),
+    /// `~/.threadbear/patches`.
+    Home,
+    /// A `.threadbear/patches` in the thread's folder or one above it.
+    Folder,
+    Builtin,
+}
+
+impl PanelOrigin {
+    pub fn of_panel(panel: &Panel, patches: &[PatchInfo]) -> PanelOrigin {
+        Self::of(&panel.patch, panel.project_id.as_deref(), patches)
+    }
+
+    pub fn of_action(action: &Action, patches: &[PatchInfo]) -> PanelOrigin {
+        Self::of(&action.patch, action.project_id.as_deref(), patches)
+    }
+
+    /// A project's folder wins over the rest, as that's what Mike would least
+    /// expect to see in another folder's thread; then a tool patch, which is
+    /// there because of one file.
+    fn of(patch: &str, project_id: Option<&str>, patches: &[PatchInfo]) -> PanelOrigin {
+        let info = patches.iter().find(|p| p.id == patch);
+        if let Some(id) = project_id.or_else(|| info.and_then(|p| p.project_id.as_deref())) {
+            return PanelOrigin::Project(id.to_owned());
+        }
+        if let Some(matched) = info.and_then(|p| p.matched.as_ref()).filter(|m| !m.is_empty()) {
+            return PanelOrigin::Tool(matched.clone());
+        }
+        match info.map(|p| p.source.as_str()) {
+            Some("home") => PanelOrigin::Home,
+            Some("builtin") => PanelOrigin::Builtin,
+            _ => PanelOrigin::Folder,
+        }
+    }
+
+    /// The badge's symbol; None for a project, whose own icon is drawn.
+    pub fn symbol(&self) -> Option<&'static str> {
+        match self {
+            PanelOrigin::Project(_) => None,
+            PanelOrigin::Tool(_) => Some("wrench.and.screwdriver.fill"),
+            PanelOrigin::Home => Some("house.fill"),
+            PanelOrigin::Folder => Some("folder.fill"),
+            PanelOrigin::Builtin => Some("shippingbox.fill"),
+        }
+    }
+
+    /// The tooltip: "Convex, from the Threadbear project".
+    pub fn tip(&self, title: &str, project_title: Option<&str>) -> String {
+        match self {
+            PanelOrigin::Project(_) => format!("{title}, {}", project_title.map_or("from a project".to_owned(), |t| format!("from the {t} project"))),
+            PanelOrigin::Tool(matched) => {
+                let names: Vec<&str> = matched.iter().map(|m| m.trim_end_matches(['/', '\\']).rsplit(['/', '\\']).next().unwrap_or(m)).collect();
+                format!("{title}, for {}", names.join(", "))
+            }
+            PanelOrigin::Home => format!("{title}, from ~/.threadbear"),
+            PanelOrigin::Folder => format!("{title}, from this folder's .threadbear"),
+            PanelOrigin::Builtin => format!("{title}, built in"),
+        }
+    }
+}
+
+/// A thread's action chips as shelves over its composer, one for each place
+/// they came from (`ActionShelf`), so a project's buttons read as the
+/// project's rather than as part of writing a message (Mike, 30 Oct). Each
+/// shelf holds its chips by patch, so a hairline can sit between two patches
+/// from the same place. Shelves and patches keep the order their first chip had.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ActionShelf {
+    pub origin: PanelOrigin,
+    pub patches: Vec<Vec<Action>>,
+}
+
+impl ActionShelf {
+    pub fn shelves(actions: &[Action], patches: &[PatchInfo]) -> Vec<ActionShelf> {
+        let mut shelves: Vec<ActionShelf> = Vec::new();
+        for action in actions {
+            let origin = PanelOrigin::of_action(action, patches);
+            let index = match shelves.iter().position(|s| s.origin == origin) {
+                Some(i) => i,
+                None => {
+                    shelves.push(ActionShelf { origin, patches: Vec::new() });
+                    shelves.len() - 1
+                }
+            };
+            let shelf = &mut shelves[index];
+            match shelf.patches.iter_mut().find(|g| g.first().is_some_and(|a| a.patch == action.patch)) {
+                Some(group) => group.push(action.clone()),
+                None => shelf.patches.push(vec![action.clone()]),
+            }
+        }
+        shelves
+    }
+}
+
+/// An action chip's glyph when it has no icon of its own (`ActionChip.glyph`):
+/// a bubble for a message, an arrow out for a page, the patch mark for a command.
+pub fn action_glyph(action: &Action) -> &str {
+    if let Some(icon) = action.icon.as_deref().filter(|i| !i.is_empty()) {
+        return icon;
+    }
+    match action.kind.as_str() {
+        "prompt" => "text.bubble",
+        "url" => "arrow.up.right.square",
+        _ => "square.dashed",
+    }
+}
+
 // ---------------------------------------------------------------- sub-agents and started threads
 
 /// A thread's sub-agents for Highlights: running ones first, then the rest
@@ -720,36 +836,84 @@ pub fn started_detail<Tz: TimeZone>(row: &StartedRow, now: &DateTime<Tz>) -> Str
 
 /// A message the runner sends at a set time (`Schedule`), as much as the
 /// Scheduled group needs.
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Schedule {
     pub id: String,
     pub title: String,
+    /// What it sends.
+    pub text: String,
+    /// A one-off: when it runs.
+    pub at: Option<String>,
+    /// Or repeating: a five-field cron or @daily and friends.
+    pub cron: Option<String>,
+    pub timezone: Option<String>,
+    /// The runner's words for `at` or `cron`: "Weekdays at 9:00".
     pub when_text: String,
+    /// Sends to this thread; None starts a new thread each time.
     pub thread_id: Option<String>,
     pub cwd: Option<String>,
+    pub account_id: Option<String>,
+    pub pool_id: Option<String>,
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    pub permission_mode: Option<String>,
+    /// The thread whose agent made it; None for a person.
     pub created_by: Option<String>,
     pub paused: bool,
     pub finished_at: Option<String>,
     pub next_run_at: Option<String>,
     pub created_at: Option<String>,
+    pub runs: i64,
+    pub last_run: Option<LastRun>,
+    /// The runner it runs on, its name and icon (docs/protocol.md, "Schedules").
+    pub runner_id: Option<String>,
+    pub runner_name: Option<String>,
+    pub runner_icon: Option<String>,
+    /// A Run now asked of another runner, waiting for it to hear.
+    pub run_requested_at: Option<String>,
+}
+
+/// A schedule's last run (`Schedule.LastRun`).
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct LastRun {
+    pub at: Option<String>,
+    /// "sent", "skipped" or "failed"; anything else reads as sent.
+    pub outcome: String,
+    /// The thread it sent to or started.
+    pub thread_id: Option<String>,
+    /// Why it was skipped or failed.
+    pub note: Option<String>,
 }
 
 impl Schedule {
     pub fn list(value: &Value) -> Vec<Schedule> {
         value.as_array().into_iter().flatten().filter_map(|s| serde_json::from_value(s.clone()).ok()).collect()
     }
-    fn is_finished(&self) -> bool {
+    pub fn is_finished(&self) -> bool {
         self.finished_at.is_some()
     }
-    fn is_active(&self) -> bool {
+    pub fn is_active(&self) -> bool {
         !self.paused && !self.is_finished()
+    }
+    pub fn is_one_off(&self) -> bool {
+        self.cron.is_none()
+    }
+    /// It runs on another runner than this one (`runsElsewhere`); a schedule
+    /// from before runners, or a list of runners not in yet, is this one's.
+    pub fn runs_elsewhere(&self, self_runner_id: Option<&str>) -> bool {
+        matches!((self.runner_id.as_deref(), self_runner_id), (Some(runner), Some(own)) if runner != own)
     }
     fn belongs(&self, thread_id: &str) -> bool {
         self.thread_id.as_deref() == Some(thread_id) || self.created_by.as_deref() == Some(thread_id)
     }
-    fn next_ms(&self) -> Option<i64> {
+    pub fn next_ms(&self) -> Option<i64> {
         self.next_run_at.as_deref().and_then(parse_ms)
+    }
+    /// When another runner was asked to run it now, while it hasn't yet.
+    pub fn run_requested_ms(&self) -> Option<i64> {
+        self.run_requested_at.as_deref().and_then(parse_ms)
     }
 }
 
@@ -836,6 +1000,9 @@ pub struct Panel {
     pub summary: Option<String>,
     pub badge: Option<i64>,
     pub project_id: Option<String>,
+    /// The built-in Convex panel's deployment: shown as Convex's embedded
+    /// dashboard rather than `url` (docs/protocol.md, "The Convex panel").
+    pub convex: Option<crate::convex_panel::Deployment>,
 }
 
 impl Panel {
@@ -881,6 +1048,9 @@ pub struct PatchInfo {
     pub project_id: Option<String>,
     pub matched: Option<Vec<String>>,
     pub live_error: Option<String>,
+    /// A home patch runs something Threadbear can't follow, so threads that
+    /// ask first ask before every file edit: what, where, and what to change.
+    pub edits_ask: Option<String>,
     pub icon: Option<String>,
     pub icon_file: Option<String>,
     pub untrusted: Option<String>,
@@ -1052,6 +1222,38 @@ pub mod patches {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn chips_sit_on_a_shelf_for_each_place_they_came_from_grouped_by_patch() {
+        let patch = |id: &str, extra: serde_json::Value| {
+            let mut v = serde_json::json!({ "id": id, "source": "folder" });
+            v.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            serde_json::from_value::<PatchInfo>(v).unwrap()
+        };
+        let patches = vec![
+            patch("app-store", serde_json::json!({})),
+            patch("checks", serde_json::json!({})),
+            patch("convex", serde_json::json!({ "projectId": "p1" })),
+            patch("tandem", serde_json::json!({ "matched": ["/Users/mike/v/cut.tandem"] })),
+            patch("mine", serde_json::json!({ "source": "home" })),
+        ];
+        let action = |id: &str, patch: &str| Action { id: id.into(), title: id.into(), kind: "url".into(), patch: patch.into(), ..Default::default() };
+        let actions = vec![action("site", "app-store"), action("dash", "convex"), action("land", "checks"), action("sentry", "app-store"), action("cut", "tandem"), action("note", "mine")];
+        let shelves = ActionShelf::shelves(&actions, &patches);
+        let shape: Vec<(PanelOrigin, Vec<Vec<&str>>)> = shelves.iter().map(|s| (s.origin.clone(), s.patches.iter().map(|g| g.iter().map(|a| a.id.as_str()).collect()).collect())).collect();
+        assert_eq!(
+            shape,
+            vec![
+                (PanelOrigin::Folder, vec![vec!["site", "sentry"], vec!["land"]]),
+                (PanelOrigin::Project("p1".into()), vec![vec!["dash"]]),
+                (PanelOrigin::Tool(vec!["/Users/mike/v/cut.tandem".into()]), vec![vec!["cut"]]),
+                (PanelOrigin::Home, vec![vec!["note"]]),
+            ]
+        );
+        assert_eq!(PanelOrigin::Tool(vec!["/Users/mike/v/cut.tandem".into()]).tip("Cut", None), "Cut, for cut.tandem");
+        assert_eq!(PanelOrigin::Project("p1".into()).tip("Convex", Some("Threadbear")), "Convex, from the Threadbear project");
+        assert_eq!(action_glyph(&action("x", "app-store")), "arrow.up.right.square");
+    }
+
     use super::*;
     use serde_json::json;
 

@@ -225,7 +225,6 @@ export type MovesHost = {
 
 export type MovesDeps = {
   self: () => string;
-  on: () => boolean;
   backend: () => MovesBackend | undefined;
   host: MovesHost;
   log: { info(m: string, f?: Record<string, unknown>): void; warn(m: string, f?: Record<string, unknown>): void };
@@ -257,7 +256,7 @@ export class Moves {
   }
 
   start(): void {
-    if (this.stop || !this.d.on()) return;
+    if (this.stop) return;
     const backend = this.d.backend();
     if (!backend) return;
     this.stop = backend.watch(

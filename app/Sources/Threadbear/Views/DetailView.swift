@@ -7,6 +7,8 @@ import ThreadbearCore
 /// panel's bar (ThreadHeader, ThreadMenuButton).
 struct DetailView: View {
     @Environment(AppModel.self) private var app
+    /// The Projects page has been shown, so it's kept (above).
+    @State private var keepProjectsHome = false
 
     var body: some View {
         let thread = app.selectedThread
@@ -23,6 +25,18 @@ struct DetailView: View {
         let librarianHome = project == nil && app.showsLibrarianHome
         // The Scheduled page, from the activity bar's Scheduled.
         let scheduledHome = project == nil && app.showsScheduledHome
+        ZStack {
+        // The Projects page stays built once it's been shown, hidden while
+        // anything else is up, so coming back to it doesn't build every
+        // card again (SidebarView's lists, 11 Nov).
+        if keepProjectsHome || projectsHome {
+            VStack(spacing: 0) {
+                ConnectionBanner()
+                ErrorBanner()
+                ProjectsHome(shown: projectsHome)
+            }
+            .keptAlive(shown: projectsHome)
+        }
         Group {
         if let project {
             VStack(spacing: 0) {
@@ -31,11 +45,8 @@ struct DetailView: View {
                 ProjectPage(project: project)
             }
         } else if projectsHome {
-            VStack(spacing: 0) {
-                ConnectionBanner()
-                ErrorBanner()
-                ProjectsHome()
-            }
+            // Drawn above, kept.
+            Color.clear
         } else if librarianHome {
             VStack(spacing: 0) {
                 ConnectionBanner()
@@ -108,6 +119,8 @@ struct DetailView: View {
             .frame(maxWidth: .infinity)
         }
         }
+        }
+        .onChange(of: projectsHome, initial: true) { _, shown in if shown { keepProjectsHome = true } }
         .overlay(alignment: .top) {
             ArchivedToast()
             InboxEndToast()

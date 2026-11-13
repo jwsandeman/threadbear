@@ -91,6 +91,13 @@ Feature: Highlights, what a thread has made and shared
     Then the "Scheduled" highlight "Check the CI run again" is listed
     And the "Scheduled" highlight "Check the CI run again" says "in 40m"
 
+  @highlights.scheduled
+  Scenario: A Scheduled row opens its schedule in the editor, and its menu offers Edit
+    When I open the thread "Why is the build slow on CI?"
+    Then the menu of the Scheduled highlight "Check the CI run again" offers "Edit | Show all schedules"
+    When I click the Scheduled highlight "Check the CI run again"
+    Then the schedule editor is open on the schedule that sends "Check whether the cache change made the CI build faster."
+
   @highlights.rowmenus
   Scenario: A row's right-click menu offers what can be done with it
     When I open the thread "Rebuild the three landing pages"

@@ -677,6 +677,10 @@ public struct PatchInfo: Sendable, Hashable, Codable, Identifiable {
     public var matched: [String]?
     /// A `when` or `badge` function that threw or took too long.
     public var liveError: String?
+    /// A patch that loads without a hash (a home patch) runs something
+    /// Threadbear can't follow, so threads that ask first ask before every
+    /// file edit: what, where, and what to change.
+    public var editsAsk: String?
     /// The patch file's icon: a symbol, or a picture (as Panel's).
     public var icon: String?
     public var iconFile: String?
@@ -718,6 +722,7 @@ public struct PatchInfo: Sendable, Hashable, Codable, Identifiable {
         projectId = (try? c.decodeIfPresent(String.self, forKey: .projectId)) ?? nil
         matched = (try? c.decodeIfPresent([String].self, forKey: .matched)) ?? nil
         liveError = (try? c.decodeIfPresent(String.self, forKey: .liveError)) ?? nil
+        editsAsk = (try? c.decodeIfPresent(String.self, forKey: .editsAsk)) ?? nil
         icon = (try? c.decodeIfPresent(String.self, forKey: .icon)) ?? nil
         iconFile = (try? c.decodeIfPresent(String.self, forKey: .iconFile)) ?? nil
         untrusted = (try? c.decodeIfPresent(String.self, forKey: .untrusted)) ?? nil
@@ -989,14 +994,18 @@ public struct PanelRequest: Sendable, Hashable, Codable {
     /// `pin` with `show`: the highlight to open in the pane, over
     /// Highlights (`panel` is "highlights", `title` the pin's).
     public var highlight: String?
+    /// show_panel's `reload`: a web panel's page is loaded afresh as it's
+    /// shown, as the agent has changed it.
+    public var reload: Bool?
     public var at: String
 
-    public init(id: String, panel: String, title: String, where: String? = nil, highlight: String? = nil, at: String = "") {
+    public init(id: String, panel: String, title: String, where: String? = nil, highlight: String? = nil, reload: Bool? = nil, at: String = "") {
         self.id = id
         self.panel = panel
         self.title = title
         self.where = `where`
         self.highlight = highlight
+        self.reload = reload
         self.at = at
     }
 }
@@ -1029,8 +1038,105 @@ public struct LooseEnds: Sendable, Hashable, Codable {
     public var anyOpen: Bool { ends.contains { !$0.isBooked } }
 }
 
+/// Review by another lab's ledger (protocol "Review by another lab"):
+/// what the reviewer found, round by round, and what the agent did about
+/// each, on the turn that answered them (`turn.completed`'s `review`).
+public struct LabReview: Sendable, Hashable, Decodable {
+    public struct Finding: Sendable, Hashable, Decodable {
+        public var id: Int
+        public var round: Int
+        /// high, medium or low.
+        public var severity: String
+        public var claim: String
+        public var `where`: String?
+        public var `case`: String?
+        /// fixed, disputed or left; nil when the agent didn't answer.
+        public var outcome: String?
+        public var note: String?
+
+        public init(id: Int, round: Int = 1, severity: String = "medium", claim: String, where: String? = nil, case: String? = nil, outcome: String? = nil, note: String? = nil) {
+            self.id = id
+            self.round = round
+            self.severity = severity
+            self.claim = claim
+            self.where = `where`
+            self.case = `case`
+            self.outcome = outcome
+            self.note = note
+        }
+
+        public init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            id = (try? c.decodeIfPresent(Int.self, forKey: .id)) ?? 0
+            round = (try? c.decodeIfPresent(Int.self, forKey: .round)) ?? 1
+            severity = (try? c.decodeIfPresent(String.self, forKey: .severity)) ?? "medium"
+            claim = (try? c.decodeIfPresent(String.self, forKey: .claim)) ?? ""
+            `where` = (try? c.decodeIfPresent(String.self, forKey: .where)) ?? nil
+            `case` = (try? c.decodeIfPresent(String.self, forKey: .case)) ?? nil
+            outcome = (try? c.decodeIfPresent(String.self, forKey: .outcome)) ?? nil
+            note = (try? c.decodeIfPresent(String.self, forKey: .note)) ?? nil
+        }
+
+        enum CodingKeys: String, CodingKey { case id, round, severity, claim, `where`, `case`, outcome, note }
+    }
+
+    /// "Codex (codex-1)".
+    public var reviewer: String
+    /// Another lab, not a fresh session of the same one.
+    public var independent: Bool
+    public var rounds: Int
+    /// The latest round's review thread.
+    public var threadId: String
+    /// The latest round found nothing that holds up.
+    public var passed: Bool
+    /// A round's reviewer gave no verdict, so there are no findings to list.
+    public var unstructured: Bool
+    /// Fixes made in the last round there is, which no review looked at.
+    public var unchecked: Bool
+    public var findings: [Finding]
+
+    public init(reviewer: String, independent: Bool = true, rounds: Int = 1, threadId: String = "", passed: Bool = false, unstructured: Bool = false, unchecked: Bool = false, findings: [Finding] = []) {
+        self.reviewer = reviewer
+        self.independent = independent
+        self.rounds = rounds
+        self.threadId = threadId
+        self.passed = passed
+        self.unstructured = unstructured
+        self.unchecked = unchecked
+        self.findings = findings
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        reviewer = (try? c.decodeIfPresent(String.self, forKey: .reviewer)) ?? "Another lab"
+        independent = (try? c.decodeIfPresent(Bool.self, forKey: .independent)) ?? true
+        rounds = (try? c.decodeIfPresent(Int.self, forKey: .rounds)) ?? 1
+        threadId = (try? c.decodeIfPresent(String.self, forKey: .threadId)) ?? ""
+        passed = (try? c.decodeIfPresent(Bool.self, forKey: .passed)) ?? false
+        unstructured = (try? c.decodeIfPresent(Bool.self, forKey: .unstructured)) ?? false
+        unchecked = (try? c.decodeIfPresent(Bool.self, forKey: .unchecked)) ?? false
+        findings = c.lossyArray(Finding.self, forKey: .findings).filter { !$0.claim.isEmpty }
+    }
+
+    enum CodingKeys: String, CodingKey { case reviewer, independent, rounds, threadId, passed, unstructured, unchecked, findings }
+
+    /// The one line over the findings: who, how many rounds, how it came out.
+    public var heading: String {
+        let who = independent ? "Reviewed by \(reviewer)" : "Reviewed by a fresh \(reviewer) session"
+        let rounds = self.rounds > 1 ? ", \(self.rounds) rounds" : ""
+        let open = findings.filter { $0.outcome == nil || $0.outcome == "left" }.count
+        let result: String
+        if unstructured { result = "see its reply" }
+        else if unchecked { result = "last fixes not re-reviewed" }
+        else if passed { result = findings.isEmpty ? "nothing found" : "passed" }
+        else if open > 0 { result = "\(open) open" }
+        else { result = "all answered" }
+        return "\(who)\(rounds): \(result)"
+    }
+}
+
 public struct LooseEnd: Sendable, Hashable, Codable {
-    /// unlanded, uncommitted, thread or scheduled; a later kind shows as its text.
+    /// unlanded, uncommitted, unpushed, unmerged, thread, open (the agent's word) or scheduled; a later kind shows as its text.
     public var kind: String
     public var text: String
     /// The thread it's about (kind thread).
@@ -1180,9 +1286,10 @@ public struct ThreadSummary: Sendable, Hashable, Codable, Identifiable {
     /// Mike's last message to it, one line, for the sidebar's "You: ...".
     /// Nil until he's sent one, and from runners before it (3 Nov).
     public var asked: String?
-    /// The librarian's recap, for the box above the message box
-    /// (`Recap`, docs/protocol.md "The recap box"). Nil from an older runner.
-    public var recap: String?
+    /// The librarian's search words, space-separated (docs/protocol.md,
+    /// "Search"): the sidebar's search matches them too. Nil until a look
+    /// has given some, and from an older runner.
+    public var keywords: String?
     /// A panel the agent asked to show Mike, waiting for him to look at the
     /// thread. Nil when there's none, and from a runner older than this.
     public var panelRequest: PanelRequest?
@@ -1341,7 +1448,7 @@ public struct ThreadSummary: Sendable, Hashable, Codable, Identifiable {
         schedule = (try? c.decodeIfPresent(ThreadSchedule.self, forKey: .schedule)) ?? nil
         startedBy = (try? c.decodeIfPresent(ThreadStartedBy.self, forKey: .startedBy)) ?? nil
         asked = (try? c.decodeIfPresent(String.self, forKey: .asked)) ?? nil
-        recap = (try? c.decodeIfPresent(String.self, forKey: .recap)) ?? nil
+        keywords = (try? c.decodeIfPresent(String.self, forKey: .keywords)) ?? nil
         panelRequest = (try? c.decodeIfPresent(PanelRequest.self, forKey: .panelRequest)) ?? nil
         share = (try? c.decodeIfPresent(ThreadShare.self, forKey: .share)) ?? nil
         looseEnds = (try? c.decodeIfPresent(LooseEnds.self, forKey: .looseEnds)) ?? nil
@@ -1406,7 +1513,7 @@ public struct ThreadSummary: Sendable, Hashable, Codable, Identifiable {
         try c.encodeIfPresent(schedule, forKey: .schedule)
         try c.encodeIfPresent(startedBy, forKey: .startedBy)
         try c.encodeIfPresent(asked, forKey: .asked)
-        try c.encodeIfPresent(recap, forKey: .recap)
+        try c.encodeIfPresent(keywords, forKey: .keywords)
         try c.encodeIfPresent(panelRequest, forKey: .panelRequest)
         try c.encodeIfPresent(share, forKey: .share)
         try c.encodeIfPresent(looseEnds, forKey: .looseEnds)
@@ -1417,7 +1524,7 @@ public struct ThreadSummary: Sendable, Hashable, Codable, Identifiable {
         case id, title, cwd, accountId, provider, model, effort, modelInUse, effortInUse, permissionMode, status, live, needsYou, pendingReviews
         case createdAt, updatedAt, lastActivityAt, snoozedUntil, snoozedUntilRestart, snoozedUntilRelease, wakeWhen, waitingOn, woke, archivedAt, starredAt, onOldRunner, preview
         case lastSeq, lastSeenSeq, nativeSessionId, contextTokens, contextWindow, costUsd, panels, actions, hooks, patches, background, subagents
-        case projects, worktree, needs, asks, asksSeq, highlightsAt, schedule, startedBy, asked, recap, poolId, waitingForRoom, carryOnAtReset, waitingForNetwork, panelRequest, share, sample, looseEnds, moving
+        case projects, worktree, needs, asks, asksSeq, highlightsAt, schedule, startedBy, asked, keywords, poolId, waitingForRoom, carryOnAtReset, waitingForNetwork, panelRequest, share, sample, looseEnds, moving
     }
 
     enum NetworkWaitKeys: String, CodingKey { case since }

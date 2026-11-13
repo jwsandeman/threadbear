@@ -415,11 +415,14 @@ public struct TurnCompletion: Sendable, Hashable, Decodable {
     /// With needs "nothing": follow-ups the agent suggested, each the
     /// message that would start it, as buttons on the done card.
     public var next: [String]
+    /// Review by another lab's ledger, on the turn that answered a round.
+    public var review: LabReview?
 
     public init(
         turnId: String, outcome: TurnOutcome, durationMs: Double, costUsd: Double? = nil, usage: JSONValue? = nil, error: String? = nil,
-        errorKind: TurnErrorKind? = nil, needs: String? = nil, asks: [Ask] = [], next: [String] = []
+        errorKind: TurnErrorKind? = nil, needs: String? = nil, asks: [Ask] = [], next: [String] = [], review: LabReview? = nil
     ) {
+        self.review = review
         self.needs = needs
         self.asks = asks
         self.next = next
@@ -443,6 +446,7 @@ public struct TurnCompletion: Sendable, Hashable, Decodable {
         needs = (try? c.decodeIfPresent(String.self, forKey: .needs)) ?? nil
         asks = c.lossyArray(Ask.self, forKey: .asks)
         next = c.lossyArray(String.self, forKey: .next)
+        review = (try? c.decodeIfPresent(LabReview.self, forKey: .review)) ?? nil
         // `error` may be a string or an object depending on the runner version.
         if let text = try? c.decodeIfPresent(String.self, forKey: .error) {
             error = text
@@ -453,7 +457,7 @@ public struct TurnCompletion: Sendable, Hashable, Decodable {
         }
     }
 
-    enum CodingKeys: String, CodingKey { case turnId, outcome, durationMs, costUsd, usage, error, errorKind, needs, asks, next }
+    enum CodingKeys: String, CodingKey { case turnId, outcome, durationMs, costUsd, usage, error, errorKind, needs, asks, next, review }
 }
 
 /// A command action that ran (`action.run`): what it printed, outside any

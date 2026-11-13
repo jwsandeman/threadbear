@@ -177,6 +177,7 @@ export function checkSummary(t: Obj): string[] {
   for (const k of ['createdAt', 'updatedAt', 'lastActivityAt']) if (!isIso(t[k])) problems.push(k);
   for (const k of ['lastSeq', 'lastSeenSeq']) if (!isNum(t[k])) problems.push(k);
   if (t.preview.length > 140 || t.preview.includes('\n')) problems.push('preview too long or multi-line');
+  if (t.keywords !== undefined && (!isStr(t.keywords) || !t.keywords || t.keywords.length > 200 || t.keywords !== t.keywords.toLowerCase() || /\s{2}|\n/.test(t.keywords))) problems.push('keywords');
   if (t.asked !== undefined && (!isStr(t.asked) || !t.asked || t.asked.length > 140 || t.asked.includes('\n'))) problems.push('asked');
   if (t.title.length > 200) problems.push('title');
   for (const k of ['model', 'modelInUse', 'snoozedUntil', 'archivedAt', 'nativeSessionId']) if (t[k] !== undefined && !isStr(t[k])) problems.push(k);
@@ -309,7 +310,7 @@ export function checkSummary(t: Obj): string[] {
   if (t.looseEnds !== undefined) {
     const l = t.looseEnds;
     const ok = l && Number.isInteger(l.seq) && isIso(l.at) && Array.isArray(l.ends) &&
-      l.ends.every((e: any) => ['unlanded', 'uncommitted', 'thread', 'scheduled'].includes(e.kind) && isStr(e.text) &&
+      l.ends.every((e: any) => ['unlanded', 'uncommitted', 'unpushed', 'unmerged', 'thread', 'open', 'scheduled'].includes(e.kind) && isStr(e.text) &&
         (e.threadId === undefined || isStr(e.threadId)) && (e.at === undefined || isIso(e.at)) &&
         Object.keys(e).every((k) => ['kind', 'text', 'threadId', 'at'].includes(k))) &&
       Object.keys(l).every((k) => ['seq', 'ends', 'at'].includes(k));
@@ -320,7 +321,7 @@ export function checkSummary(t: Obj): string[] {
     'lastActivityAt', 'snoozedUntil', 'snoozedUntilRestart', 'snoozedUntilRelease', 'archivedAt', 'archivedBy', 'archiveVerdict', 'starredAt', 'preview', 'lastSeq', 'lastSeenSeq', 'nativeSessionId', 'contextTokens', 'costUsd',
     'poolId', 'waitingForRoom', 'carryOnAtReset', 'waitingForNetwork', 'wakeWhen', 'waitingOn',
     'effort', 'modelInUse', 'effortInUse', 'contextWindow', 'panels', 'actions', 'hooks', 'patches', 'background', 'subagents', 'projects', 'worktree',
-    'needs', 'asks', 'asksSeq', 'highlightsAt', 'panelRequest', 'share', 'startedBy', 'asked', 'recap', 'looseEnds',
+    'needs', 'asks', 'asksSeq', 'highlightsAt', 'panelRequest', 'share', 'startedBy', 'asked', 'keywords', 'looseEnds',
   ]);
   for (const k of Object.keys(t)) if (!allowed.has(k)) problems.push(`unexpected field ${k}`);
   return problems;

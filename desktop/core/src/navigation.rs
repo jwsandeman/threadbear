@@ -71,6 +71,18 @@ impl<Place: PartialEq + Clone> NavigationHistory<Place> {
         }
     }
 
+    /// Puts `place` where the current entry is and keeps what's ahead: Back or
+    /// Forward came to an entry that couldn't be shown quite as it was (a page
+    /// whose thread behind it has gone), and what's showing is it now.
+    /// Recording it as a new place cut off Forward, and the next Back came to
+    /// the old entry and did the same again, so Back never left it.
+    pub fn settle_current(&mut self, place: Place) {
+        match usize::try_from(self.index).ok().filter(|i| *i < self.entries.len()) {
+            Some(at) => self.entries[at] = place,
+            None => self.record(place),
+        }
+    }
+
     /// The nearest earlier place that `is_valid` still allows (a thread that's
     /// been deleted, say, is skipped), or nothing with nowhere to go.
     pub fn back(&mut self, is_valid: impl Fn(&Place) -> bool) -> Option<Place> {
@@ -122,6 +134,19 @@ pub fn history_tip(back: bool, to: Option<&str>, shortcut: Option<&str>) -> Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn settling_the_current_place_keeps_what_is_ahead() {
+        let mut h = NavigationHistory::new(10);
+        for place in ["a", "b", "c"] {
+            h.record(place.to_string());
+        }
+        h.back(|_| true);
+        h.settle_current("b, as it can be shown".to_string());
+        assert_eq!(h.forward(|_| true).as_deref(), Some("c"), "forward still goes to c");
+        h.back(|_| true);
+        assert_eq!(h.current().map(String::as_str), Some("b, as it can be shown"));
+    }
 
     fn s(place: &str) -> String {
         place.to_string()

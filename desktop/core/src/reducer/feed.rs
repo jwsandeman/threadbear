@@ -273,6 +273,12 @@ impl ThreadFeed {
 
     /// Swaps in a model that had an older page prepended off the main
     /// thread. Only valid if nothing was flushed since the copy was taken.
+    /// Drops all but the newest `keeping_last` events (`TranscriptModel::trim`),
+    /// for a thread kept loaded while it isn't shown. Where it's up to stays.
+    pub fn trim(&mut self, keeping_last: usize) {
+        self.model.trim(keeping_last);
+    }
+
     pub fn replace_model(&mut self, model: TranscriptModel) {
         self.model = model;
     }

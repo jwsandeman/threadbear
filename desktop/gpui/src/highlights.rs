@@ -10,7 +10,6 @@ use crate::app::Threadbear;
 use crate::{call, icons, now_ms, style};
 use gpui_kit::base::TestSupportExt as _;
 use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
-use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{h_flex, v_flex, ActiveTheme as _, Icon, Sizable as _, StyledExt as _};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
@@ -25,6 +24,7 @@ use threadbear_client::runner::Client;
 use threadbear_core::highlights::{self as core, fold, Highlight, HighlightKind, HighlightSections, Panel, ProjectInfo, ProjectRow, Schedule, ThreadHighlights};
 use threadbear_core::inbox::ThreadSummary;
 use threadbear_core::sidebar as side;
+use crate::tips::Tip as _;
 
 pub(crate) const HIGHLIGHTS: &str = "threadbear.highlights";
 pub(crate) const PATCHES: &str = "threadbear.patches";
@@ -71,9 +71,15 @@ pub(crate) struct PanePreview {
     /// came through in the browser, last one nearest.
     pub back: Vec<PanePreview>,
     pub memory: FolderMemory,
+    /// A text file with its own text up, raw (the Markdown menu's Markdown).
+    pub editing: bool,
 }
 
 impl PanePreview {
+    pub(crate) fn new(target: Target, title: String, from: String) -> Self {
+        PanePreview { target, title, from, opened: 0, back: vec![], memory: Default::default(), editing: false }
+    }
+
     pub(crate) fn file_path(&self) -> Option<&str> {
         match &self.target {
             Target::File(path) => Some(path),
@@ -120,7 +126,9 @@ impl MenuItem {
     pub(crate) fn submenu(title: impl Into<String>, symbol: &'static str, children: Vec<MenuItem>) -> Self {
         Self { title: title.into(), symbol: Some(symbol), action: None, checked: false, children }
     }
-    /// Shown, greyed: a choice that's coming but isn't here yet.
+    /// Shown, greyed: a choice that's coming but isn't here yet. None just
+    /// now (the folder's Show as icons was the last).
+    #[allow(dead_code)]
     pub(crate) fn disabled(title: impl Into<String>, symbol: &'static str) -> Self {
         Self { title: title.into(), symbol: Some(symbol), action: None, checked: false, children: vec![] }
     }
@@ -179,6 +187,22 @@ pub(crate) enum MenuAction {
     OpenFolderRow { key: String, entry: threadbear_core::folders::FolderEntry },
     SortFolder { key: String, sort: threadbear_core::folders::FolderSort },
     FolderHidden { hidden: bool },
+    FolderMode { mode: threadbear_core::folders::FolderMode },
+    /// Each of the rows picked, in its app, or shown in its folder.
+    OpenEach { paths: Vec<String> },
+    RevealEach { paths: Vec<String> },
+    /// A folder from the path bar's "…" menu, picking the one below it.
+    FolderCrumb { key: String, path: String, selecting: Option<String> },
+    // A Scheduled row's (`scheduleRow`).
+    EditSchedule { id: String },
+    ShowSchedules,
+    // A link row's (`LinkMenu`): a page in one of Chrome's profiles, and
+    // what a click on a web link does.
+    OpenInProfile { url: String, directory: String },
+    SetWebClick { action: threadbear_core::reply_links::WebLinkAction },
+    // A row of Threads it started (`startedRow`'s menu).
+    OpenThread { id: String },
+    OpenThreadInPanel { id: String },
 }
 
 /// The app's window of files read so far and folders looked at lives in
@@ -215,6 +239,8 @@ pub(crate) struct SidePane {
     pub(crate) viewer: crate::viewer::ViewerState,
     /// How wide the pane was last drawn, for the folder list's columns.
     pub(crate) width: f32,
+    /// Words selected in a thread, explained (explain_pane.rs).
+    pub(crate) explain: crate::explain_pane::ExplainState,
     _subs: Vec<Subscription>,
 }
 
@@ -245,6 +271,7 @@ impl SidePane {
             panels: Default::default(),
             viewer: crate::viewer::ViewerState::new(cx),
             width: PANE_WIDTH,
+            explain: Default::default(),
             _subs: vec![],
         };
         // The pane follows the window's model: what's selected, and each
@@ -254,14 +281,21 @@ impl SidePane {
         }
         pane.load_projects(cx);
         pane.load_schedules(cx);
+        crate::file_find::bind_keys(cx);
+        crate::file_edit::bind_keys(cx);
+        // Quitting mid-edit: what's typed is written before the app goes.
+        pane._subs.push(cx.on_app_quit(|this, cx| {
+            this.save_every_edit(cx);
+            async {}
+        }));
         pane
     }
 
-    /// The thread on show: the window's selected one (`app.paneThread`).
+    /// The thread on show (`app.paneThread`): the window's selected one, or
+    /// on a project's page the one it borrows the project's panels from
+    /// (projects.rs, `pane_thread`).
     pub(crate) fn thread(&self, cx: &App) -> Option<ThreadSummary> {
-        let app = self.app.upgrade()?;
-        let t = app.read(cx);
-        t.selected.as_ref().and_then(|id| t.threads.get(id)).cloned()
+        self.app.upgrade()?.read(cx).pane_thread()
     }
 
     /// The runner's list came (or came back): projects and schedules read again.
@@ -307,8 +341,12 @@ impl SidePane {
             return;
         }
         let new_thread = self.seen.as_ref().map(|k| &k.0) != Some(&key.0);
+        let id = key.0.clone();
+        // Leaving a thread whose file was being worked on: what's typed is saved.
+        if let Some(left) = self.seen.as_ref().map(|k| k.0.clone()).filter(|_| new_thread) {
+            self.leave_edit(&left, cx);
+        }
         self.seen = Some(key);
-        let id = thread.id.clone();
         if new_thread {
             let fetched = self.highlights.contains_key(&id);
             // Show-all and the edited files don't stick to a thread we leave (HighlightsView's @State per thread).
@@ -436,6 +474,7 @@ impl SidePane {
     /// Shows a section (`choosePanel`), closing a preview over another one.
     pub(crate) fn choose_section(&mut self, thread_id: &str, id: &str, cx: &mut Context<Self>) {
         if self.previews.get(thread_id).is_some_and(|p| p.from != id) {
+            self.leave_edit(thread_id, cx);
             self.previews.remove(thread_id);
         }
         self.chosen.insert(thread_id.to_owned(), id.to_owned());
@@ -488,6 +527,15 @@ impl SidePane {
             return;
         }
         if core::is_web_page(url) {
+            // Where Default says, as a web link in a reply goes: the browser
+            // unless Mike picked the pane (`openLink`).
+            if crate::reply_links::web_click() == threadbear_core::reply_links::WebLinkAction::Panel {
+                if let Some(thread) = self.thread(cx) {
+                    let from = self.section_for(&thread);
+                    self.show_preview(PanePreview::new(Target::Page(url.to_owned()), core::text::address(url), from), &thread.id, cx);
+                    return;
+                }
+            }
             crate::files::open_web(url, cx);
         }
     }
@@ -513,12 +561,22 @@ impl SidePane {
         // A folder browsed in place of its picture; the runner says which it is.
         let target = if self.files.is_known_folder(path) { Target::Folder(path.to_owned()) } else { Target::File(path.to_owned()) };
         let title = title.unwrap_or_else(|| core::last_component(path).to_owned());
-        let preview = PanePreview { target, title, from: section, opened: 0, back: vec![], memory: Default::default() };
+        let preview = PanePreview::new(target, title, section);
         self.show_preview(preview, &thread.id.clone(), cx);
     }
 
     pub(crate) fn show_preview(&mut self, mut preview: PanePreview, thread_id: &str, cx: &mut Context<Self>) {
+        // It takes an explanation's place, as a preview of its own would.
+        self.stop_explaining(thread_id);
+        // A file being worked on is saved before anything takes its place.
+        self.leave_edit(thread_id, cx);
         preview.opened = self.previews.get(thread_id).map_or(0, |p| p.opened) + 1;
+        // A Markdown file opens as its bar's menu last left it, on this
+        // runner's machine (`MarkdownView.opensRaw`).
+        let here = self.thread(cx).is_some_and(|t| t.id == thread_id && !t.is_remote());
+        if let Some(path) = preview.file_path() {
+            preview.editing = here && threadbear_core::text_file::MarkdownView::opens_raw(path, self.files.prefs.markdown_view);
+        }
         self.chosen.entry(thread_id.to_owned()).or_insert_with(|| preview.from.clone());
         self.previews.insert(thread_id.to_owned(), preview);
         self.menu = None;
@@ -532,6 +590,7 @@ impl SidePane {
     /// then out to the section (`previewBack`).
     pub(crate) fn preview_back(&mut self, thread_id: &str, cx: &mut Context<Self>) {
         let Some(current) = self.previews.get(thread_id).cloned() else { return };
+        self.leave_edit(thread_id, cx);
         match current.back.split_last() {
             None => {
                 self.previews.remove(thread_id);
@@ -550,6 +609,7 @@ impl SidePane {
     }
 
     pub(crate) fn close_preview(&mut self, thread_id: &str, cx: &mut Context<Self>) {
+        self.leave_edit(thread_id, cx);
         self.previews.remove(thread_id);
         cx.notify();
     }
@@ -623,7 +683,7 @@ impl SidePane {
     }
 
     /// A menu item chosen.
-    pub(crate) fn run_menu_action(&mut self, action: MenuAction, thread: &ThreadSummary, _window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn run_menu_action(&mut self, action: MenuAction, thread: &ThreadSummary, window: &mut Window, cx: &mut Context<Self>) {
         match action {
             MenuAction::PreviewFile { path, title } => self.preview_path(&path, Some(title), thread, cx),
             MenuAction::PreviewPage { url } => crate::files::open_web(&url, cx),
@@ -636,12 +696,39 @@ impl SidePane {
             MenuAction::Reveal { path } => crate::files::reveal(&path, if thread.is_remote() { crate::open_gate::Origin::OtherMac } else { crate::open_gate::Origin::ThisMac }, cx),
             MenuAction::Copy { text } => cx.write_to_clipboard(ClipboardItem::new_string(text)),
             MenuAction::Remove { id, title } => self.remove_highlight(id, title, thread.id.clone(), cx),
+            MenuAction::EditSchedule { id } => self.edit_schedule(&id, window, cx),
+            MenuAction::ShowSchedules => {
+                if let Some(app) = self.app.upgrade() {
+                    app.update(cx, |app, cx| app.set_mode(crate::shell::SidebarMode::Scheduled, cx));
+                }
+            }
             MenuAction::CopyPicture => {
                 self.copy_open_picture(cx);
             }
+            MenuAction::OpenInProfile { url, directory } => crate::open_gate::open_in_chrome_profile(&url, &directory, cx),
+            MenuAction::SetWebClick { action } => crate::reply_links::set_web_click(action),
             MenuAction::OpenFolderRow { key, entry } => self.run_folder_row_action(&key, entry, thread, cx),
             MenuAction::SortFolder { key, sort } => self.set_folder_sort(&key, sort, cx),
             MenuAction::FolderHidden { hidden } => self.set_folder_hidden(hidden, cx),
+            MenuAction::FolderMode { mode } => self.set_folder_mode(mode, cx),
+            MenuAction::OpenEach { paths } => paths.iter().for_each(|path| self.open_externally(path, cx)),
+            MenuAction::RevealEach { paths } => {
+                let origin = if thread.is_remote() { crate::open_gate::Origin::OtherMac } else { crate::open_gate::Origin::ThisMac };
+                paths.iter().for_each(|path| crate::files::reveal(path, origin, cx));
+            }
+            MenuAction::FolderCrumb { key, path, selecting } => self.run_folder_crumb_action(&key, path, selecting, thread, cx),
+            // A row of Threads it started: the thread, in the main panel or a
+            // panel of its own (thread_panels.rs).
+            MenuAction::OpenThread { id } => {
+                if let Some(app) = self.app.upgrade() {
+                    app.update(cx, |app, cx| app.open(id, window, cx));
+                }
+            }
+            MenuAction::OpenThreadInPanel { id } => {
+                if let Some(app) = self.app.upgrade() {
+                    app.update(cx, |app, cx| app.open_thread_in_panel(id, cx));
+                }
+            }
         }
         self.menu = None;
         cx.notify();
@@ -674,14 +761,42 @@ impl SidePane {
         items
     }
 
-    /// A link row's menu (`LinkMenu`). The browser's own item for now: the
-    /// Chrome profile list and the panel page are later work.
+    /// A link row's menu (`LinkMenu`): a file's Preview here and Open; a
+    /// page's browser, or one item per open Chrome profile, and the pane;
+    /// Copy link; and for a page Default, the same choice as a web link's
+    /// menu in a reply (reply_links.rs).
     pub(crate) fn link_menu(url: &str) -> Vec<MenuItem> {
-        let mut items = vec![MenuItem::action(crate::files::OPEN_IN_BROWSER, "safari", MenuAction::OpenUrl { url: url.to_owned() })];
-        if core::is_web_page(url) {
-            items.push(MenuItem::action("Open in Panel", "sidebar.right", MenuAction::PreviewPage { url: url.to_owned() }));
+        use threadbear_core::reply_links::WebLinkAction;
+        let mut items = Vec::new();
+        let browser = crate::reply_links::browser_name();
+        if let Some(path) = url.strip_prefix("file://") {
+            let path = crate::files::percent_decode(path);
+            items.push(MenuItem::action("Preview here", "sidebar.right", MenuAction::PreviewFile { path: path.clone(), title: core::last_component(&path).to_owned() }));
+            items.push(MenuItem::action("Open", "arrow.up.forward.app", MenuAction::OpenFile { path }));
+        } else {
+            let profiles = crate::reply_links::offered_profiles();
+            if profiles.is_empty() {
+                // The browser by name where the system says ("Open in Safari").
+                let title = if browser.is_some() { WebLinkAction::Browser.title(browser.as_deref()) } else { crate::files::OPEN_IN_BROWSER.to_owned() };
+                items.push(MenuItem::action(title, WebLinkAction::Browser.symbol(), MenuAction::OpenUrl { url: url.to_owned() }));
+            }
+            for profile in &profiles {
+                items.push(MenuItem::action(profile.title(), WebLinkAction::Browser.symbol(), MenuAction::OpenInProfile { url: url.to_owned(), directory: profile.directory.clone() }));
+            }
+            if core::is_web_page(url) {
+                items.push(MenuItem::action("Open in Panel", "sidebar.right", MenuAction::PreviewPage { url: url.to_owned() }));
+            }
         }
         items.push(MenuItem::action("Copy link", "link", MenuAction::Copy { text: url.to_owned() }));
+        if core::is_web_page(url) {
+            items.push(MenuItem::separator());
+            let click = crate::reply_links::web_click();
+            let choices = WebLinkAction::ALL
+                .into_iter()
+                .map(|action| MenuItem { title: action.title(browser.as_deref()), symbol: Some(action.symbol()), action: Some(MenuAction::SetWebClick { action }), checked: action == click, children: vec![] })
+                .collect();
+            items.push(MenuItem::submenu(threadbear_core::reply_links::DEFAULT_TITLE, threadbear_core::reply_links::DEFAULT_SYMBOL, choices));
+        }
         items
     }
 
@@ -709,6 +824,18 @@ impl SidePane {
     fn open_file_row_menu(&mut self, path: &str, title: &str, thread: &ThreadSummary, position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
         let items = Self::file_menu(path, title, thread);
         self.open_menu(items, position, window, cx);
+    }
+
+    /// A Scheduled row's right-click menu (`scheduleRow`'s `iconContextMenu`).
+    pub(crate) fn schedule_menu(id: &str) -> Vec<MenuItem> {
+        vec![MenuItem::action("Edit", "pencil", MenuAction::EditSchedule { id: id.to_owned() }), MenuItem::action("Show all schedules", "clock", MenuAction::ShowSchedules)]
+    }
+
+    /// A Scheduled row's click: the schedule in the app's editor (`editSchedule`).
+    pub(crate) fn edit_schedule(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(app) = self.app.upgrade() {
+            app.update(cx, |app, cx| app.edit_schedule(id, window, cx));
+        }
     }
 
     fn open_link_row_menu(&mut self, url: &str, position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
@@ -764,7 +891,7 @@ pub(crate) fn icon(name: &str, size: f32, color: Hsla) -> Icon {
 pub(crate) fn tipped(el: Stateful<Div>, tip: impl Into<SharedString>) -> gpui_kit::base::ObservedElement<Stateful<Div>> {
     let text: SharedString = tip.into();
     let shown = text.clone();
-    el.test_support().aria_label(text).tooltip(move |window, cx| Tooltip::new(shown.clone()).build(window, cx))
+    el.test_support().aria_label(text).tip(shown)
 }
 
 /// One row in the pane's lists (`PaneRow`): a grey icon, the title with a word
@@ -786,6 +913,8 @@ pub(crate) struct PaneRow {
     pub tip: Option<String>,
     pub on_click: Option<Rc<dyn Fn(&mut SidePane, &mut Window, &mut Context<SidePane>)>>,
     pub on_menu: Option<Rc<dyn Fn(&mut SidePane, Point<Pixels>, &mut Window, &mut Context<SidePane>)>>,
+    /// A file on this Mac it drags out as (file_drag.rs).
+    pub drag: Option<String>,
 }
 
 impl PaneRow {
@@ -807,6 +936,7 @@ impl PaneRow {
             tip: None,
             on_click: None,
             on_menu: None,
+            drag: None,
         }
     }
 
@@ -885,6 +1015,13 @@ impl PaneRow {
         self
     }
 
+    /// Dragged out, it's this file on this Mac (file_drag.rs). None for
+    /// another Mac's, whose paths are that Mac's.
+    pub(crate) fn drag(mut self, path: Option<String>) -> Self {
+        self.drag = path;
+        self
+    }
+
     pub(crate) fn render(self, p: Palette, cx: &mut Context<SidePane>) -> impl IntoElement + use<> {
         let hover = p.hover;
         let label_color = if self.quiet { p.secondary } else { p.fg };
@@ -893,18 +1030,18 @@ impl PaneRow {
             .gap(px(6.))
             .min_w_0()
             .when_some(self.lead, |s, lead| s.child(div().flex_none().font_family(cx.theme().mono_font_family.clone()).text_size(px(style::size::DETAIL)).text_color(p.secondary).child(lead)))
-            .child(div().min_w_0().truncate().text_size(px(style::size::LABEL)).line_height(px(17.)).text_color(label_color).child(self.title.clone()))
+            .child(div().min_w_0().truncate().text_size(px(style::size::LABEL)).line_height(px(style::natural_line(style::size::LABEL))).text_color(label_color).child(self.title.clone()))
             .child(div().flex_1().min_w(px(4.)))
-            .when_some(self.trailing, |s, t| s.child(div().flex_none().text_size(px(style::size::SMALL)).text_color(p.faint).child(t)))
+            .when_some(self.trailing, |s, t| s.child(div().flex_none().text_size(px(style::size::SMALL)).line_height(px(style::natural_line(style::size::SMALL))).text_color(p.faint).child(t)))
             .when_some(self.trailing_symbol, |s, symbol| s.child(icon(&symbol, 11., p.secondary)));
         let body = v_flex()
             .flex_1()
             .min_w_0()
             .gap(px(2.))
             .child(title_row)
-            .when_some(self.note.filter(|n| !n.is_empty()), |s, note| s.child(div().text_size(px(style::size::DETAIL)).line_height(px(16.)).text_color(p.secondary).line_clamp(4).overflow_hidden().text_ellipsis().child(note)))
+            .when_some(self.note.filter(|n| !n.is_empty()), |s, note| s.child(div().text_size(px(style::size::DETAIL)).line_height(px(style::natural_line(style::size::DETAIL))).text_color(p.secondary).line_clamp(4).overflow_hidden().text_ellipsis().child(note)))
             .when_some(self.detail.filter(|d| !d.is_empty()), |s, detail| {
-                let mut d = div().text_size(px(style::size::SMALL)).line_height(px(14.)).text_color(p.faint);
+                let mut d = div().text_size(px(style::size::SMALL)).line_height(px(style::natural_line(style::size::SMALL))).text_color(p.faint);
                 d = if self.detail_lines > 1 { d.line_clamp(self.detail_lines).overflow_hidden().text_ellipsis() } else { d.truncate() };
                 s.child(d.child(detail))
             });
@@ -922,7 +1059,7 @@ impl PaneRow {
         let row = row.when(self.on_click.is_some(), |s| s.hover(move |st| st.bg(hover)).cursor_pointer());
         let mut wrapper = div().id(self.id).px(px(OUTER_INSET)).child(row);
         if let Some(tip) = self.tip {
-            wrapper = wrapper.tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx));
+            wrapper = wrapper.tip(tip.clone());
         }
         let mut wrapper = wrapper.test_support().aria_label(SharedString::from(self.title));
         if let Some(click) = self.on_click {
@@ -931,7 +1068,7 @@ impl PaneRow {
         if let Some(menu) = self.on_menu {
             wrapper = wrapper.on_mouse_down(MouseButton::Right, cx.listener(move |this, ev: &MouseDownEvent, window, cx| (menu)(this, ev.position, window, cx)));
         }
-        wrapper
+        crate::file_drag::FileDragExt::file_drag(wrapper, self.drag)
     }
 
 }
@@ -955,7 +1092,7 @@ impl SidePane {
         let (fg, secondary, faint, hairline) = (p.fg, p.secondary, p.faint, p.hairline);
         let hover_group = group.clone();
         let chevron_group = group.clone();
-        let title_el = div().flex_none().text_size(px(style::size::LABEL)).line_height(px(16.)).font_semibold().text_color(secondary).group_hover(hover_group, move |s| s.text_color(fg)).child(h.title.clone());
+        let title_el = style::group_hover_text(div().id(SharedString::from(format!("hl-heading-title-{}", h.key))).flex_none().text_size(px(style::size::LABEL)).line_height(px(style::natural_line(style::size::LABEL))).font_semibold().text_color(secondary), hover_group, fg).child(h.title.clone());
         let mut label = h_flex().group(group.clone()).flex_1().min_w_0().gap(px(6.)).pl(px(LEADING)).pt(px(18.)).pb(px(6.)).items_center();
         if let Some(leading) = h.icon {
             label = label.child(leading);
@@ -1041,6 +1178,8 @@ impl SidePane {
         }
         let (menu_item, menu_thread) = (item.clone(), thread.clone());
         pr = pr.on_menu(move |this, pos, window, cx| this.open_highlight_menu(&menu_item, &menu_thread, pos, window, cx));
+        // A file of this Mac's drags out as itself (`fileDrag`).
+        pr = pr.drag(item.path.clone().filter(|_| !thread.is_remote()));
         pr.render(p, cx).into_any_element()
     }
 
@@ -1111,7 +1250,14 @@ impl SidePane {
             list = list.child(self.heading(Heading { key: fold::SCHEDULED.to_owned(), title: "Scheduled".into(), icon: Some(icon("clock", 11., p.secondary).into_any_element()), count: Some(scheduled.len()), folded, foldable: true, accessory: None }, p, cx));
             if !folded {
                 for row in scheduled {
-                    let pr = PaneRow::new(SharedString::from(format!("hl-sched-{}", row.id)), row.title).icon(if row.paused { "pause.circle" } else { "clock" }).trailing(row.when).detail(Some(row.detail));
+                    let (edit_id, menu_id) = (row.id.clone(), row.id.clone());
+                    let pr = PaneRow::new(SharedString::from(format!("hl-sched-{}", row.id)), row.title)
+                        .icon(if row.paused { "pause.circle" } else { "clock" })
+                        .trailing(row.when)
+                        .detail(Some(row.detail))
+                        .tip("Edit the schedule")
+                        .on_click(move |this, window, cx| this.edit_schedule(&edit_id, window, cx))
+                        .on_menu(move |this, pos, window, cx| this.open_menu(Self::schedule_menu(&menu_id), pos, window, cx));
                     list = list.child(pr.render(p, cx));
                 }
             }
@@ -1136,10 +1282,13 @@ impl SidePane {
                         .trailing(Some(side::subagent_duration(s, now)))
                         .detail(Some(side::subagent_detail(s)))
                         .tip(format!("{}. Click to read its transcript.", side::subagent_status_text(s)))
-                        .on_click(move |this, window, cx| {
-                            let id = id.clone();
-                            if let Some(app) = this.app.upgrade() {
-                                app.update(cx, |t, cx| t.open(id, window, cx));
+                        .on_click({
+                            let sub_id = s.id.clone();
+                            move |this, window, cx| {
+                                let (id, sub_id) = (id.clone(), sub_id.clone());
+                                if let Some(app) = this.app.upgrade() {
+                                    app.update(cx, |t, cx| t.open_subagent(id, sub_id, window, cx));
+                                }
                             }
                         });
                     list = list.child(pr.render(p, cx));
@@ -1163,7 +1312,7 @@ impl SidePane {
                         _ => None,
                     };
                     let (id, title) = (row.thread.id.clone(), row.thread.title.clone());
-                    let open_id = id.clone();
+                    let (open_id, menu_id) = (id.clone(), id.clone());
                     let pr = PaneRow::new(SharedString::from(format!("hl-started-{id}")), title)
                         .icon(core::started_icon(row.state))
                         .tinted(color)
@@ -1174,6 +1323,14 @@ impl SidePane {
                             if let Some(app) = this.app.upgrade() {
                                 app.update(cx, |t, cx| t.open(id, window, cx));
                             }
+                        })
+                        // Open, or Open in New Panel (`startedRow`'s menu).
+                        .on_menu(move |this, pos, window, cx| {
+                            let items = vec![
+                                MenuItem::action("Open", "arrow.up.forward", MenuAction::OpenThread { id: menu_id.clone() }),
+                                MenuItem::action("Open in New Panel", "rectangle.split.2x1", MenuAction::OpenThreadInPanel { id: menu_id.clone() }),
+                            ];
+                            this.open_menu(items, pos, window, cx);
                         });
                     list = list.child(pr.render(p, cx));
                 }
@@ -1234,7 +1391,7 @@ impl SidePane {
         div().id("highlights-scroll").size_full().overflow_y_scroll().track_scroll(&self.scroll).child(list).into_any_element()
     }
 
-    fn schedule_rows(&self, thread: &ThreadSummary, cx: &App) -> Vec<core::ScheduleRow> {
+    pub(crate) fn schedule_rows(&self, thread: &ThreadSummary, cx: &App) -> Vec<core::ScheduleRow> {
         let threads = self.app.upgrade().map(|a| a.read(cx).threads.clone()).unwrap_or_default();
         core::schedule_rows(thread, &self.schedules, now_ms(), |s| match s.thread_id.as_deref() {
             Some(id) => threads.get(id).map_or_else(|| "A thread that's gone".to_owned(), |t| if t.title.is_empty() { "Untitled".to_owned() } else { t.title.clone() }),
@@ -1265,8 +1422,8 @@ impl SidePane {
                     .flex_1()
                     .min_w_0()
                     .gap(px(2.))
-                    .child(div().text_size(px(style::size::LABEL)).line_height(px(17.)).text_color(label_color).when(ticked, |s| s.line_through()).child(action))
-                    .when_some(where_text, |s, place| s.child(div().text_size(px(style::size::SMALL)).text_color(p.faint).line_clamp(2).child(place))),
+                    .child(div().text_size(px(style::size::LABEL)).line_height(px(style::natural_line(style::size::LABEL))).text_color(label_color).when(ticked, |s| s.line_through()).child(action))
+                    .when_some(where_text, |s, place| s.child(div().text_size(px(style::size::SMALL)).line_height(px(style::natural_line(style::size::SMALL))).text_color(p.faint).line_clamp(2).child(place))),
             )
             .into_any_element()
     }
@@ -1314,6 +1471,7 @@ impl SidePane {
                         .detail(Some(core::text::folder(path, Some(&thread.cwd), &crate::files::home_dir())))
                         .indent()
                         .tip("Open in its app")
+                        .drag(Some(path.clone()).filter(|_| !thread.is_remote()))
                         .on_click(move |this, _window, cx| {
                             // Code to read in an editor, not to review. Another Mac's
                             // copy is fetched and opened by files.rs.
@@ -1372,6 +1530,8 @@ impl Render for SidePane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
         let bg = cx.theme().background;
+        // The folder showing is the one kept up to date (folders.rs).
+        self.keep_folder_current(cx);
         let Some(thread) = self.thread(cx) else {
             return v_flex().size_full().bg(bg).child(crate::files::pane_note("Pick a thread to see its Highlights.", p)).into_any_element();
         };
@@ -1381,8 +1541,12 @@ impl Render for SidePane {
         // and the Swift pane has nothing between the two (PaneHeader is gone
         // from its panes); a second "Highlights" under the first looked off.
         let previewing = self.previews.get(&thread.id).is_some_and(|pv| pv.from == section);
-        let header = previewing.then(|| self.render_header(&thread, &section, cx).into_any_element());
-        let body = if let Some(preview) = self.previews.get(&thread.id).filter(|pv| pv.from == section).cloned() {
+        // Words explained show over the section, as a preview does (explain_pane.rs).
+        let explaining = self.explaining(&thread.id);
+        let header = if explaining { Some(self.render_explain_header(&thread, &section, cx)) } else { previewing.then(|| self.render_header(&thread, &section, cx).into_any_element()) };
+        let body = if explaining {
+            self.render_explain(&thread, window, cx)
+        } else if let Some(preview) = self.previews.get(&thread.id).filter(|pv| pv.from == section).cloned() {
             self.render_preview(&thread, &preview, window, cx)
         } else {
             match section.as_str() {
@@ -1449,7 +1613,7 @@ impl SidePane {
             let summary = thread.patches().iter().map(|p| if p.error.is_some() { format!("{} (error)", p.id) } else { p.id.clone() }).collect::<Vec<_>>().join(", ");
             items.push(json!({ "id": PATCHES, "title": "Patches", "kind": "patches", "note": summary, "active": section == PATCHES }));
         }
-        let preview = self.previews.get(&thread.id).map(|pv| self.preview_line(pv));
+        let preview = self.explain_line(&thread.id).or_else(|| self.previews.get(&thread.id).map(|pv| self.preview_line(pv)));
         json!({ "shown": true, "width": PANE_WIDTH as i64, "items": items, "preview": preview, "highlights": self.highlights_line(&thread.id), "pane": self.pane_dump(&thread, &section, cx) })
     }
 
@@ -1488,6 +1652,11 @@ impl SidePane {
         if let Some(folder) = self.folder_summary(thread, cx) {
             pane.insert("folder".into(), json!(folder));
         }
+        // An explanation, as the Swift dump has it.
+        if self.explaining(&thread.id) {
+            pane.insert("previewKind".into(), json!("note"));
+            return Value::Object(pane);
+        }
         if let Some(preview) = self.previews.get(&thread.id).filter(|pv| pv.from == section) {
             self.fill_preview_dump(&mut pane, preview, cx);
             return Value::Object(pane);
@@ -1496,7 +1665,11 @@ impl SidePane {
             HIGHLIGHTS => self.fill_highlights_dump(&mut pane, thread, cx),
             PATCHES => self.fill_patches_dump(&mut pane, thread),
             FILES => {}
-            id => self.fill_panel_dump(&mut pane, thread, id),
+            id => {
+                self.fill_panel_dump(&mut pane, thread, id);
+                // A page panel's page, drawn by web_panels.rs.
+                crate::web_panels::fill_pane_dump(&mut pane, thread, id, cx);
+            }
         }
         Value::Object(pane)
     }
@@ -1700,6 +1873,16 @@ fn highlight_command(side: &Entity<SidePane>, thread: &ThreadSummary, cmd: &Valu
             }
             cx.notify();
         });
+        return Ok(json!("ok"));
+    }
+    // A Scheduled row, by its title: "schedule" clicks it (the editor opens
+    // on it), "scheduleMenu" lists its right-click menu.
+    if let Some(title) = cmd["schedule"].as_str().or_else(|| cmd["scheduleMenu"].as_str()) {
+        let row = side.read(cx).schedule_rows(thread, cx).into_iter().find(|r| r.title == title).ok_or_else(|| format!("no Scheduled row {title}"))?;
+        if cmd["scheduleMenu"].is_string() {
+            return Ok(json!(format!("ok {}", SidePane::schedule_menu(&row.id).iter().map(|i| i.title.clone()).collect::<Vec<_>>().join(" | "))));
+        }
+        side.update(cx, |pane, cx| pane.edit_schedule(&row.id, window, cx));
         return Ok(json!("ok"));
     }
     let pane = side.read(cx);

@@ -84,6 +84,9 @@ public struct ProjectCard: Sendable, Equatable, Identifiable {
     public var lastActivityAt: Date
     /// Its newest few open threads' titles, for the card's foot.
     public var recent: [String]
+    /// Its parts (docs/protocol.md, Projects, "Parts"), shown inside its
+    /// card rather than as cards of their own. Its status counts theirs.
+    public var parts: [Project] = []
 
     public var id: String { project.id }
 
@@ -96,13 +99,18 @@ public struct ProjectCard: Sendable, Equatable, Identifiable {
 
     /// `decisions`: count each project's open asks (the projectDecisions
     /// experiment).
+    /// A card for each project of its own; a part is inside its parent's,
+    /// which counts the part's threads too, each once.
     public static func build(_ sections: ProjectSections, recent count: Int = 3, decisions: Bool = false) -> [ProjectCard] {
-        sections.sections.map { section in
-            ProjectCard(
+        sections.topLevel.map { section in
+            let parts = sections.parts[section.id] ?? []
+            let threads = sections.threadsWithParts(section)
+            return ProjectCard(
                 project: section.project,
-                status: ProjectCardStatus(threads: section.threads, decisions: decisions),
-                lastActivityAt: section.lastActivityAt,
-                recent: section.threads.prefix(count).map { $0.title.isEmpty ? "Untitled" : $0.title }
+                status: ProjectCardStatus(threads: threads, decisions: decisions),
+                lastActivityAt: ([section] + parts).map(\.lastActivityAt).max() ?? section.lastActivityAt,
+                recent: threads.prefix(count).map { $0.title.isEmpty ? "Untitled" : $0.title },
+                parts: parts.map(\.project)
             )
         }
     }
@@ -119,7 +127,8 @@ public struct ProjectCard: Sendable, Equatable, Identifiable {
         let hit = { (text: String) in
             words.allSatisfy { text.range(of: $0, options: [.caseInsensitive, .diacriticInsensitive]) != nil }
         }
-        let found = cards.filter { hit($0.project.searchText) }
+        // A part is inside its parent's card, so its name finds that card.
+        let found = cards.filter { hit(([$0.project.searchText] + $0.parts.map(\.searchText)).joined(separator: "\n")) }
         let inTitle = found.filter { hit($0.project.title) }
         return inTitle + found.filter { !hit($0.project.title) }
     }

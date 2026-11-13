@@ -13,6 +13,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import type { Runner } from '../runner.ts';
+import { normaliseRecord, type ThreadRecord } from '../store.ts';
 import type { RunnerPart } from './part.ts';
 import { providerName } from '../providers.ts';
 import { paths } from '../config.ts';
@@ -26,7 +27,9 @@ import { isPatchFile, patchHash } from '../patch-trust.ts';
 import { claudeCommands } from '../claude-trust.ts';
 import { untrustedGit } from '../safe-git.ts';
 import { isPermissionMode } from '../protocol.ts';
-import { cleanUpWorktree, makeWorktree, mainCheckoutOf, realpath, type WorktreeRecord } from '../worktrees.ts';
+import { isThreadIdShape } from '../thread-id.ts';
+import { fitReview } from '../reviews.ts';
+import { cleanUpWorktree, makeWorktree, MAIN, parseCheckouts, realpath, type WorktreeRecord } from '../worktrees.ts';
 
 // What T placed for a move, so adopting after a restart and throwing it
 // away after a failure both know (<home>/moves/<moveId>/placed.json).
@@ -85,6 +88,20 @@ function dropMovedPowers(rec: Record<string, any>): boolean {
   return changed;
 }
 
+// The moved record's reviews (show_options) cut to what show_options takes
+// here (reviews.ts fitReview): they're the other runner's word, and the
+// review window draws their notes on every render, so a note of megabytes
+// would stall it (Daybreak 93, 11 Nov 2026). One that isn't a review at
+// all goes. True if it changed.
+function fitMovedReviews(rec: Record<string, any>): boolean {
+  if (rec.reviews === undefined) return false;
+  const before = JSON.stringify(rec.reviews);
+  const fitted = Array.isArray(rec.reviews) ? rec.reviews.flatMap((r: unknown) => fitReview(r) ?? []) : [];
+  if (fitted.length) rec.reviews = fitted;
+  else delete rec.reviews;
+  return JSON.stringify(rec.reviews) !== before;
+}
+
 // On the main Mac, a thread from another runner arrives with at most Ask
 // (Mike, 10 Nov 2026): its mode is that runner's word, an extra Mac may be
 // compromised, and the main Mac's sidebar never showed what mode the
@@ -126,7 +143,11 @@ function cappedNote(was: string, from: string): string {
 // the main Mac capMovedMode. The note's line about the mode goes in
 // `notes`. True if it changed.
 function sanitizeMoved(rec: Record<string, any>, atMostAsk: boolean, from: string, notes: string[]): boolean {
-  let changed = dropMovedPowers(rec);
+  // Lists and objects the runner walks at every start in the shape it
+  // expects, press notes well formed and bounded (store.ts normaliseRecord).
+  let changed = normaliseRecord(rec);
+  changed = dropMovedPowers(rec) || changed;
+  changed = fitMovedReviews(rec) || changed;
   if (atMostAsk) {
     const capped = capMovedMode(rec);
     if (capped.was && !notes.some((n) => n.includes('so it asks before tools run here'))) notes.push(cappedNote(capped.was, from));
@@ -252,9 +273,196 @@ export async function dropUntrackedPackages(dir: string): Promise<void> {
   for (const rel of listed.ok ? listed.stdout.split('\0').filter(Boolean) : []) fs.rmSync(path.join(dir, ...rel.split('/')), { force: true });
 }
 
+type ThreadRecordLike = Pick<ThreadRecord, 'id' | 'worktree'>;
+
+// The checkout with main checked out, for a repo a thread is in or the
+// other runner named: through safe-git like every other git here, as the
+// folder is anyone's (Muse's review, 11 Nov 2026).
+async function mainCheckoutOf(top: string): Promise<string | undefined> {
+  const r = await untrustedGit(top, ['worktree', 'list', '--porcelain']);
+  return r.ok ? parseCheckouts(r.stdout.trim()).find((c) => c.branch === MAIN)?.path : undefined;
+}
+
 const UNVOUCHED_NOTE = "Its worktree's work changes this repo's patches or Claude Code settings, so they wait for you to trust them in Patches here.";
 
+// The words adoptMoved has put on every thread it took in since moves
+// began (8 Nov 2026), as JSON has them in its event log.
+const MOVED_IN = Buffer.from('"text":"Moved from ');
+
+// Whether the thread's event log says another runner moved it here. Read
+// in pieces, as a log can be large. A log that's there but can't be read
+// counts as moved: unknown is held.
+export function eventsSayMovedIn(threadDir: string): boolean {
+  let fd: number;
+  try {
+    fd = fs.openSync(path.join(threadDir, 'events.ndjson'), 'r');
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code !== 'ENOENT';
+  }
+  try {
+    const chunk = Buffer.alloc(1 << 20);
+    let carry = Buffer.alloc(0);
+    for (;;) {
+      const n = fs.readSync(fd, chunk, 0, chunk.length, null);
+      if (n <= 0) return false;
+      const buf = Buffer.concat([carry, chunk.subarray(0, n)]);
+      if (buf.includes(MOVED_IN)) return true;
+      carry = buf.subarray(Math.max(0, buf.length - MOVED_IN.length + 1));
+    }
+  } catch {
+    return true;
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+// The worktrees a thread's log says it was moved into, from each
+// "Moved from <name> to <name>, in <folder>." note adoptMoved wrote. The
+// note isn't parsed for its folder, as a name (the other runner's own) or
+// a folder can hold ", in /" or ". " too: every "/..." after a ", in "
+// up to each "." is taken, up to the top of its checkout, when that's a
+// linked worktree (its .git a file). Only a
+// worktree: the log came from the other runner, which could name any
+// folder, and holding a checkout itself would take its trust away. Read
+// in pieces, as a log can be large.
+const MAX_NOTE = 64 * 1024;
+const MAX_ANCHORS = 16;
+const MAX_DOTS = 64;
+const MAX_PATH = 1024;
+export function movedInWorktrees(threadDir: string): string[] {
+  const out = new Set<string>();
+  const tops = new Map<string, 'worktree' | 'checkout' | 'none'>();
+  const take = (line: string) => {
+    let ev: { type?: unknown; text?: unknown };
+    try {
+      ev = JSON.parse(line);
+    } catch {
+      return;
+    }
+    if (ev.type !== 'system.note' || typeof ev.text !== 'string' || !ev.text.startsWith('Moved from ')) return;
+    const text = ev.text.slice(0, MAX_NOTE);
+    let anchors = 0;
+    for (let at = text.indexOf(', in /'); at >= 0 && anchors++ < MAX_ANCHORS; at = text.indexOf(', in /', at + 1)) {
+      const from = at + ', in '.length;
+      // A path is at most PATH_MAX long, so no "." further on can end one.
+      let dots = 0;
+      for (let dot = text.indexOf('.', from); dot >= 0 && dot - from <= MAX_PATH && dots++ < MAX_DOTS; dot = text.indexOf('.', dot + 1)) {
+        // Up from there to the first folder with a .git (a subfolder may
+        // be gone since, and a candidate with words after the path ends
+        // in its folder), each folder looked at once.
+        for (let d = text.slice(from, dot); path.dirname(d) !== d; d = path.dirname(d)) {
+          let found = tops.get(d);
+          if (found === undefined) {
+            try {
+              found = fs.lstatSync(path.join(d, '.git')).isFile() ? 'worktree' : 'checkout';
+            } catch {
+              found = 'none';
+            }
+            tops.set(d, found);
+          }
+          if (found === 'none') continue;
+          if (found === 'worktree') out.add(d);
+          break;
+        }
+      }
+    }
+  };
+  // The start of a line too long to read whole: its note's text as far as
+  // it goes, from the JSON string's own start.
+  const takeStart = (head: string) => {
+    const at = head.indexOf('"text":"Moved from ');
+    if (at < 0 || !head.slice(0, at).includes('"type":"system.note"')) return;
+    let raw = head.slice(at + '"text":'.length);
+    const end = /[^\\](?:\\\\)*"/.exec(raw.slice(1));
+    if (end) raw = raw.slice(0, end.index + end[0].length + 1);
+    else raw = raw.replace(/\\+$/, (b) => (b.length % 2 ? b.slice(1) : b)).replace(/\\u[0-9a-fA-F]{0,3}$/, '') + '"';
+    try {
+      take(JSON.stringify({ type: 'system.note', text: JSON.parse(raw) }));
+    } catch {
+      // Not readable as far as it goes.
+    }
+  };
+  let fd: number;
+  try {
+    fd = fs.openSync(path.join(threadDir, 'events.ndjson'), 'r');
+  } catch {
+    return [];
+  }
+  try {
+    // Split as bytes, so a character across two pieces stays whole.
+    const chunk = Buffer.alloc(1 << 20);
+    let rest = Buffer.alloc(0);
+    let skipping = false;
+    for (;;) {
+      const n = fs.readSync(fd, chunk, 0, chunk.length, null);
+      let buf = n > 0 ? Buffer.concat([rest, chunk.subarray(0, n)]) : rest;
+      for (let nl = buf.indexOf(0x0a); nl >= 0; nl = buf.indexOf(0x0a)) {
+        const line = buf.subarray(0, nl);
+        if (!skipping && line.includes(MOVED_IN)) take(line.toString('utf8'));
+        skipping = false;
+        buf = buf.subarray(nl + 1);
+      }
+      if (n <= 0) {
+        if (!skipping && buf.includes(MOVED_IN)) take(buf.toString('utf8'));
+        break;
+      }
+      // A line longer than a note needs is read from its start (where the
+      // folder is: the rest is what was left behind) and passed over to its
+      // end, rather than copied again with each piece.
+      if (!skipping && buf.length > MAX_NOTE * 4) {
+        takeStart(buf.subarray(0, MAX_NOTE * 4).toString('utf8'));
+        skipping = true;
+        buf = Buffer.alloc(0);
+      } else if (skipping) buf = Buffer.alloc(0);
+      rest = Buffer.from(buf);
+    }
+  } catch {
+    // What was read is what's held.
+  } finally {
+    fs.closeSync(fd);
+  }
+  return [...out];
+}
+
 export const movesPart = {
+  // At start, before anything loads a patch or starts a CLI: the worktrees
+  // the always-trust doesn't reach, worked out again from the threads when
+  // patch-trust-unvouched.json can't be relied on (missing, unreadable, or
+  // from before it was complete; PatchTrust.unvouchedKnown). The list moved
+  // twice on 10 Nov 2026 without bringing its old forms, so an upgrade
+  // trusted again what a move had held (security review, 11 Nov 2026,
+  // findings 90 and 91). What's held: a worktree its record marks (this
+  // runner's movedIn, an older one's `unvouched`), and one whose thread's
+  // log says it was moved here, as a move finished before any mark can't
+  // say whether its work changed what trust covers. A clean move is held
+  // too, then: trusting its patches in Patches lets them run.
+  // `broken`: threads whose record can't be read, about to be rebuilt
+  // without their worktree: the worktree their log's note names is held,
+  // if it's one (movedInWorktrees).
+  settleUnvouched(this: Runner, records: ThreadRecordLike[], broken: string[] = []): void {
+    this.unvouchedSettled = true;
+    const trust = this.patchTrust;
+    if (!trust.unvouchedKnown || !trust.settleUnvouched || trust.unvouchedKnown()) return;
+    const live = new Set<string>();
+    for (const rec of records) {
+      const w = rec.worktree;
+      if (w && typeof w.path === 'string' && !w.removedAt && !w.movedIn && w.unvouched !== true) live.add(realpath(w.path));
+    }
+    const held: string[] = [];
+    for (const rec of records) {
+      const w = rec.worktree;
+      if (!w || typeof w.path !== 'string') continue;
+      // A folder set aside and since given to a thread of this runner's
+      // own is that thread's: made afresh from main.
+      if (w.removedAt && live.has(realpath(w.path))) continue;
+      if (w.removedAt && !fs.existsSync(w.path)) continue;
+      if (w.movedIn === true || w.unvouched === true || eventsSayMovedIn(this.store.threadDir(rec.id))) held.push(w.path);
+    }
+    for (const id of broken) held.push(...movedInWorktrees(this.store.threadDir(id)));
+    trust.settleUnvouched(held);
+    this.log.info('worked out which worktrees patch trust holds', { held: held.length });
+  },
+
   // ThreadSummary.moving, and while it's set no turn starts: messages wait
   // in the queue, which moves with the thread. Cleared, the queue goes on.
   setMoving(this: Runner, threadId: string, moving: ThreadMoving | undefined): void {
@@ -453,6 +661,9 @@ export const movesPart = {
   // T: everything in place but the thread itself, which waits in staging
   // until the switch. Throws (after undoing what it made) to fail the move.
   async placeMove(this: Runner, row: MoveRow, entries: PackEntry[]): Promise<void> {
+    // The id names the thread's folder here, and the apps put it in shell
+    // lines and links: only a thread id's shape (thread-id.ts).
+    if (!isThreadIdShape(row.threadId)) throw new Error("The moved thread's id isn't a thread id.");
     const plan = row.plan!;
     const stage = stageOf(this.cfg.home, row.moveId);
     fs.rmSync(stage, { recursive: true, force: true });
@@ -491,7 +702,7 @@ export const movesPart = {
         if (!patch) throw new Error(`${plan.worktree.repo} on ${this.moveRunnerName(row.to)} has no worktree patch, so the thread's worktree has nowhere to go.`);
         const made = await makeWorktree({ cwd: plan.worktree.repo, threadId: row.threadId, patch });
         if (!made.ok) throw new Error(`Couldn't make the thread's worktree: ${made.reason}`);
-        placed.worktree = made.worktree;
+        placed.worktree = { ...made.worktree, movedIn: true };
         placed.patchFile = made.patchFile;
         placed.patchName = patch.patch;
         placed.cwd = plan.worktree.subdir ? path.join(made.worktree.path, ...plan.worktree.subdir.split('/')) : made.worktree.path;
@@ -508,8 +719,8 @@ export const movesPart = {
           // Patches and Claude settings it changed are held to the stored
           // hashes here, even in an always-trusted checkout.
           placed.gitTips = [meta.head, ...(meta.wip ? [meta.wip] : [])];
-          if (await trustTouchedByMove(made.worktree, os.homedir(), placed.gitTips, plan.worktree.subdir ? path.join(made.worktree.path, ...plan.worktree.subdir.split('/')) : made.worktree.path)) {
-            this.patchTrust.unvouch?.(made.worktree.path);
+          if (await trustTouchedByMove(placed.worktree, os.homedir(), placed.gitTips, plan.worktree.subdir ? path.join(made.worktree.path, ...plan.worktree.subdir.split('/')) : made.worktree.path)) {
+            this.patchTrust.unvouch?.(placed.worktree.path);
             placed.leftBehind.push(UNVOUCHED_NOTE);
             save();
           }
@@ -562,6 +773,9 @@ export const movesPart = {
   // T, after the switch: the staging folder joins the live threads. Safe to
   // call again (after a restart, say): once it's here there's nothing left.
   async adoptMoved(this: Runner, row: MoveRow): Promise<{ adopted: boolean; schedules?: MovedSchedule[] }> {
+    // As placeMove: a move an older runner placed (and this one resumes at
+    // adopting) never had its id checked, and it names the live folder.
+    if (!isThreadIdShape(row.threadId)) throw new Error("The moved thread's id isn't a thread id.");
     const stage = stageOf(this.cfg.home, row.moveId);
     const placedFile = path.join(stage, 'placed.json');
     if (!fs.existsSync(placedFile)) return { adopted: false };
@@ -587,7 +801,8 @@ export const movesPart = {
     // uncommitted work may have them there, untracked, which trust reads
     // as installed and doesn't hash: they go (setup installs them again).
     if (placed.worktree && !placed.gitTips) await dropUntrackedPackages(placed.worktree.path);
-    if (placed.worktree && (await trustTouchedByMove(placed.worktree, os.homedir(), placed.gitTips, placed.cwd))) {
+    // One an older runner marked (worktree.unvouched) stays held whatever this says.
+    if (placed.worktree && (placed.worktree.unvouched === true || (await trustTouchedByMove(placed.worktree, os.homedir(), placed.gitTips, placed.cwd)))) {
       this.patchTrust.unvouch?.(placed.worktree.path);
       if (!placed.leftBehind.includes(UNVOUCHED_NOTE)) placed.leftBehind.push(UNVOUCHED_NOTE);
     }

@@ -690,3 +690,29 @@ test("a card says why it's asking, but not that the mode asks", async () => {
   assert.equal(approvals.at(-1)!.reason, undefined);
   state.close!();
 });
+
+// Thread dcdc60a3 (11 Nov 2026): an ffmpeg job's exit came with end_turn's
+// "Now write your reply". The reply counted as the agent reading the notice,
+// so Stop asked for end_turn again, and the "Done." after the second one took
+// the reply's place. The reply is what end_turn asked for; only a tool call
+// after it is the agent acting on the notice.
+test('Stop hook: a notice handed over with "Now write your reply" does not undo end_turn', async () => {
+  const { state } = start([], {}, { mcpServersFor: () => ({ threadbear: { type: 'sdk', name: 'threadbear' } }), oneReply: () => true });
+  const stop = state.options.hooks.Stop[0].hooks[0];
+  const frames = async (thenCall: boolean) => {
+    await state.frame!({ type: 'system', subtype: 'init', session_id: 's' });
+    await state.frame!({ type: 'assistant', session_id: 's', message: { id: 'a', role: 'assistant', content: [{ type: 'text', text: 'Ready.' }, { type: 'tool_use', id: 'e1', name: END_TURN_FULL_NAME, input: { needs: 'you', asks: [{ question: 'Ship it?' }] } }] } });
+    await state.frame!({ type: 'system', subtype: 'task_notification', session_id: 's', task_id: 'b1', status: 'failed', summary: 'Background command "ffmpeg" failed with exit code 255' });
+    await state.options.hooks.PostToolUse[0].hooks[0]({ hook_event_name: 'PostToolUse', tool_name: END_TURN_FULL_NAME });
+    await state.frame!({ type: 'user', session_id: 's', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'e1', content: oneReplyAccepted(true) }] } });
+    await state.frame!({ type: 'assistant', session_id: 's', message: { id: 'b', role: 'assistant', content: [{ type: 'thinking', thinking: 'Writing it up.', signature: 'x' }, { type: 'text', text: 'Here is the full reply, with the GIF and the table.' }] } });
+    if (thenCall) await state.frame!({ type: 'assistant', session_id: 's', message: { id: 'c', role: 'assistant', content: [{ type: 'tool_use', id: 'b2', name: 'Bash', input: { command: 'cat ffmpeg.log' } }] } });
+  };
+  await frames(false);
+  assert.deepEqual(await stop({ hook_event_name: 'Stop', stop_hook_active: false }), {});
+  await state.frame!({ type: 'result', subtype: 'success', is_error: false, duration_ms: 1, session_id: 's', result: '' });
+  // Acting on the notice after the reply is past the card: asked again.
+  await frames(true);
+  assert.equal((await stop({ hook_event_name: 'Stop', stop_hook_active: false })).reason, ONE_REPLY_END_TURN_NUDGE);
+  state.close!();
+});

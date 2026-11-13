@@ -71,9 +71,6 @@ extension AppModel {
             do {
                 receive(try await client.settingsUpdate(update))
                 settingsError = nil
-                // Standing instructions' box shows only while its
-                // experiment is on, so ask again rather than wait for a reopen.
-                if update.experiments != nil { loadStandingInstructions() }
             } catch {
                 settingsError = error.localizedDescription
                 AppLog.write("rpc", "settings.update failed: \(error.localizedDescription)")

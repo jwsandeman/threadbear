@@ -163,11 +163,13 @@ pub enum ShortcutCommand {
     TogglePanels,
     ToggleTerminal,
     ResetPanelLayout,
+    /// ⌘/ folds the Threads panel away and back, keeping its place and width.
+    CollapseThreads,
     Settings,
 }
 
 impl ShortcutCommand {
-    pub const ALL: [ShortcutCommand; 22] = [
+    pub const ALL: [ShortcutCommand; 23] = [
         Self::NewThread,
         Self::Archive,
         Self::Hibernate,
@@ -189,6 +191,7 @@ impl ShortcutCommand {
         Self::TogglePanels,
         Self::ToggleTerminal,
         Self::ResetPanelLayout,
+        Self::CollapseThreads,
         Self::Settings,
     ];
 
@@ -215,6 +218,7 @@ impl ShortcutCommand {
             Self::TogglePanels => "togglePanels",
             Self::ToggleTerminal => "toggleTerminal",
             Self::ResetPanelLayout => "resetPanelLayout",
+            Self::CollapseThreads => "collapseThreads",
             Self::Settings => "settings",
         }
     }
@@ -246,6 +250,7 @@ impl ShortcutCommand {
             Self::TogglePanels => "Show Panels",
             Self::ToggleTerminal => "Show Terminal",
             Self::ResetPanelLayout => "Reset Panel Layout",
+            Self::CollapseThreads => "Collapse Threads",
             Self::Settings => "Settings…",
         }
     }
@@ -272,6 +277,7 @@ impl ShortcutCommand {
             Self::TogglePanels => Some(ShortcutKey::with("p", true, false, false)),
             // VS Code's and T3 Code's key for their terminal.
             Self::ToggleTerminal => Some(ShortcutKey::new("j")),
+            Self::CollapseThreads => Some(ShortcutKey::new("/")),
             Self::Hibernate | Self::ShowHibernating | Self::ShowArchived | Self::ResetPanelLayout => None,
         }
     }
@@ -420,11 +426,12 @@ mod tests {
     }
 
     #[test]
-    fn the_defaults_are_the_twenty_two_in_the_menus() {
+    fn the_defaults_are_the_twenty_three_in_the_menus() {
         let keys: Vec<ShortcutKey> = ShortcutCommand::ALL.iter().filter_map(|c| c.default_key()).collect();
         let unique: std::collections::HashSet<&ShortcutKey> = keys.iter().collect();
         assert_eq!(keys.len(), unique.len(), "two commands can't start on one key");
-        assert_eq!(ShortcutCommand::ALL.len(), 22);
+        assert_eq!(ShortcutCommand::ALL.len(), 23);
+        assert_eq!(ShortcutCommand::CollapseThreads.default_key(), Some(key("cmd+/")));
     }
 
     #[test]

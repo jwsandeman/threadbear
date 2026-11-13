@@ -169,3 +169,90 @@ rm -rf "$HOME"/.cache/threadbear-check/gpui/target-*
   assert.ok(fs.existsSync(path.join(h.base, target, '.in-use')));
   assert.ok(Date.now() - fs.statSync(path.join(h.base, src)).mtimeMs < HOUR, 'the copy looks used, whatever rsync set');
 });
+
+// 12 Nov: seven targets of 5 to 7 GiB on Tinker Desk, grown between runs
+// until it had 1.8 GiB free and no check could run there.
+const MANY = {
+  'src-aaa': 0, 'target-aaa': 0, // this checkout
+  'src-bbb': 1, 'target-bbb': 1,
+  'src-ccc': 2, 'target-ccc': 2,
+  'src-ddd': 3, 'target-ddd': 3,
+  'src-eee': 4, 'target-eee': 4,
+  'src-fff': 5, 'target-fff': 5,
+  'src-ggg': 0.1, 'target-ggg': 0.1, // building now
+};
+
+test('past the cap, the idle ones longest unused go even with room to spare, copies and all', (t) => {
+  const h = host(t, 400, MANY);
+  const r = h.trim();
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(h.left(), ['target-aaa', 'target-bbb', 'target-ccc', 'target-ggg']);
+  assert.match(r.stderr, /More than 4 build folders/);
+  const srcs = fs.readdirSync(h.base).filter((n) => n.startsWith('src-')).sort();
+  assert.deepEqual(srcs, ['src-aaa', 'src-bbb', 'src-ccc', 'src-ggg']);
+});
+
+test('the cap never takes one in use, so a busy host can go past it', (t) => {
+  const h = host(t, 400, MANY);
+  // Long runs: the marker's new, the folders' own times as old as they were.
+  for (const [k, hours] of [['ddd', 3], ['eee', 4], ['fff', 5]] as const) {
+    const p = path.join(h.base, `target-${k}`);
+    fs.writeFileSync(path.join(p, '.in-use'), '');
+    fs.utimesSync(p, new Date(Date.now() - hours * HOUR), new Date(Date.now() - hours * HOUR));
+  }
+  assert.equal(h.trim().status, 0);
+  assert.equal(h.left().length, 7);
+});
+
+test('with no checkout of its own (check-remote.sh) it gives room back and never refuses', (t) => {
+  const h = host(t, 1, WORK);
+  const r = h.trim('-');
+  assert.equal(r.status, 0, r.stderr);
+  // No folder is its own, so aaa (idle a moment) is fair game too, but only
+  // until there's room: bbb and ccc are enough.
+  assert.deepEqual(h.left(), ['target-aaa', 'target-ddd']);
+  const full = host(t, 0, { 'target-ggg': 0.1 });
+  assert.equal(full.trim('-').status, 0);
+});
+
+test('a copy whose target has gone goes too, unless it was touched lately', (t) => {
+  const h = host(t, 400, { 'src-aaa': 0, 'target-aaa': 0, 'src-old': 5, 'src-new': 0.1 });
+  assert.equal(h.trim().status, 0);
+  assert.deepEqual(fs.readdirSync(h.base).filter((n) => n.startsWith('src-')).sort(), ['src-aaa', 'src-new']);
+});
+
+test("a target whose copy is being written to stays, though nothing in the target changed (a long rsync)", (t) => {
+  const h = host(t, 1, { 'target-aaa': 0, 'src-bbb': 30, 'target-bbb': 30 });
+  fs.writeFileSync(path.join(h.base, 'src-bbb', 'just-copied'), '');
+  fs.utimesSync(path.join(h.base, 'src-bbb'), new Date(Date.now() - 30 * HOUR), new Date(Date.now() - 30 * HOUR));
+  h.trim();
+  assert.deepEqual(h.left(), ['target-aaa', 'target-bbb']);
+  assert.ok(fs.existsSync(path.join(h.base, 'src-bbb', 'just-copied')));
+});
+
+test("old temp files go, but a SwiftPM lock file stays while the copy it's named for is here", (t) => {
+  const h = host(t, 400, { 'src-aaa': 0, 'target-aaa': 0 });
+  fs.mkdirSync(path.join(h.base, 'tmp'));
+  // Only holding a lock file open shows it's in use, not its time.
+  const live = '_Users_x_.cache_threadbear-check_gpui_src-aaa_app_.build.lock';
+  const dead = '_Users_x_.cache_threadbear-check_gpui_src-zzz_app_.build.lock';
+  for (const [name, hoursAgo] of [['old.txt', 72], ['new.txt', 1], [live, 72], [dead, 72]] as const) {
+    const p = path.join(h.base, 'tmp', name);
+    fs.writeFileSync(p, '');
+    const when = new Date(Date.now() - hoursAgo * HOUR);
+    fs.utimesSync(p, when, when);
+  }
+  assert.equal(h.trim().status, 0);
+  assert.deepEqual(fs.readdirSync(path.join(h.base, 'tmp')).sort(), [live, 'new.txt']);
+});
+
+test("a trim waits for another one on the same host, so a run can't start between its look and its move", (t) => {
+  const h = host(t, 40, {});
+  // Another trim holding the lock for 3 s. Only the trim's own time counts:
+  // the pipe waits for the holder either way.
+  const holder = path.join(h.root, 'hold.pl');
+  fs.writeFileSync(holder, 'use Fcntl ":flock"; open(my $f, "<", ".") or die; flock($f, LOCK_EX) or die; $| = 1; print "held\\n"; sleep 3;');
+  const r = spawnSync('/bin/bash', ['-c', `perl ${JSON.stringify(holder)} | { read -r _; SECONDS=0; bash ${JSON.stringify(TRIM)} aaa; echo "took $SECONDS"; }`], { cwd: h.base, env: h.env, encoding: 'utf8', timeout: 20_000 });
+  assert.equal(r.status, 0, r.stderr);
+  assert.ok(Number(/took (\d+)/.exec(r.stdout)![1]) >= 2, r.stdout);
+});

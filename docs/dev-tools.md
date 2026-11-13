@@ -205,6 +205,26 @@ the data dir (`<home>`, normally `~/Library/Application Support/Threadbear`):
   --home` line for the app. A new data dir's `runner.json` defaults threads
   to `<home>/work`, claude-main (or `TB_E2E_ACCOUNT`) and claude-haiku-5-5 (`defaults.model`, which
   the runner applies to a `threads.create` with no model).
+- Trying something on real-sized data (a sidebar with hundreds of
+  threads, a long transcript): `dev-runner.sh --clone-real [FROM]`, never
+  `--home` on a copy of the real data dir. A copy's threads name Mike's
+  real Claude sessions and folders, and on 11 Nov 2026 a dev runner on a
+  plain `cp -R` carried on a thread the copy said was mid-turn: it resumed
+  his live session in `~/dev/me/misc` and ran a command there.
+  `--clone-real` makes a new temp data dir with only the threads and
+  projects (`runner/src/real-copy.ts`; no `runner.json`, secrets,
+  schedules, backend keys or sync state) and a `copy-of-real.json`
+  marker. A runner that finds the marker makes every thread it loads (or
+  takes in later) idle, strips its session id, queue, carry-ons, waits,
+  schedule and worktree, moves its folder to `<home>/work/<the real
+  folder's name>`, and never starts a CLI for one or goes back to an
+  earlier message in it, which would put files back in the real folder
+  (a send fails with a note saying why). Threads you start there run as
+  usual. It also turns sync off (so no relay or moves either), fires no
+  schedules, keeps the librarian off and forgets a copied `run/` rather
+  than stopping the live runner's CLIs it names. `--home` on a folder
+  holding a thread whose folder isn't under `$TMPDIR` is refused.
+  `test/unit/real-copy.test.ts` covers it.
 - `./check.sh [--quick | --app] [--e2e] [--shots DIR]` at the repo root:
   runner typecheck, unit tests and deploy tests, app `swift build` and
   `swift test` (with the mock runner's packages installed and its tests

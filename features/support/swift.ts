@@ -54,6 +54,10 @@ export class SwiftDriver implements Driver {
     await this.script(['--id', this.id, 'rebuild', '--no-build'], 120);
   }
 
+  async appLog(): Promise<string> {
+    return this.script(['--id', this.id, 'log', '-n', '5000']).catch(() => '');
+  }
+
   async stop(): Promise<void> {
     await this.script(['--id', this.id, 'stop'], 60).catch(() => {});
   }

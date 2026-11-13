@@ -692,3 +692,43 @@ test('an older backend says buttons and slash commands need it updated, and queu
   assert.deepEqual(await h.relay.call(T, 'buttons.list', { threadId: T }), { buttons: [] });
   assert.equal(h.calls.filter((c) => c.fn === 'relay:queueCommand').length, 0);
 });
+
+// The done card's loose ends ride on the thread's row in the remote list
+// (overlay), for the relay's own turn.completed seq, and only when the row
+// says they're from that turn: a newer turn's row can come before its
+// messages, and its loose ends aren't the older card's (Codex's review, 12 Nov).
+test("a thread's loose ends go on its row in the list, for its own turn's card only", async () => {
+  const ends = [{ kind: 'scheduled', text: 'Look at how the experiment went', at: '2026-11-15T01:30:00.000Z' }];
+  const doneRows: RelayRow[] = [
+    { seq: 3, role: 'user', text: 'Check it in', turn: 'aaaa1111', at: at(0) },
+    { seq: 6, role: 'assistant', text: 'Checked it in.', turn: 'aaaa1111', at: at(2) },
+  ];
+  for (const [cardTurn, shown] of [['aaaa1111', true], ['bbbb2222', false], [undefined, false]] as const) {
+    const h = harness({ rows: doneRows, row: () => ({ ...idle, looseEnds: ends, ...(cardTurn ? { cardTurn } : {}) }) });
+    const { events } = (await h.relay.call(T, 'threads.events', { threadId: T })) as { events: { seq: number; type: string }[] };
+    const end = events.filter((e) => e.type === 'turn.completed').at(-1)!;
+    const listed = h.relay.overlay(h.remote).threads.find((t) => t.threadId === T) as { looseEnds?: { seq: number; ends: unknown[] } };
+    if (shown) assert.deepEqual(listed.looseEnds, { seq: end.seq, ends }, String(cardTurn));
+    else assert.equal(listed.looseEnds, undefined, String(cardTurn));
+  }
+});
+
+// A plan answered while this Mac wasn't looking, with more than a tail's
+// rows since: its decision is on a row the tail doesn't cover, so it's read
+// again (Codex's review, 12 Nov).
+test("a waiting plan older than the tail is read again, and its decision reaches the app", async () => {
+  const plan: RelayRow = { seq: 4, role: 'assistant', text: '# Bots', plan: true, turn: 'aaaa1111', at: at(1) };
+  const held = [{ seq: 2, role: 'user' as const, text: 'Plan it', turn: 'aaaa1111', at: at(0) }, plan];
+  const backend = { rows: held as RelayRow[] };
+  const h = harness({ rows: backend.rows });
+  h.subscribed.add(T);
+  await h.relay.call(T, 'threads.subscribe', { threadId: T, afterSeq: 0 });
+  // Answered there: its row now says so, and twenty rows have come since.
+  backend.rows.splice(0, backend.rows.length, { ...plan, planDecision: 'go' });
+  const tail: RelayRow[] = Array.from({ length: 15 }, (_, i) => ({ seq: 30 + i, role: 'tool' as const, text: `step ${i}`, toolKind: 'read', turn: 'aaaa1111', at: at(10 + i) }));
+  const sub = h.subs.get('relay:remoteTail')![0]!;
+  sub.onUpdate({ messages: tail, hasMore: false });
+  await new Promise((r) => setTimeout(r, 10));
+  const sent = (h.published as { method: string; params: { event?: { type: string; decision?: string } } }[]).map((n) => n.params.event).filter(Boolean);
+  assert.ok(sent.some((e) => e!.type === 'plan.resolved' && e!.decision === 'go'), JSON.stringify(sent.map((e) => e!.type)));
+});

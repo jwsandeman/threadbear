@@ -81,3 +81,16 @@ When('I ask to wake the thread {string} {string}', async function (this: Threadb
   const t = await this.until(`a thread called "${title}"`, (d) => this.thread(d, title));
   await this.app.do({ cmd: 'snooze', id: t.id, said });
 });
+
+// A schedule that messages the thread, as an agent's check-in leaves one
+// (the mock's `checkIn`, an hour from now).
+When('a check-in is booked on {string}', async function (this: ThreadbearWorld, title: string) {
+  await this.app.do({ cmd: 'mock', method: 'checkIn', params: { title } });
+});
+
+// Under Hibernating for its schedule: when that runs, in the time's place
+// ("3:05 pm" today, "Mon 9:00 am" otherwise; the clock's own style).
+Then('the row {string} says when its schedule messages it', async function (this: ThreadbearWorld, title: string) {
+  const pattern = /^([A-Z][a-z]{2} )?\d{1,2}[:.]\d{2}(\s?[ap]\.?m\.?)?$/i;
+  await this.until(`"${title}" saying when its schedule runs`, (d) => pattern.test(this.thread(d, title)?.trailing ?? ''));
+});

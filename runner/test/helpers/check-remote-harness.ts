@@ -162,6 +162,9 @@ export function setup(hosts: Record<string, Host>, opts: { home?: string } = {})
     fs.writeFileSync(path.join(fake, h, 'bin', 'df'), `#!/bin/bash\n[ "$*" = "-Pk ." ] || exit 9\ncat "${path.join(fake, h, 'df-out')}"\n`, { mode: 0o755 });
   }
   fs.copyFileSync(SCRIPT, path.join(repo, 'scripts', 'check-remote.sh'));
+  // What it reads to tell the Swift app's files from the GPUI app's in app/.
+  fs.copyFileSync(path.join(path.dirname(SCRIPT), 'swift-freeze.sh'), path.join(repo, 'scripts', 'swift-freeze.sh'));
+  fs.chmodSync(path.join(repo, 'scripts', 'swift-freeze.sh'), 0o755);
   const git = (...args: string[]) => execFileSync('git', ['-C', repo, ...args], { stdio: 'ignore' });
   git('init', '-q', '-b', 'main');
   git('add', '-A');

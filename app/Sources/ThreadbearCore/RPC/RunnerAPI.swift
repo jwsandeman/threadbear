@@ -926,8 +926,12 @@ public struct ProjectUpdate: Sendable, Hashable {
     public var archived: Bool?
     /// A Notion page with the project's task board; empty takes it off.
     public var notion: String?
+    /// The project it's to be a part of; empty makes it its own again
+    /// (docs/protocol.md, Projects, "Parts").
+    public var parentId: String?
 
-    public init(title: String? = nil, folders: [String]? = nil, goals: String? = nil, state: String? = nil, notes: String? = nil, archived: Bool? = nil, notion: String? = nil) {
+    public init(title: String? = nil, folders: [String]? = nil, goals: String? = nil, state: String? = nil, notes: String? = nil, archived: Bool? = nil, notion: String? = nil, parentId: String? = nil) {
+        self.parentId = parentId
         self.title = title
         self.folders = folders
         self.goals = goals
@@ -946,6 +950,7 @@ public struct ProjectUpdate: Sendable, Hashable {
         if let notes { params["notes"] = .string(notes) }
         if let archived { params["archived"] = .bool(archived) }
         if let notion { params["notion"] = .string(notion) }
+        if let parentId { params["parentId"] = .string(parentId) }
         return params
     }
 
@@ -969,6 +974,7 @@ public struct ProjectUpdate: Sendable, Hashable {
             if link != project.notion { project.tasks = nil }
             project.notion = link
         }
+        if let parentId { project.parentId = parentId.isEmpty ? nil : parentId }
         return project
     }
 }

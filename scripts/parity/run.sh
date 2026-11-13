@@ -4,7 +4,7 @@
 # scenario (runner/test/helpers/scenario-list.ts) into a throwaway Convex
 # backend, then has the real website, iPhone app and Mac app read them:
 # the website in headless Chrome, the iPhone app in a simulator, and the
-# Mac app as another runner's threads through Convex, the way Mike sees a
+# Mac app (the GPUI one) as another runner's threads through Convex, the way Mike sees a
 # Hetzner or bruce thread. Each surface's picture of each scenario goes in
 # <out>, with index.html showing them side by side, and results.json saying
 # which words each surface didn't show. Exits 1 when any surface missed any.
@@ -51,7 +51,16 @@ BIN=$(ls -d "$HOME"/.cache/convex/binaries/*/convex-local-backend 2>/dev/null | 
 [ -n "$BIN" ] || { echo "no convex-local-backend in ~/.cache/convex/binaries: run 'npx convex dev --local' there once"; exit 1; }
 SECRET=$(openssl rand -hex 32)
 mkdir -p "$work/convex"
-(cd "$work/convex" && exec "$BIN" --instance-name threadbear-parity --instance-secret "$SECRET" --port $PORT --site-proxy-port $SITE_PORT \
+# Its "use node" actions need Node 22 or 24 on its PATH, and refuses the
+# deploy otherwise. The scripts' own Node is the newest 24 or later, which
+# was 26 once Tinker Desk had it (12 Nov: every run failed at the deploy), so
+# the backend gets nvm's newest 24 or 22, if there is one, ahead of it.
+BACKEND_PATH="$PATH"
+for major in 24 22; do
+  v=$(ls "$HOME/.nvm/versions/node" 2>/dev/null | grep "^v$major\." | sort -t. -k2,2n -k3,3n | tail -1)
+  [ -n "$v" ] && { BACKEND_PATH="$HOME/.nvm/versions/node/$v/bin:$PATH"; break; }
+done
+(cd "$work/convex" && PATH="$BACKEND_PATH" exec "$BIN" --instance-name threadbear-parity --instance-secret "$SECRET" --port $PORT --site-proxy-port $SITE_PORT \
   --convex-origin "$URL" --convex-site "http://127.0.0.1:$SITE_PORT" db.sqlite3 > backend.log 2>&1) &
 backend=$!
 for _ in $(seq 1 60); do curl -sf "$URL/version" >/dev/null && break; sleep 0.5; done
@@ -74,7 +83,7 @@ node scripts/parity/web-shots.mjs "http://127.0.0.1:$WEB_PORT" "$OUT/seed.json" 
 say "the iPhone app"
 zsh scripts/parity/ios-shots.sh "$URL" "$OUT/seed.json" "$OUT" > "$work/ios.log" 2>&1 || { echo "iPhone shots failed:"; tail -20 "$work/ios.log"; }
 
-say "the Mac app, reading them as another runner's"
+say "the Mac app (GPUI), reading them as another runner's"
 bash scripts/parity/mac-shots.sh "$URL" "$KEY" "$OUT/seed.json" "$OUT" 2> "$work/mac.log" | sed -n '/^\[/,$p' > "$OUT/mac.json" || true
 [ -s "$OUT/mac.json" ] || { echo "Mac shots failed:"; grep -v "^dev-app: screencapture" "$work/mac.log" | tail -20; echo '[]' > "$OUT/mac.json"; }
 

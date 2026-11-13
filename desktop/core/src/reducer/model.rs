@@ -882,6 +882,12 @@ impl TranscriptModel {
 
             EventPayload::AssistantTextDelta { item_id, text } => {
                 let id = format!("a:{item_id}");
+                // A row with persisted text is final: a delta that comes after
+                // it (held while a subscribe was in flight, ThreadFeed) would
+                // add its words again and set it streaming.
+                if matches!(self.item(&id).map(|r| &r.content), Some(RowContent::Assistant(item)) if !item.is_streaming) {
+                    return;
+                }
                 if self.item_index.contains_key(&id) {
                     let delta = text.clone();
                     self.update(&id, move |content| {
@@ -902,6 +908,17 @@ impl TranscriptModel {
 
             EventPayload::ReasoningDelta { item_id, text } => {
                 let id = format!("r:{item_id}");
+                // A row with persisted text is final: a delta that comes after
+                // it (held while a subscribe was in flight, ThreadFeed) would
+                // add its words again and set it streaming.
+                if matches!(self.item(&id).map(|r| &r.content), Some(RowContent::Reasoning(item)) if !item.is_streaming) {
+                    return;
+                }
+                // Narration streams as reasoning and lands as the reply's
+                // text (`a:` the same item): finished, it takes no more.
+                if matches!(self.item(&format!("a:{item_id}")).map(|r| &r.content), Some(RowContent::Assistant(item)) if !item.is_streaming) {
+                    return;
+                }
                 if self.item_index.contains_key(&id) {
                     let delta = text.clone();
                     self.update(&id, move |content| {
@@ -1866,10 +1883,32 @@ impl TranscriptModel {
                     .collect();
                 let worked: f64 = footers.iter().map(|(_, done)| done.duration_ms).sum();
                 let gaps = self.dividers(turn.clone(), &replies);
+                // Another lab's review (the latest in the stretch) is one
+                // quiet line over the reviewed turn's reply (under the line of
+                // work when that's there too): it happens in the background,
+                // so it stays off the card (Mike, 12 Nov 2026). A stretch can
+                // hold earlier turns' replies too, so it's that turn's own;
+                // with no reply, over its footer.
+                let reviewed = footers.iter().rev().find_map(|(index, done)| done.review.as_ref().map(|review| (*index, review)));
+                let review_row: Option<Row> = reviewed.map(|(index, review)| {
+                    let footer = &self.items[index];
+                    let id = format!("lr:{}", footer.turn_id.clone().unwrap_or_else(|| footer.id.clone()));
+                    derived(&id, footer.seq, footer.turn_id.clone(), RowContent::LabReview(review.clone()))
+                });
+                let review_at = reviewed.map(|(index, _)| {
+                    let turn_of = &self.items[index].turn_id;
+                    replies.iter().copied().filter(|&r| &self.items[r].turn_id == turn_of).min().unwrap_or(index)
+                });
                 for k in turn.clone() {
                     let row = &self.items[k];
                     if self.is_floating_card(k) {
                         continue;
+                    }
+                    if Some(k) == review_at && Some(k) != group_at {
+                        if let Some(review) = &review_row {
+                            out.push(review.clone());
+                            starts.push(turn.start);
+                        }
                     }
                     if Some(k) == group_at && !folded.is_empty() {
                         let lead = &self.items[folded[0]];
@@ -1887,6 +1926,12 @@ impl TranscriptModel {
                                 let mut member = self.items[m].clone();
                                 member.in_group = true;
                                 out.push(member);
+                                starts.push(turn.start);
+                            }
+                        }
+                        if Some(k) == review_at {
+                            if let Some(review) = &review_row {
+                                out.push(review.clone());
                                 starts.push(turn.start);
                             }
                         }

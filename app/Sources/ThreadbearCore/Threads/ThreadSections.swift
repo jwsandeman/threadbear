@@ -234,11 +234,14 @@ public struct ThreadSections: Sendable, Equatable {
             .sorted(by: soonestToWake)
     }
 
-    /// Title or preview, case and accent insensitive.
+    /// Title, preview or the librarian's search words, case and accent
+    /// insensitive. The search words find a thread by what it's about when
+    /// neither says it ("dentist" for a wisdom tooth appointment).
     public static func matches(_ thread: ThreadSummary, _ query: String) -> Bool {
         let options: String.CompareOptions = [.caseInsensitive, .diacriticInsensitive]
         return thread.title.range(of: query, options: options) != nil
             || thread.preview.range(of: query, options: options) != nil
+            || thread.keywords?.range(of: query, options: options) != nil
     }
 }
 

@@ -19,6 +19,21 @@ Feature: Other runners' threads
     And the transcript shows a reply starting "Found 14 duplicates"
     And the composer is on the runner "bruce"
 
+  # Its picture is a path on bruce: asked of the runner, which keeps another
+  # Mac's files there for now, so the tile says it couldn't get it, and never
+  # shows whatever this Mac has at that path.
+  @transcript.images @remote-threads
+  Scenario: Another Mac's picture says where it is rather than showing a file of this Mac's
+    When I open the thread "Check the photo library backup"
+    Then the pictures of my message say "Couldn't get it from bruce"
+
+  # Its chip names the same file on bruce: pressed here it opens nothing, as
+  # this Mac's file at that path isn't the one meant (Codex, 12 Nov).
+  @rich.picturechips @remote-threads
+  Scenario: Another Mac's picture chip opens nothing on this Mac
+    When I open the thread "Check the photo library backup"
+    Then pressing the picture chip in my message opens nothing
+
   @sidebar.row.remote @remote-threads
   Scenario: It takes a message like any other thread
     When I open the thread "Tidy the media drive"
@@ -61,6 +76,16 @@ Feature: Other runners' threads
     And the move sheet offers the folder "/Users/bruce/dev/me/threadbear-threads/slot-4"
     And the move sheet's login is "claude-main"
 
+  # The sheet asks the other runner as it's made, inside the app's own
+  # update, and it read the app back for the runner's connection, which
+  # crashed the GPUI app (a double lease, 12 Nov).
+  @sidebar.move @remote-threads
+  Scenario: Move to while this Mac's runner is away opens the sheet to wait
+    When the runner goes away without a word for 8 seconds
+    And the app has lost the runner
+    And I ask to move the thread "Morning brief" to "bruce"
+    Then the move sheet says "Move “Morning brief” to bruce"
+
   @sidebar.move @remote-threads
   Scenario: Moving from the sheet takes it off, and says so on the row
     When I ask to move the thread "Morning brief" to "bruce"
@@ -83,6 +108,18 @@ Feature: Other runners' threads
     Then the row "Morning brief" says "Moving to bruce" on the right
     When I right-click the row "Morning brief"
     Then the row's menu offers "Cancel Move"
+
+  # Anything typed or answered while it moves could land on the wrong side
+  # of the move, so the box and its card wait (ComposerView's `moving`). The
+  # Swift app's dump, frozen since 12 Nov, has no "moving".
+  @sidebar.move @remote-threads @swift-pending
+  Scenario: The box is locked while its thread moves, and given back when the move is called off
+    Given a move would leave nothing behind
+    When I open the thread "Morning brief"
+    And I ask to move the thread "Morning brief" to "bruce"
+    Then the box is locked, saying "Moving to bruce once this turn ends…"
+    When I cancel the move of "Morning brief"
+    Then the box isn't locked
 
   @composer.runner @remote-threads
   Scenario: The star sets where new threads start

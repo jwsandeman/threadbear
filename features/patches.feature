@@ -36,9 +36,31 @@ Feature: What a folder's patches give a thread
     And I show the "xcode.simulator" section of the pane
     Then the image panel shows a picture
 
+  @manual @panel.web
+  Scenario: A url panel's link to another site doesn't take over the panel
+    When a patch's url panel shows its page on localhost with a link to a video on another site
+    And I click the link
+    Then the video opens where Default says, in the browser or over the panel with Back
+    And the panel still shows the patch's page
+    When I click a link to another of the patch's own pages
+    Then the panel's bar has Back, which goes back to the first page
+
+  @manual @panel.web
+  Scenario: Closing a url panel stops what it's playing
+    When a patch's url panel is playing a video
+    And I close the panel's tab
+    Then the video stops
+
   @patches.run
   Scenario: A chip runs its action and it lands in the transcript
     When I open the thread "Add dark mode to the dashboard"
     Then the chip "tools.reseed-dev-db" is offered
     When I run the chip "tools.reseed-dev-db"
     Then the transcript shows a line about "Reseed dev DB"
+
+  @manual @patches.list
+  Scenario: A home patch that makes every edit ask says which and why
+    When a home patch's panel runs a command built from a value only known as it runs, like "node ${script}"
+    And I show the "threadbear.patches" section of the pane
+    Then the patch says threads in Ask and Auto ask before every file edit, with the command, its line and what to change
+    And an Auto thread's first edit that asks says the same in the transcript

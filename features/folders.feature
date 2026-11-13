@@ -46,3 +46,65 @@ Feature: A folder in the side pane
     Given the thread's folder is showing in the pane for "Rebuild the three landing pages"
     When I right-click the folder row "docs"
     Then the folder menu offers "Open | Open in Finder | Reveal in Finder | Copy path | --- | Show as icons | Sort by | Show hidden files"
+
+  @folder.list @foundation.filewatch
+  Scenario: A file made in the open folder shows up, and one taken away goes
+    Given the thread's folder is showing in the pane for "Rebuild the three landing pages"
+    When a file "notes.txt" is made in the thread's folder
+    Then the folder lists "notes.txt"
+    When the file "notes.txt" is taken out of the thread's folder
+    Then the folder no longer lists "notes.txt"
+
+  @folder.list @folder.menu
+  Scenario: More than one row can be picked, and the menu then copies all their paths
+    Given the thread's folder is showing in the pane for "Rebuild the three landing pages"
+    When I pick the folder row "docs"
+    And I add the folder row "logs" to the picked rows
+    Then the folder has "docs + logs" picked
+    When I right-click the folder row "logs"
+    Then the folder menu offers "Open | Copy paths | Show as icons"
+
+  @folder.keys
+  Scenario: Return opens the picked row, and ⌘↑ comes back up with it picked
+    Given the thread's folder is showing in the pane for "Rebuild the three landing pages"
+    When I pick the folder row "logs"
+    And I press "return" in the folder
+    Then the pane is browsing the folder "logs"
+    When I press "cmd-up" in the folder
+    Then the pane shows the thread's folder again
+    And the folder has "logs" picked
+
+  @folder.keys
+  Scenario: ⌘⇧. shows the hidden files and hides them again
+    Given a hidden file ".env" is in the folder of "Rebuild the three landing pages"
+    And the thread's folder is showing in the pane for "Rebuild the three landing pages"
+    Then the folder doesn't list ".env"
+    When I press "cmd-shift-." in the folder
+    Then the folder lists ".env"
+    When I press "cmd-shift-." in the folder
+    Then the folder doesn't list ".env"
+
+  @folder.keys
+  Scenario: Typing a name picks its row, and Space looks at what's picked
+    Given the thread's folder is showing in the pane for "Rebuild the three landing pages"
+    When I type "sc" in the folder
+    Then the folder has "screens" picked
+    And Space would look at "screens"
+
+  @folder.icons
+  Scenario: Show as icons draws the folder as tiles, and what's picked carries across
+    Given the thread's folder is showing in the pane for "Rebuild the three landing pages"
+    When I choose "Show as icons" from the folder's menu
+    Then the folder is showing as "icons"
+    When I pick the folder row "screens"
+    And I choose "Show as a list" from the folder's menu
+    Then the folder is showing as "list"
+    And the folder has "screens" picked
+
+  @folder.pathbar
+  Scenario: The path bar's … is a menu of the folders above the ones it shows
+    Given the thread "Rebuild the three landing pages" works in a folder too deep for the path bar to show whole
+    And the thread's folder is showing in the pane for "Rebuild the three landing pages"
+    Then the path bar's … menu starts with the folder above the first one it shows
+    When I pick the last folder in the path bar's … menu
+    Then the pane is browsing that folder

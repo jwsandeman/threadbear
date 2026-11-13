@@ -15,6 +15,12 @@ export type Pane = {
   image?: string | null;
   previewKind?: string | null;
   previewText?: string | null;
+  /** The find bar's words and where the picked match is: "the: 2 of 8", "the: not found". */
+  previewFind?: string | null;
+  /** The line over a text file: the conflict bar's words, or the grey note. */
+  previewNote?: string | null;
+  /** What the bar offers: "preview" or "markdown" (a Markdown file's menu), "reading" or "editing" (the pencil and Done). */
+  previewMode?: string | null;
   folder?: string | null;
 };
 

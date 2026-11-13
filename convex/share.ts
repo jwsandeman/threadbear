@@ -29,6 +29,7 @@ const message = v.object({
   origin: v.optional(v.string()),
   toolKind: v.optional(v.string()),
   summary: v.optional(v.boolean()),
+  plan: v.optional(v.boolean()), // a Plan first plan (API 72), kept out of the turn's fold
   turn: v.optional(v.string()),
   at: v.string(),
 });
@@ -167,6 +168,7 @@ export const view = query({
         ...(m.origin ? { origin: m.origin } : {}),
         ...(m.toolKind ? { toolKind: m.toolKind } : {}),
         ...(m.summary ? { summary: true } : {}),
+        ...(m.plan ? { plan: true } : {}),
         ...(m.turn ? { turn: m.turn } : {}),
         at: m.at,
       });

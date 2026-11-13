@@ -455,6 +455,13 @@ final class ThreadSectionsTests: XCTestCase {
         XCTAssertEqual(sections.matching(""), sections)
         XCTAssertEqual(sections.matching("upload").inbox.map(\.id), ["inbox"])
         XCTAssertTrue(sections.matching("nothing like it").isEmpty)
+
+        // The librarian's search words find a thread neither its title nor
+        // its last reply has the word for.
+        var tooth = thread("tooth", minutesAgo: 1)
+        tooth.title = "Wisdom tooth meeting location"
+        tooth.keywords = "dentist dental appointment"
+        XCTAssertEqual(ThreadSections.build([tooth, other], now: now).matching("Dentist").inbox.map(\.id), ["tooth"])
     }
 
     func testRelativeTime() {

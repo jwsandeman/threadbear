@@ -90,6 +90,17 @@ final class TerminalPanelTests: XCTestCase {
         XCTAssertEqual(Terminals.archived(keys, in: threads), [.thread("t1")])
     }
 
+    /// The app shows an archive before the runner answers; its shell only
+    /// stops once the runner has agreed, so a refused archive keeps it.
+    func testAnArchiveTheRunnerHasntAgreedToKeepsItsShell() {
+        let threads: [String: ThreadSummary] = [
+            "t1": ThreadSummary(id: "t1", title: "Done", cwd: "/tmp", archivedAt: Date()),
+            "t2": ThreadSummary(id: "t2", title: "Going", cwd: "/tmp", archivedAt: Date()),
+        ]
+        let keys: [TerminalKey] = [.thread("t1"), .thread("t2")]
+        XCTAssertEqual(Terminals.archived(keys, in: threads, except: ["t2"]), [.thread("t1")])
+    }
+
     /// After a reconnect, a thread's shell whose thread has gone stops;
     /// the home shell is never one of them.
     func testReconnectStopsOnlyGoneThreadsShells() {

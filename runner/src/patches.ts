@@ -671,6 +671,15 @@ export function readPatchModule(id: string, source: 'home' | 'project', file: st
   return loaded;
 }
 
+// A url panel's `{threadId}` filled in with the thread it's beside, so a
+// patch's page can tell which thread it's in (its "Ask in this thread",
+// say). Done as the summary is made, as the set is shared by every
+// thread in the folder.
+export function withThreadId(panels: Panel[], threadId: string): Panel[] {
+  if (!panels.some((p) => p.url?.includes('{threadId}'))) return panels;
+  return panels.map((p) => (p.url?.includes('{threadId}') ? { ...p, url: p.url.replaceAll('{threadId}', encodeURIComponent(threadId)) } : p));
+}
+
 // An action's url, normalised, if it's an http or https page; null if not.
 // Only web pages: a url chip opens in the browser of whatever device it was
 // pressed on, and the runner hands it to `open` for older apps, so a file:

@@ -1,6 +1,6 @@
 // AcpAdapter against a pretend agent (helpers/fake-acp-agent.mjs) that
 // behaves as OpenCode was seen to: it runs tools unasked unless told otherwise.
-import { test, afterEach } from 'node:test';
+import { test, afterEach, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import http from 'node:http';
@@ -19,6 +19,18 @@ import { ProcessRegistry } from '../../src/proc.ts';
 import { z } from 'zod';
 
 const FAKE = path.join(import.meta.dirname, '..', 'helpers', 'fake-acp-agent.mjs');
+
+// The command rules are checked against PATH, and a user's PATH can hold a
+// literal ~/ entry or a wrapper ahead of /usr/bin, which the runner rightly
+// refuses to make an Always allow for: two tests failed on such a Mac (Yair
+// Haimo's fork, 11 Nov 2026). So the system's folders, and node's own last
+// for the fake agent's #!/usr/bin/env node.
+const inheritedPath = process.env.PATH;
+beforeEach(() => { process.env.PATH = `/usr/bin:/bin:/usr/sbin:/sbin:${path.dirname(process.execPath)}`; });
+afterEach(() => {
+  if (inheritedPath === undefined) delete process.env.PATH;
+  else process.env.PATH = inheritedPath;
+});
 
 // Real folders on the temp volume, as adapters compare and resolve them.
 function tmp(): string {
@@ -628,7 +640,7 @@ test('a saved command rule covers that folder only: another, two at once, or any
   const viaLink = fakeRequest(r, s, { toolCallId: 'l3', kind: 'execute', rawInput: { command, workdir: path.join(home, 'link') } });
   await until(() => viaLink.length === 1);
   assert.deepEqual(viaLink[0], allowed, 'the link, where it points now, is the folder the rule is for');
-  fs.rmSync(path.join(home, 'link'));
+  fs.unlinkSync(path.join(home, 'link'));
   fs.symlinkSync(path.join(home, 'packages'), path.join(home, 'link'));
   const moved = fakeRequest(r, s, { toolCallId: 'l4', kind: 'execute', rawInput: { command, workdir: path.join(home, 'link') } });
   await until(() => moved.length === 1);
@@ -660,7 +672,7 @@ test('a folder that changes while its card waits is refused, and the card shows 
   const link = path.join(home, 'link');
   fs.symlinkSync(path.join(home, 'safe'), link);
   swap = () => {
-    fs.rmSync(link);
+    fs.unlinkSync(link);
     fs.symlinkSync(path.join(home, 'valuable'), link);
   };
   const replies = fakeRequest(r, s, { toolCallId: 't1', kind: 'execute', rawInput: { command: 'rm -rf generated', workdir: link } });

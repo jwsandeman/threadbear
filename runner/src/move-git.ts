@@ -11,6 +11,11 @@ import os from 'node:os';
 import path from 'node:path';
 import { untrustedGit } from './safe-git.ts';
 
+// A full SHA-1 or SHA-256 commit id.
+export function isObjectId(v: unknown): v is string {
+  return typeof v === 'string' && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(v);
+}
+
 export type GitMeta = {
   branch: string; // as it was, "HEAD" when detached
   head: string;
@@ -205,6 +210,10 @@ export async function packGit(worktree: string, cwd: string, bundleFile: string)
  * leaves `wip`'s changes uncommitted.
  */
 export async function unpackGit(worktree: string, meta: GitMeta, bundleFile?: string): Promise<{ ok: true } | { ok: false; reason: string }> {
+  // The old runner's word, used as git arguments below (and as the move's
+  // tips, trustTouchedByMove): only a full commit id, so none can be an
+  // option such as --ext-diff (Muse's review, 11 Nov 2026).
+  if (!isObjectId(meta.head) || (meta.wip !== undefined && !isObjectId(meta.wip))) return { ok: false, reason: "The move's git work didn't name its commits properly, so none of it was brought in." };
   const fetchBundle = () => run(worktree, ['fetch', '--quiet', '--no-tags', bundleFile!, `+${MOVE_REFS}*:${MOVE_REFS}*`], {}, 'bundle');
   if (bundleFile) {
     let r = await fetchBundle();

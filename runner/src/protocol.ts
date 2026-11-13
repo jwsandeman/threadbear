@@ -290,9 +290,9 @@ export type ThreadSummary = {
   // Mike's last message to it, one line, for the sidebar's "You: ..."
   // (docs/protocol.md, "What Mike last asked"). Absent until he's sent one.
   asked?: string;
-  // The librarian's recap of it: what it's for, then bullets on where it
-  // stands (docs/protocol.md, "The recap box"). The recapBox experiment.
-  recap?: string;
+  // The librarian's search words for it, space-separated (docs/protocol.md,
+  // "Search"): searches match them as well as the title and preview.
+  keywords?: string;
   // A panel the agent asked to show Mike (show_panel), waiting for him to
   // look at the thread (docs/protocol.md, "Showing panels").
   panelRequest?: PanelRequest;
@@ -314,9 +314,11 @@ export type ThreadSummary = {
 
 // unlanded: commits on its branch that main lacks. uncommitted: files in
 // its worktree. thread: one it started, still working or waiting on Mike.
-// scheduled: a schedule that will message it again (at: when), which
-// doesn't stop an archive. Clients show any other kind as its text.
-export type LooseEndKind = 'unlanded' | 'uncommitted' | 'thread' | 'scheduled';
+// unmerged: work it pushed to a branch (an open PR) that isn't on the
+// remote's default branch. scheduled: a schedule that will message it
+// again (at: when), which doesn't stop an archive. Clients show any other
+// kind as its text.
+export type LooseEndKind = 'unlanded' | 'uncommitted' | 'unpushed' | 'unmerged' | 'thread' | 'open' | 'scheduled';
 export type LooseEnd = { kind: LooseEndKind; text: string; threadId?: string; at?: string };
 
 export type ShareAccess = 'off' | 'link';
@@ -338,6 +340,9 @@ export type PanelRequest = {
   // pin with show: the highlight to open in the pane, over Highlights. An
   // app that doesn't know this opens Highlights.
   highlight?: string;
+  // A web panel's page is loaded afresh as it's shown (show_panel's reload).
+  // An app that doesn't know this just shows it.
+  reload?: true;
   at: string;
 };
 
@@ -394,6 +399,9 @@ export type Project = {
   // the board as last read (see "Project tasks").
   notion?: string;
   tasks?: ProjectTasks;
+  // The project it's a part of (docs/protocol.md, Projects, "Parts"). One
+  // level: a part has no parts.
+  parentId?: string;
   threadCount: number;
   lastActivityAt?: string;
 };
@@ -495,6 +503,8 @@ export type Subagent = {
   parentId?: string; // the sub-agent that started this one
   description: string;
   agentType?: string;
+  model?: string; // the model it runs on, from its own messages: "claude-opus-5-5"
+  effort?: string; // its effort level, once its transcript has been read
   status: SubagentStatus;
   background: boolean;
   activity?: string; // while running: what it's doing now
@@ -561,6 +571,11 @@ export type PatchInfo = {
   error?: string; // set when the file couldn't be loaded; it then gives nothing
   matched?: string[]; // a tool patch (appliesTo): the paths that made it apply
   liveError?: string; // a when or badge function that threw or took too long
+  // A patch that loads without a hash (home's) runs something Threadbear
+  // can't follow, so threads that ask first ask before every file edit:
+  // what, where, and what to change (docs/protocol.md, "Agent writes that
+  // run as code").
+  editsAsk?: string;
   // A project's patch file that isn't trusted yet, so wasn't loaded and
   // gives nothing (docs/protocol.md, "Trusting a folder's patches"): "new"
   // when nothing from its folder is trusted, "changed" when an earlier
@@ -680,6 +695,28 @@ export type TurnOutcome = 'completed' | 'interrupted' | 'failed';
 // network: the API couldn't be reached (DNS, no route, a dropped or refused
 // connection), so the runner carries the turn on once it's back.
 export type TurnErrorKind = 'usageLimit' | 'contextWindow' | 'auth' | 'network';
+
+// Review by another lab's ledger (runner/lab-review.ts). Each finding has
+// an id that stays the same across rounds; outcome is the reviewed
+// agent's answer (end_turn's findings), absent until it gives one.
+export type ReviewSeverity = 'high' | 'medium' | 'low';
+export type ReviewOutcome = 'fixed' | 'disputed' | 'left';
+export type ReviewFinding = { id: number; round: number; severity: ReviewSeverity; claim: string; where?: string; case?: string; outcome?: ReviewOutcome; note?: string };
+export type LabReviewLedger = {
+  reviewer: string; // "Codex (codex-1)"
+  independent: boolean; // another lab, not a fresh session of the same one
+  rounds: number;
+  threadId: string; // the latest round's review thread
+  // The latest round found nothing that holds up.
+  passed: boolean;
+  // A round whose reviewer gave no verdict in end_turn: its reply is all
+  // there is, so it has no findings here.
+  unstructured?: true;
+  // Fixes made since the latest round that no review has looked at: the
+  // rounds ran out.
+  unchecked?: true;
+  findings: ReviewFinding[];
+};
 
 // turn.completed's `usage`, per provider.
 export type ClaudeTurnUsage = { inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number };
@@ -824,6 +861,10 @@ export type EventBody =
       // With needs "nothing": end_turn's suggested follow-ups.
       next?: string[];
       needsFrom?: 'tool' | 'text';
+      // Review by another lab: what the reviewer found so far and what the
+      // agent did about each, on the turn that answered them
+      // (runner/lab-review.ts; docs/protocol.md, "Review by another lab").
+      review?: LabReviewLedger;
     }
   // The ticks on a card of asks, the whole set each time. Outside any turn.
   | { type: 'asks.ticked'; asksSeq: number; ticked: number[] }
@@ -948,7 +989,7 @@ export type Schedule = {
   // scheduleModes); never stored.
   defaultMode?: PermissionMode;
   // A shell command run first, in its folder; a run whose check prints
-  // nothing is skipped (experiment scheduleChecks, schedule-check.ts).
+  // nothing is skipped (schedule-check.ts).
   check?: string;
   // How long the check may take, in seconds (at most 300); absent, 60.
   checkTimeoutSecs?: number;

@@ -278,6 +278,10 @@ export function remoteCardShowsAll(name: string, input: Record<string, unknown>,
   // this on 10 Nov 2026, after Codex's review of the approval-card fixes;
   // it had been "an edit shows its path, as before").
   if (REMOTE_EDIT_TOOLS.has(name)) return false;
+  // A plan: Go ahead lets the agent start on all of it, and the phone's
+  // plan card shows its title, so even a one-line plan is the Mac's to
+  // allow (Codex review of plans on the phone, 11 Nov 2026).
+  if (name === 'ExitPlanMode') return false;
   // A command's spaces and line breaks at its ends change nothing it does.
   const fits = (v: string) => drawnAsWritten(v.replace(/^[ \n]+|[ \n]+$/g, ''));
   // An MCP or OMP tool's arguments say what it does (a threadbear tool's own

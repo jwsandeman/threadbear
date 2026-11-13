@@ -33,6 +33,15 @@ Feature: The inbox
     And the sidebar doesn't list "Morning brief"
 
   @sidebar.search
+  Scenario: Search finds a thread by the librarian's words, whatever the accents
+    Given the librarian filed "Make a poster for the meetup" under "flyer printing"
+    When I search the threads for "flyer"
+    Then the sidebar lists "Make a poster for the meetup"
+    And the sidebar doesn't list "Morning brief"
+    When I search the threads for "POSTÉR"
+    Then the sidebar lists "Make a poster for the meetup"
+
+  @sidebar.search
   Scenario: Clearing the search brings every thread back
     Given I search the threads for "poster"
     When I clear the search

@@ -211,9 +211,10 @@ before(() => {
   fs.copyFileSync(path.join(import.meta.dirname, 'fake-runner.mjs'), path.join(rdir, 'src', 'main.ts'));
   // rpc-client.mjs and the fake runner both answer the auth challenge with it.
   fs.copyFileSync(path.join(RUNNER, 'src', 'rpc-auth.ts'), path.join(rdir, 'src', 'rpc-auth.ts'));
-  // deploy-backend.mjs reads this Mac's Convex credential with it.
-  fs.copyFileSync(path.join(RUNNER, 'src', 'convex-admin.ts'), path.join(rdir, 'src', 'convex-admin.ts'));
-  fs.copyFileSync(path.join(RUNNER, 'src', 'secure-url.ts'), path.join(rdir, 'src', 'secure-url.ts'));
+  // deploy-backend.mjs reads this Mac's Convex credential with it, and it
+  // imports secure-url.ts. Missing that one failed 26 of these tests with
+  // ERR_MODULE_NOT_FOUND, unseen as tb land runs only --quick (11 Nov).
+  for (const f of ['convex-admin.ts', 'secure-url.ts']) fs.copyFileSync(path.join(RUNNER, 'src', f), path.join(rdir, 'src', f));
   fs.writeFileSync(path.join(rdir, 'bin', 'tb'), '#!/usr/bin/env node\n');
   const pkg = { name: 'fake-runner', version: '9.9.9', private: true, type: 'module', scripts: { typecheck: 'true', test: 'true' } };
   fs.writeFileSync(path.join(rdir, 'package.json'), JSON.stringify(pkg, null, 2) + '\n');

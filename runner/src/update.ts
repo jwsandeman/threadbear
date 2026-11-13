@@ -124,6 +124,9 @@ export type UpdateDeps = {
   // (fix-update.ts) in place of the notice. False, or a throw, and the
   // notice is said instead.
   onFailed?: (f: UpdateFailure) => boolean;
+  // Main got through at this commit: a release of it built, or this
+  // release is already it (fix-update.ts takes back stale follow-ups).
+  onThrough?: (commit: string) => void;
   // Restarter.request with when: 'idle'.
   restart: (p: { release: string; reason: string; backgroundWaitMs: number }) => RestartResult;
   pendingRestart: () => boolean;
@@ -630,6 +633,7 @@ export class RunnerUpdater {
       });
       if (decision.action === 'nothing') {
         log.debug('main checked', { commit: main.short, why: decision.why });
+        if (decision.why === 'up to date with main') this.through(main.commit);
         // A failure stays on show until main moves on from it.
         this.state = wasFailed && failedAlready(file?.failed, main) ? 'failed' : 'idle';
         if (!recovered && file?.failed?.machine && failedAlready(file.failed, main) && this.deps.clock.now() - Date.parse(file.failed.at) >= MACHINE_WAIT_MS) this.machineWaitOver(file.failed, main);
@@ -690,6 +694,7 @@ export class RunnerUpdater {
       }
       this.releaseBuilt = result.id;
       this.state = 'waiting';
+      this.through(main.commit);
       const res = this.deps.restart({ release: result.id, reason: `Updating to main at ${main.short}: ${main.subject}`, backgroundWaitMs: BACKGROUND_WAIT_MS });
       log.info('release of main built; restart asked for', { release: result.id, commit: main.short, waitingFor: res.waitingFor });
       return decision;
@@ -758,6 +763,14 @@ export class RunnerUpdater {
     const missingFor = now - (since ?? this.behindSeenAt);
     if (missingFor < BEHIND_WARN_MS) return undefined;
     return `This runner is ${hours(missingFor)} behind GitHub's main.${tree ? '' : " It was built with uncommitted changes, so it won't update itself: deploy once by hand."}`;
+  }
+
+  private through(commit: string): void {
+    try {
+      this.deps.onThrough?.(commit);
+    } catch (e) {
+      this.deps.log.warn('could not tell the fix-update thread main got through', { error: String(e) });
+    }
   }
 
   // A thread to fix it when one can be started, else the notice.

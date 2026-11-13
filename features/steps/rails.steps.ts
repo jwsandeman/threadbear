@@ -6,6 +6,9 @@ import type { ThreadbearWorld } from '../support/world.ts';
 const shortcut: Record<string, string> = { Threads: '⌘1', Scheduled: '⌘2', Projects: '⌘3', Librarian: '⌘4' };
 
 When('I click {string} in the activity bar', async function (this: ThreadbearWorld, title: string) {
+  // Scheduled, Projects and Librarian are only there once the runner has
+  // said it has them, which can come after the threads.
+  await this.until(`${title} in the activity bar`, (d) => d.rails?.activity.some((b) => b.title === title));
   // The button's tooltip names it with its key, as in the Swift app.
   await this.app.do({ cmd: 'click', tip: `${title} (${shortcut[title] ?? ''})` });
 });
@@ -27,6 +30,30 @@ Then("the activity bar's {string} button shows how many threads are in the Inbox
   const inbox = d.sidebar.sections.find((s) => s.name === 'Inbox')?.threads.length ?? 0;
   const button = d.rails?.activity.find((b) => b.title === title);
   assert.equal(button?.badge, inbox, `${title} says ${button?.badge}, the Inbox has ${inbox}`);
+});
+
+Then('the activity bar has a {string} button', async function (this: ThreadbearWorld, title: string) {
+  await this.until(`a ${title} button in the activity bar`, (d) => d.rails?.activity.some((b) => b.title === title));
+});
+
+// The accent dot is something only Mike can do; the grey one something
+// that sorts itself out (ActivityButton's `dot` and `quietDot`).
+Then("the activity bar's {string} button has the accent dot", async function (this: ThreadbearWorld, title: string) {
+  await this.until(`the accent dot on ${title}`, (d) => d.rails?.activity.find((b) => b.title === title)?.dot === true);
+});
+
+Then("the activity bar's {string} button has the grey dot", async function (this: ThreadbearWorld, title: string) {
+  await this.until(`the grey dot on ${title}`, (d) => {
+    const b = d.rails?.activity.find((x) => x.title === title);
+    return b?.dot === false && b.quietDot === true;
+  });
+});
+
+Then("the activity bar's {string} button has no dot", async function (this: ThreadbearWorld, title: string) {
+  await this.until(`no dot on ${title}`, (d) => {
+    const b = d.rails?.activity.find((x) => x.title === title);
+    return b?.dot === false && b.quietDot === false;
+  });
 });
 
 Then('the right rail has a {string} button', async function (this: ThreadbearWorld, title: string) {

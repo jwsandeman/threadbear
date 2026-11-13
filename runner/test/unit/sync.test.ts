@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { makeHarness, tick, tmpDir } from '../helpers/fakes.ts';
-import { ConvexSync, forBackend, ASKED_API_VERSION, LINKS_API_VERSION, PROJECTS_DIFF_API_VERSION, STARS_API_VERSION, NETWORK_WAIT_API_VERSION, OPTION_NOTES_API_VERSION, BACKEND_API_VERSION, MAC_RUNNER_STATS_API_VERSION, TURNS_API_VERSION, ICONS_API_VERSION, RUNNER_ICON_API_VERSION, SCHEDULES_API_VERSION, SHARE_API_VERSION, WOKE_API_VERSION, STARTED_BY_API_VERSION, SECTIONS_API_VERSION, MODELS_API_VERSION, REPLY_IMAGES_API_VERSION, REPLY_IMAGES_LOOKBACK_MS, REPLY_IMAGES_SCANS_PER_FLUSH, toAccountDoc, PRESENCE_MS, SYNC_COALESCE_MS, HEARTBEAT_MS, SHARED_USAGE_POLL_MS, SYNC_BATCH, ensureRunnerId, toThreadDoc, convexPoster, convexUploader, pictureName, type ThreadDoc } from '../../src/sync.ts';
+import { ConvexSync, forBackend, RELAY_CARDS_API_VERSION, ASKED_API_VERSION, LINKS_API_VERSION, PROJECTS_DIFF_API_VERSION, STARS_API_VERSION, NETWORK_WAIT_API_VERSION, OPTION_NOTES_API_VERSION, BACKEND_API_VERSION, MAC_RUNNER_STATS_API_VERSION, TURNS_API_VERSION, ICONS_API_VERSION, RUNNER_ICON_API_VERSION, SCHEDULES_API_VERSION, SHARE_API_VERSION, WOKE_API_VERSION, STARTED_BY_API_VERSION, SECTIONS_API_VERSION, MODELS_API_VERSION, REPLY_IMAGES_API_VERSION, REPLY_IMAGES_LOOKBACK_MS, REPLY_IMAGES_SCANS_PER_FLUSH, toAccountDoc, PRESENCE_MS, SYNC_COALESCE_MS, HEARTBEAT_MS, SHARED_USAGE_POLL_MS, SYNC_BATCH, ensureRunnerId, toThreadDoc, convexPoster, convexUploader, pictureName, type ThreadDoc } from '../../src/sync.ts';
 import type { Project } from '../../src/protocol.ts';
 import type { ScheduleBackend } from '../../src/schedules.ts';
 import { nullLogger, type Logger } from '../../src/log.ts';
@@ -426,8 +426,8 @@ test('the uploader never follows a redirect with the bytes, nor posts them in th
 
 // ------------------------------------------------------------ step 2 and 3
 
-import { BUTTONS_API_VERSION, MESSAGE_CHARS, toMessageDoc, toolLine, inputSummary, WokeRows, WOKE_BY_API_VERSION, type Command, type MessageDoc } from '../../src/sync.ts';
-import { REMOTE_ALLOW_REFUSED } from '../../src/tools.ts';
+import { BUTTONS_API_VERSION, MESSAGE_CHARS, PLAN_API_VERSION, PLAN_CHARS, toMessageDoc, toolLine, inputSummary, WokeRows, WOKE_BY_API_VERSION, type Command, type MessageDoc } from '../../src/sync.ts';
+import { REMOTE_ALLOW_REFUSED, remoteCardShowsAll } from '../../src/tools.ts';
 
 type Fake = { h: ReturnType<typeof makeHarness>; sync: ConvexSync; calls: Call[]; push: (value: unknown) => void; applied: string[]; landed: Call[] };
 
@@ -665,6 +665,33 @@ test('a tool call becomes one line: the description, the file, the search, else 
   assert.deepEqual(doc, { threadId: 't1', seq: 7, role: 'tool', text: 'Ran ls', toolKind: 'command', at: '2026-10-28T00:00:00.000Z' });
 });
 
+test('plans: a Plan first plan goes to the phone whole, as a plan row', () => {
+  const at = '2026-11-10T00:00:00.000Z';
+  const plan = (text: string) => toMessageDoc('t1', { type: 'plan.proposed', seq: 9, ts: at, itemId: 'p', text, turnId: 'abcdef1234' } as never, (t) => t.replace('sk-secret', '[key]'));
+  const body = '# Bots\n\n' + 'step\n'.repeat(2000);
+  assert.ok(body.length > MESSAGE_CHARS && body.length < PLAN_CHARS);
+  assert.deepEqual(plan(body), { threadId: 't1', seq: 9, role: 'assistant', text: body, plan: true, turn: 'abcdef12', at });
+  // Scrubbed as a reply is, cut past PLAN_CHARS, and an empty one is nothing.
+  assert.equal(plan('use sk-secret')!.text, 'use [key]');
+  assert.ok(plan('x'.repeat(PLAN_CHARS + 5))!.text.endsWith('[cut: the rest is on the Mac]'));
+  assert.equal(plan('  \n'), undefined);
+});
+
+test('plans: an older backend gets the plan as an ordinary reply', async () => {
+  const row = toMessageDoc('t1', { type: 'plan.proposed', seq: 9, ts: '2026-11-10T00:00:00.000Z', itemId: 'p', text: '# Bots', turnId: 'abcdef1234' } as never)!;
+  assert.equal(BACKEND_API_VERSION >= PLAN_API_VERSION, true);
+  for (const [backend, sent] of [[PLAN_API_VERSION - 1, false], [PLAN_API_VERSION, true]] as const) {
+    const { sync, calls } = setup({ answer: (fn) => (fn === 'sync:heartbeat' ? { apiVersion: backend } : null) });
+    sync.start();
+    await tick();
+    await (sync as never as { appendMessages(m: MessageDoc[]): Promise<void> }).appendMessages([row]);
+    const out = messagesSent(calls)[0]!;
+    assert.equal('plan' in out, sent, `backend ${backend}`);
+    assert.equal(out.text, '# Bots');
+    await sync.stop();
+  }
+});
+
 test('approvals: the row carries what the thread waits on until it is answered', async () => {
   const { h, sync, docs } = (() => {
     const f = setupFull();
@@ -693,6 +720,76 @@ test('approvals: the row carries what the thread waits on until it is answered',
   await tick();
   last = docs().filter((d) => d.threadId === t.id).at(-1)!;
   assert.deepEqual(last.pendingApproval, { approvalId: 'q1', kind: 'question', questions: [{ question: 'Which?', multiSelect: false, options: [{ label: 'A' }, { label: 'B', description: 'the other' }] }] });
+});
+
+test('plans: the ExitPlanMode card names the plan row it waits on, from API 72', async () => {
+  for (const [backend, named] of [[PLAN_API_VERSION, true], [PLAN_API_VERSION - 1, false]] as const) {
+    const f = setupFull({ apiVersion: backend });
+    const docs = () => f.calls.filter((c) => c.fn === 'sync:upsertThreads').flatMap((c) => c.args.threads as ThreadDoc[]);
+    f.sync.start();
+    await f.sync.flushNow();
+    const t = f.h.runner.create({ text: 'go', cwd: f.h.cfg.defaults.cwd, accountId: 'claude-3' }).thread;
+    const s = session(f.h, t.id);
+    s.init();
+    s.out({ kind: 'planProposed', itemId: 'toolu_b', text: '# Bots\n\n1. Add a table' } as never);
+    s.out({ kind: 'event', event: { type: 'approval.requested', approvalId: 'ap1', itemId: 'toolu_b', name: 'ExitPlanMode', title: 'Finish the plan', input: { plan: '# Bots\n\n1. Add a table' }, options: ['allow', 'deny'] } as never });
+    f.h.clock.advance(SYNC_COALESCE_MS);
+    await tick();
+    const planSeq = f.h.runner.events(t.id, {}).events.find((e) => e.type === 'plan.proposed')!.seq;
+    const card = docs().filter((d) => d.threadId === t.id).at(-1)!.pendingApproval as { planSeq?: number; options: string[] };
+    assert.equal(card.planSeq, named ? planSeq : undefined, `backend ${backend}`);
+    // A plan's lines aren't one line a card shows whole: Go ahead stays on the Mac.
+    assert.deepEqual(card.options, ['deny']);
+    // Nor a one-line plan: the phone's card shows only its title.
+    assert.equal(remoteCardShowsAll('ExitPlanMode', { plan: 'Run the migration; then drop the old table' }), false);
+    await f.sync.stop();
+  }
+});
+
+// What became of a plan goes up on its row once it's known, so another Mac's
+// relay draws the card as it was answered (Codex's review, 12 Nov: guessing
+// from the rows after it got denied plans and schedules' messages wrong).
+test("plans: a resolved plan's row goes again with its decision, from API 76", async () => {
+  for (const [backend, said] of [[RELAY_CARDS_API_VERSION, true], [RELAY_CARDS_API_VERSION - 1, false]] as const) {
+    const f = setupFull({ apiVersion: backend });
+    const rows = () => f.calls.filter((c) => c.fn === 'sync:appendMessages').flatMap((c) => c.args.messages as MessageDoc[]);
+    f.sync.start();
+    await f.sync.flushNow();
+    const t = f.h.runner.create({ text: 'go', cwd: f.h.cfg.defaults.cwd, accountId: 'claude-3' }).thread;
+    const s = session(f.h, t.id);
+    s.init();
+    s.out({ kind: 'planProposed', itemId: 'toolu_b', text: '# Bots\n\n1. Add a table' } as never);
+    s.out({ kind: 'event', event: { type: 'approval.requested', approvalId: 'ap1', itemId: 'toolu_b', name: 'ExitPlanMode', title: 'Finish the plan', input: { plan: '# Bots\n\n1. Add a table' }, options: ['allow', 'deny'] } as never });
+    f.h.clock.advance(SYNC_COALESCE_MS);
+    await tick();
+    const plan = rows().filter((m) => m.threadId === t.id && m.plan);
+    assert.equal(plan.length, 1, `backend ${backend}: the plan's row`);
+    assert.equal(plan[0]!.planDecision, undefined, 'waiting');
+    f.h.runner.approvePlan({ threadId: t.id, itemId: 'toolu_b' });
+    f.h.clock.advance(SYNC_COALESCE_MS);
+    await tick();
+    const again = rows().filter((m) => m.threadId === t.id && m.seq === plan[0]!.seq);
+    assert.equal(again.at(-1)!.planDecision, said ? 'go' : undefined, `backend ${backend}`);
+    assert.equal(again.at(-1)!.text, plan[0]!.text, 'the same row, so the backend takes it as a change');
+    await f.sync.stop();
+  }
+  // Proposed and approved inside one flush: the row that goes has it.
+  const f = setupFull({ apiVersion: RELAY_CARDS_API_VERSION });
+  const rows = () => f.calls.filter((c) => c.fn === 'sync:appendMessages').flatMap((c) => c.args.messages as MessageDoc[]);
+  f.sync.start();
+  await f.sync.flushNow();
+  const t = f.h.runner.create({ text: 'go', cwd: f.h.cfg.defaults.cwd, accountId: 'claude-3' }).thread;
+  const s = session(f.h, t.id);
+  s.init();
+  s.out({ kind: 'planProposed', itemId: 'toolu_c', text: '# Quick\n\n1. Do it' } as never);
+  s.out({ kind: 'event', event: { type: 'approval.requested', approvalId: 'ap2', itemId: 'toolu_c', name: 'ExitPlanMode', title: 'Finish the plan', input: { plan: '# Quick' }, options: ['allow', 'deny'] } as never });
+  f.h.runner.approvePlan({ threadId: t.id, itemId: 'toolu_c' });
+  f.h.clock.advance(SYNC_COALESCE_MS);
+  await tick();
+  const sent = rows().filter((m) => m.threadId === t.id && m.plan);
+  assert.ok(sent.length >= 1);
+  assert.ok(sent.every((m) => m.planDecision === 'go'), 'kept with its decision');
+  await f.sync.stop();
 });
 
 test('inputSummary picks the command or path, one line, never the whole input', () => {
@@ -2846,7 +2943,7 @@ test('runners.stats marks the figures wanted at most every 20 s, and is empty wh
 // four runners, 6 Nov), and a poll costs the same whatever they write.
 test("other runners' usage readings are read now, then every five minutes, without this runner's own, until sync stops", async () => {
   const got: unknown[][] = [];
-  const reading = (runnerId: string) => ({ runnerId, provider: 'claude', email: 'mike.cann@gmail.com', usage: { windows: [], readAt: '2026-11-06T00:00:00.000Z', source: 'live' } });
+  const reading = (runnerId: string) => ({ runnerId, provider: 'claude', email: 'mike@example.net', usage: { windows: [], readAt: '2026-11-06T00:00:00.000Z', source: 'live' } });
   const { h, sync, calls } = setup({
     answer: (fn) => (fn === 'sync:heartbeat' ? { apiVersion: BACKEND_API_VERSION } : fn === 'sync:sharedUsage' ? [reading('r1'), reading('bruce')] : null),
     extra: { sharedUsage: { setShared: (rows) => got.push(rows) } },
@@ -3412,4 +3509,31 @@ test("a Run is checked against the runner's own scrub: a value it knows, in the 
   assert.equal(ask('ls').run?.buttonId, 'abcd1234');
   // A scrub that fails holds it too.
   assert.equal(toPhoneAsk({ action: 'Go?', run: { command: 'ls', cwd: '/w', buttonId: 'abcd1234' } }, () => { throw new Error('boom'); }).run, undefined);
+});
+
+import { LOOSE_ENDS_API_VERSION } from '../../src/sync.ts';
+
+test("loose ends go up on a done thread's row for the phone's done card, and not to an older backend", () => {
+  const now = Date.parse('2026-11-11T10:00:00.000Z');
+  const base = {
+    id: 't1', title: 'T', cwd: '/w', accountId: 'claude-3', provider: 'claude' as const, permissionMode: 'full' as const, status: 'idle' as const, live: false, needsYou: false,
+    createdAt: '2026-11-11T09:00:00.000Z', updatedAt: '2026-11-11T09:30:00.000Z', lastActivityAt: '2026-11-11T09:30:00.000Z', preview: 'p', lastSeq: 3, lastSeenSeq: 3,
+    needs: 'nothing' as const,
+    looseEnds: { seq: 3, at: '2026-11-11T09:30:00.000Z', ends: [
+      { kind: 'thread' as const, text: '"Side job", a thread it started, is still working', threadId: 'c1' },
+      { kind: 'scheduled' as const, text: 'Review the week', at: '2026-11-13T01:30:00Z' },
+    ] },
+  };
+  const doc = toThreadDoc(base, 'r', now);
+  assert.deepEqual(doc.looseEnds, [
+    { kind: 'thread', text: '"Side job", a thread it started, is still working', threadId: 'c1' },
+    { kind: 'scheduled', text: 'Review the week', at: '2026-11-13T01:30:00Z' },
+  ]);
+  // Nothing left still goes, so the phone knows it checked.
+  assert.deepEqual(toThreadDoc({ ...base, looseEnds: { ...base.looseEnds, ends: [] } }, 'r', now).looseEnds, []);
+  // Only on the done card it was checked for.
+  assert.equal(toThreadDoc({ ...base, status: 'running' }, 'r', now).looseEnds, undefined);
+  assert.equal(toThreadDoc({ ...base, archivedAt: '2026-11-11T09:40:00.000Z' }, 'r', now).looseEnds, undefined);
+  assert.deepEqual(forBackend(doc, LOOSE_ENDS_API_VERSION, now).looseEnds, doc.looseEnds);
+  assert.equal(forBackend(doc, LOOSE_ENDS_API_VERSION - 1, now).looseEnds, undefined);
 });

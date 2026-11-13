@@ -2,10 +2,9 @@
 // does the blocks; this sets its sizes, spacing and colours to the Swift
 // app's, and sends links where they should go.
 use super::metrics::CODE_PAD;
+use crate::open_gate::Origin;
 use crate::style::{self, size};
-use crate::open_gate::{self, Origin};
 use crate::thread::ThreadPane;
-use threadbear_core::open_policy::{self, LinkKind};
 use gpui_kit::base::{TextViewState, TextViewStyle};
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::prelude::*;
@@ -15,6 +14,9 @@ use crate::style::px;
 
 /// How far a list's text sits in from the text around it (listIndent).
 const LIST_INDENT: f32 = 30.;
+/// How far short of a list item's text its marker ends: the Swift bullet
+/// (6.8 wide at 15 pt) starts 18 before the text, so ends 11.2 before it.
+const MARKER_END: f32 = 11.2;
 /// The gap between paragraphs (paragraphGap).
 const PARAGRAPH_GAP: f32 = 10.;
 
@@ -33,13 +35,7 @@ pub(crate) fn reading_style(cx: &App) -> TextViewStyle {
         cx.theme().mono_font_family.clone(),
     );
     let rem = f32::from(cx.theme().font_size);
-    let code_block = StyleRefinement::default()
-        .rounded(px(7.))
-        .border_0()
-        .p(px(CODE_PAD))
-        .text_size(px(size::CODE))
-        .line_height(px(size::CODE_LINE))
-        .font_family(mono.clone());
+    let code_block = StyleRefinement::default().rounded(px(7.)).border_0().p(px(CODE_PAD)).text_size(px(size::CODE)).line_height(px(size::CODE_LINE)).font_family(mono.clone());
     // The pill behind inline code, with a little room either side (pillPad);
     // the kit reads padding and radius from this.
     let inline_code = StyleRefinement::default().bg(inline_bg).rounded(px(4.)).px(px(2.5)).py(px(1.)).text_size(px(size::CODE)).font_family(mono.clone()).text_color(label);
@@ -54,6 +50,9 @@ pub(crate) fn reading_style(cx: &App) -> TextViewStyle {
         .with_foreground(label)
         .with_muted_foreground(muted)
         .with_link(link)
+        // Swift's text views draw a link in the link colour alone, with no
+        // line under it, even on hover (TextKit's linkTextAttributes).
+        .with_link_underline(false)
         .with_selection(cx.theme().selection)
         .with_code_background(code_bg)
         .with_border(hairline)
@@ -71,7 +70,11 @@ pub(crate) fn reading_style(cx: &App) -> TextViewStyle {
         .with_code_block(code_block)
         .with_inline_code(HighlightStyle { background_color: Some(inline_bg), ..Default::default() })
         .with_inline_code_style(inline_code)
-        .with_list_style(StyleRefinement::default().text_color(label).min_w(px(LIST_INDENT)).pr(px(LIST_INDENT - 22.)))
+        // The kit right-aligns a marker in the indent. Swift starts a bullet
+        // 18 before the text and a number 22 before (markerStart): ending
+        // them 11.2 short of the text puts the bullet and "1." where the
+        // Swift ones are (a two-figure number sits a little further out).
+        .with_list_style(StyleRefinement::default().text_color(label).min_w(px(LIST_INDENT)).pr(px(MARKER_END)))
         .with_blockquote_style(StyleRefinement::default().border_l(px(0.)).pl(px(14.)).text_color(muted))
         .with_table(table)
         .with_table_head(table_head)
@@ -79,12 +82,286 @@ pub(crate) fn reading_style(cx: &App) -> TextViewStyle {
         .with_dark(cx.theme().is_dark())
 }
 
+/// Whether markdown text opens with a heading ("# " to "###### ").
+pub(crate) fn starts_with_heading(text: &str) -> bool {
+    let text = text.trim_start_matches([' ', '\n']);
+    let hashes = text.chars().take_while(|c| *c == '#').count();
+    (1..=6).contains(&hashes) && text[hashes..].starts_with([' ', '\t'])
+}
+
 /// `WorkLinks.escapeDestinations` and the "↑" after a work link: a space ends a
 /// link's destination for the parser, and agents write `[tests pass](work:npm
 /// test)`. The arrow says the link goes up the thread, not out of it, and goes
 /// in the link's own words so it's coloured and selected with them.
+/// `![alt](url)` in a reply (`MarkdownRenderer`'s images): a picture on this
+/// Mac is drawn in the text; a web address, another Mac's file or one that's
+/// gone stays a link with its alt text, "[alt]". A web picture is never
+/// fetched: what an agent writes can't make the app load an address by
+/// itself.
+pub(crate) fn pictures(text: &str, local: bool) -> std::borrow::Cow<'_, str> {
+    use std::borrow::Cow;
+    if !text.contains("![") {
+        return Cow::Borrowed(text);
+    }
+    let Ok(tree) = markdown::to_mdast(text, &markdown::ParseOptions::gfm()) else { return Cow::Borrowed(text) };
+    let mut swaps: Vec<(usize, usize, String)> = Vec::new();
+    collect_images(&tree, &mut |image| {
+        let Some(at) = &image.position else { return };
+        if local && picture_path(&image.url).is_some_and(|path| is_picture_file(&path)) {
+            return;
+        }
+        let alt = if image.alt.is_empty() { image.url.as_str() } else { image.alt.as_str() };
+        let words: String = alt.chars().flat_map(|c| if matches!(c, '[' | ']' | '\\') { vec!['\\', c] } else { vec![c] }).collect();
+        swaps.push((at.start.offset, at.end.offset, format!("[\\[{words}\\]](<{}>)", image.url.replace('>', "%3E"))));
+    });
+    if swaps.is_empty() {
+        return Cow::Borrowed(text);
+    }
+    swaps.sort_by_key(|s| s.0);
+    let mut out = String::with_capacity(text.len() + 16);
+    let mut at = 0;
+    for (start, end, link) in swaps {
+        if start < at || end > text.len() || !text.is_char_boundary(start) || !text.is_char_boundary(end) {
+            continue;
+        }
+        out.push_str(&text[at..start]);
+        out.push_str(&link);
+        at = end;
+    }
+    out.push_str(&text[at..]);
+    Cow::Owned(out)
+}
+
+fn collect_images(node: &markdown::mdast::Node, found: &mut impl FnMut(&markdown::mdast::Image)) {
+    if let markdown::mdast::Node::Image(image) = node {
+        found(image);
+    }
+    for child in node.children().into_iter().flatten() {
+        collect_images(child, found);
+    }
+}
+
+/// The file a picture's address names on this Mac, if it's a file.
+pub(crate) fn picture_path(url: &str) -> Option<std::path::PathBuf> {
+    #[cfg(windows)]
+    {
+        windows_picture_path(url)
+    }
+    #[cfg(not(windows))]
+    {
+        if let Some(rest) = url.strip_prefix("file://") {
+            let path = rest.strip_prefix("localhost").unwrap_or(rest);
+            return path.starts_with('/').then(|| crate::files::percent_decode(path).into());
+        }
+        url.starts_with('/').then(|| url.into())
+    }
+}
+
+/// Only a drive's absolute path, either as written or in a local file URL.
+/// A share or a device must be refused here, before the image checks touch it.
+#[cfg(any(windows, test))]
+fn windows_picture_path(url: &str) -> Option<std::path::PathBuf> {
+    use threadbear_core::open_policy::{is_device_name, percent_decode};
+    let path = if let Some(rest) = url.strip_prefix("file://") {
+        let rest = rest.strip_prefix("localhost/").unwrap_or(rest);
+        percent_decode(rest.strip_prefix('/').unwrap_or(rest))
+    } else {
+        url.to_owned()
+    };
+    let bytes = path.as_bytes();
+    let drive = bytes.first().is_some_and(u8::is_ascii_alphabetic) && bytes.get(1) == Some(&b':') && bytes.get(2).is_some_and(|b| matches!(b, b'/' | b'\\'));
+    if !drive || path.chars().any(char::is_control) || path[2..].contains(':') || path.split(['/', '\\']).any(is_device_name) {
+        return None;
+    }
+    Some(path.into())
+}
+
+/// The biggest picture file a reply draws: the image loader reads a file
+/// whole into memory.
+const PICTURE_MAX_BYTES: u64 = 50 * 1024 * 1024;
+
+/// A picture the app can draw, there now: a raster picture file
+/// (`raster_file`) with a picture's extension.
+fn is_picture_file(path: &std::path::Path) -> bool {
+    let kind = path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase);
+    let picture = matches!(kind.as_deref(), Some("png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "tif" | "tiff"));
+    // Windows' asset loader checks the file and its bytes off the drawing
+    // thread. A guard walk per picture per frame would make scrolling stall.
+    #[cfg(windows)]
+    {
+        picture
+    }
+    #[cfg(not(windows))]
+    {
+        picture && raster_file(path)
+    }
+}
+
+/// A regular file (not a device like /dev/zero, a pipe or a folder; a link
+/// is followed to what it names) of at most PICTURE_MAX_BYTES that starts
+/// as a PNG, JPEG, GIF, WebP, BMP or TIFF does. gpui's loader reads a path
+/// whole, and what it can't place as one of those it reads as an SVG, whose
+/// `<image href>` it then reads from the disk too, /dev/zero included
+/// (Codex's second look at Daybreak 95). Remembered by the file's size and
+/// time, as rows ask on every frame.
+fn raster_file(path: &std::path::Path) -> bool {
+    use std::sync::{LazyLock, Mutex};
+    static SEEN: LazyLock<Mutex<std::collections::HashMap<(std::path::PathBuf, u64, Option<std::time::SystemTime>), bool>>> = LazyLock::new(Default::default);
+    let Ok(meta) = threadbear_core::open_policy::local_metadata(path) else { return false };
+    if !meta.is_file() || meta.len() > PICTURE_MAX_BYTES {
+        return false;
+    }
+    let key = (path.to_owned(), meta.len(), meta.modified().ok());
+    if let Some(known) = SEEN.lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
+        return *known;
+    }
+    let raster = threadbear_core::open_policy::local_read(path, 12).is_ok_and(|head| raster_signature(&head));
+    let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
+    if seen.len() > 2000 {
+        seen.clear();
+    }
+    seen.insert(key, raster);
+    raster
+}
+
+/// The first bytes of the raster formats the app draws.
+fn raster_signature(head: &[u8]) -> bool {
+    head.starts_with(b"\x89PNG\r\n\x1a\n")
+        || head.starts_with(&[0xFF, 0xD8, 0xFF])
+        || head.starts_with(b"GIF87a")
+        || head.starts_with(b"GIF89a")
+        || (head.len() >= 12 && head.starts_with(b"RIFF") && &head[8..12] == b"WEBP")
+        || head.starts_with(b"BM")
+        || head.starts_with(b"II*\0")
+        || head.starts_with(b"MM\0*")
+}
+
+/// The text view's pictures (`linked_text` gives every row's text view
+/// this, a reply's, an agent's message's and a plan's alike). `local` is
+/// whether the thread is this runner's: another Mac's draws no file from
+/// this one. The checks `pictures` made are made again here, as this is
+/// what the image loader reads, and text that never went through
+/// `pictures` (an agent's message, a plan, a chip's link) reaches it too
+/// (Daybreak 95 and 102, 11 Nov 2026). Anything else draws nothing.
+/// A picture a transcript names, as the image loader may be handed it: the
+/// path when it's a raster picture file (`raster_file`), and an empty
+/// path (which draws nothing) for anything else. gpui's loader reads a path
+/// whole, and a review's shots, a tool's pictures or a message's can be
+/// another runner's word in a moved thread, naming /dev/zero (Codex's review
+/// of Daybreak 95). For every `img` of a path from a thread.
+pub(crate) fn picture_file(path: &str) -> std::path::PathBuf {
+    let path = std::path::PathBuf::from(path);
+    if raster_file(&path) {
+        path
+    } else {
+        std::path::PathBuf::new()
+    }
+}
+
+pub(crate) fn picture_source(uri: &gpui_kit::SharedUri, local: bool) -> gpui_kit::ImageSource {
+    #[cfg(windows)]
+    {
+        return match picture_path(uri.as_ref()).filter(|_| local) {
+            Some(path) => file_picture(&path.to_string_lossy()),
+            None => ImageSource::Resource(Resource::Path(std::sync::Arc::from(std::path::Path::new("")))),
+        };
+    }
+    #[cfg(not(windows))]
+    {
+        let path = picture_path(uri.as_ref()).filter(|path| local && is_picture_file(path)).map(|path| picture_file(&path.to_string_lossy())).unwrap_or_default();
+        gpui_kit::ImageSource::Resource(gpui_kit::Resource::Path(std::sync::Arc::from(path.as_path())))
+    }
+}
+
+/// Windows decodes a snapshot read under the path guard. GPUI's default
+/// loader would open the path again later, after a link could be swapped in.
+/// Its asset cache keeps this work off the drawing thread and out of frames.
+pub(crate) fn file_picture(path: &str) -> ImageSource {
+    #[cfg(windows)]
+    {
+        let path = std::path::PathBuf::from(path);
+        ImageSource::Custom(std::sync::Arc::new(move |window, cx| {
+            let result = window.use_asset::<LocalPicture>(&path, cx);
+            if result.as_ref().is_some_and(|r| r.is_ok()) {
+                cx.default_global::<PictureRetries>().attempts.remove(&path);
+            }
+            if result.as_ref().is_some_and(|r| r.is_err()) && cx.default_global::<PictureRetries>().pending.insert(path.clone()) {
+                let retries = cx.default_global::<PictureRetries>();
+                if retries.attempts.len() > 2000 {
+                    retries.attempts.clear();
+                }
+                let attempt = retries.attempts.entry(path.clone()).or_default();
+                let delay = 1u64 << (*attempt).min(6);
+                *attempt = attempt.saturating_add(1);
+                let path = path.clone();
+                cx.spawn(async move |cx| {
+                    cx.background_executor().timer(std::time::Duration::from_secs(delay)).await;
+                    let _ = cx.update(|cx| {
+                        cx.remove_asset::<LocalPicture>(&path);
+                        cx.default_global::<PictureRetries>().pending.remove(&path);
+                        cx.refresh_windows();
+                    });
+                })
+                .detach();
+            }
+            result
+        }))
+    }
+    #[cfg(not(windows))]
+    {
+        picture_file(path).into()
+    }
+}
+
+#[cfg(windows)]
+struct LocalPicture;
+
+#[cfg(windows)]
+#[derive(Default)]
+struct PictureRetries {
+    pending: std::collections::HashSet<std::path::PathBuf>,
+    attempts: std::collections::HashMap<std::path::PathBuf, u32>,
+}
+#[cfg(windows)]
+impl Global for PictureRetries {}
+
+#[cfg(windows)]
+fn checked_picture_bytes(path: &std::path::Path) -> std::io::Result<Vec<u8>> {
+    use std::io::Read as _;
+    let mut file = threadbear_core::open_policy::local_open(path)?;
+    let meta = file.metadata()?;
+    if !meta.is_file() || meta.len() > PICTURE_MAX_BYTES {
+        return Err(std::io::Error::other("Not a picture file"));
+    }
+    let mut bytes = Vec::with_capacity(12);
+    (&mut file).take(12).read_to_end(&mut bytes)?;
+    if !raster_signature(&bytes) {
+        return Err(std::io::Error::other("Not a raster picture"));
+    }
+    file.take(PICTURE_MAX_BYTES + 1 - bytes.len() as u64).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > PICTURE_MAX_BYTES {
+        return Err(std::io::Error::other("Picture is too big"));
+    }
+    Ok(bytes)
+}
+
+#[cfg(windows)]
+impl Asset for LocalPicture {
+    type Source = std::path::PathBuf;
+    type Output = Result<std::sync::Arc<RenderImage>, ImageCacheError>;
+
+    fn load(path: Self::Source, cx: &mut App) -> impl std::future::Future<Output = Self::Output> + Send + 'static {
+        let renderer = cx.svg_renderer();
+        async move {
+            let bytes = checked_picture_bytes(&path)?;
+            let format = crate::viewer::format_of(&path.to_string_lossy(), &bytes).ok_or_else(|| std::io::Error::other("Not a picture"))?;
+            Image::from_bytes(format, bytes).to_image_data(renderer).map_err(Into::into)
+        }
+    }
+}
+
 pub(crate) fn prepare(text: &str) -> String {
-    link_code_paths(&escape_work_links(text))
+    link_code_paths(&escape_work_links(&crate::reply_buttons::unknown_as_words(text)))
 }
 
 fn escape_work_links(text: &str) -> String {
@@ -326,29 +603,11 @@ impl ThreadPane {
         state
     }
 
-    /// Where a link goes. `work:`, `thread:` and `review:` links act here;
-    /// everything else goes through the open gate (open_gate.rs), which
-    /// opens a web page, asks before a program or another app, and never
-    /// opens another Mac's file here: that one shows in the pane, read
-    /// through its runner.
+    /// Where a link goes when it's clicked with no key held (a ⌘-click comes
+    /// through `linked_text`): reply_links.rs's `follow_link`, as it says
+    /// what each kind of link does.
     pub(crate) fn link_clicked(&mut self, url: &str, row_id: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let scheme = url.split_once(':').map(|(s, _)| s).filter(|s| !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '.' | '-'))).map(str::to_ascii_lowercase);
-        let rest = scheme.as_ref().map_or(url, |s| &url[s.len() + 1..]);
-        match scheme.as_deref() {
-            Some("work") => self.open_work_link(&percent_decode(rest), row_id, window, cx),
-            Some("thread") => self.open_thread_link(&percent_decode(rest), window, cx),
-            Some("review") => {}
-            Some("tbpath") => {
-                let text = percent_decode(rest.strip_prefix("?p=").unwrap_or(rest));
-                self.open_thread_file(strip_line(split_query(&text).0), cx);
-            }
-            // `Foo.swift:12` reads as a scheme, but it's a file and a line.
-            Some(s) if s.contains('.') && strip_line(url) != url => self.open_thread_file(strip_line(url), cx),
-            _ => match open_policy::link_kind(url) {
-                LinkKind::File(path) => self.open_thread_file(strip_line(&path), cx),
-                _ => open_gate::open_link(url, self.origin(), &self.summary.cwd, cx),
-            },
-        }
+        self.follow_link(url, row_id, false, window, cx);
     }
 
     pub(crate) fn origin(&self) -> Origin {
@@ -358,26 +617,6 @@ impl ThreadPane {
             Origin::ThisMac
         }
     }
-
-    /// A file a reply names, by a link or in inline code: the thread's
-    /// folder is where a relative one is from (`FilePathRefs.resolve`,
-    /// without its search of the files the thread's tools touched, which
-    /// comes with the file links' menus). This runner's opens in its app
-    /// through the gate; another runner's shows in the pane, read through
-    /// that runner, as nothing of it is on this Mac.
-    pub(crate) fn open_thread_file(&mut self, path: &str, cx: &mut Context<Self>) {
-        let home = threadbear_core::reducer::text::home_directory();
-        let Some(absolute) = open_policy::absolute(path, &self.summary.cwd, &home) else { return };
-        if self.summary.is_remote() {
-            let side = self.composer.read(cx).app.upgrade().map(|app| app.read(cx).side.clone());
-            let thread = self.summary.clone();
-            if let Some(side) = side {
-                side.update(cx, |side, cx| side.preview_path(&absolute, None, &thread, cx));
-            }
-            return;
-        }
-        open_gate::open_file(&absolute, Origin::ThisMac, cx);
-    }
 }
 
 /// How many row documents a thread keeps parsed.
@@ -385,7 +624,126 @@ const DOCUMENTS_KEPT: usize = 600;
 
 #[cfg(test)]
 mod tests {
-    use super::{looks_like_path, prepare};
+    use super::{looks_like_path, pictures, prepare};
+
+    #[test]
+    fn windows_pictures_name_a_drive_file_before_any_file_access() {
+        for (url, path) in [
+            (r"C:\pictures\shot.png", r"C:\pictures\shot.png"),
+            ("c:/pictures/shot.png", "c:/pictures/shot.png"),
+            ("file:///C:/pictures/a%20b.png", "C:/pictures/a b.png"),
+            ("file://localhost/C:/pictures/shot.png", "C:/pictures/shot.png"),
+            (r"file://C:\pictures\shot.png", r"C:\pictures\shot.png"),
+        ] {
+            assert_eq!(super::windows_picture_path(url), Some(std::path::PathBuf::from(path)), "{url}");
+        }
+        for url in [
+            r"\\host\share\shot.png",
+            "//host/share/shot.png",
+            "file://host/share/shot.png",
+            "file:////host/share/shot.png",
+            "file:///%5C%5Chost/share/shot.png",
+            r"\\?\C:\pictures\shot.png",
+            r"\\.\pipe\shot.png",
+            r"\??\C:\shot.png",
+            r"C:\pictures\NUL.tar.png",
+            r"C:\COM¹\shot.png",
+            r"C:\pictures\NUL:shot.png",
+            "C:/pictures/file:stream.png",
+            "C:shot.png",
+            "/pictures/shot.png",
+            "shot.png",
+            "file:///C:/pictures/a%00b.png",
+            "https://x.y/shot.png",
+            "",
+        ] {
+            assert_eq!(super::windows_picture_path(url), None, "{url}");
+        }
+    }
+
+    #[test]
+    fn a_web_picture_or_another_macs_stays_a_link() {
+        assert_eq!(pictures("see ![chart](https://x.y/c.png)", true), "see [\\[chart\\]](<https://x.y/c.png>)");
+        assert_eq!(pictures("![](/nowhere/gone.png)", true), "[\\[/nowhere/gone.png\\]](</nowhere/gone.png>)", "a file that's gone");
+        assert_eq!(pictures("no pictures here", true), "no pictures here");
+        assert_eq!(pictures("`![x](https://a.b)` in code", true), "`![x](https://a.b)` in code", "code is left as written");
+        let dir = std::env::temp_dir().join(format!("tb-pictures-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let shot = dir.join("shot.png");
+        std::fs::write(&shot, b"\x89PNG\r\n\x1a\n, a png's first bytes").unwrap();
+        let reply = format!("![shot]({})", shot.display());
+        assert_eq!(pictures(&reply, true), reply, "a picture on this Mac is drawn");
+        assert!(pictures(&reply, false).starts_with("[\\[shot\\]]"), "another Mac's thread draws none from here");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// What the image loader is handed for a picture's address: the file,
+    /// or the empty path that draws nothing.
+    fn source_path(url: &str, local: bool) -> String {
+        match super::picture_source(&url.to_owned().into(), local) {
+            gpui_kit::ImageSource::Resource(gpui_kit::Resource::Path(path)) => path.to_string_lossy().into_owned(),
+            #[cfg(windows)]
+            gpui_kit::ImageSource::Custom(_) => super::picture_path(url).filter(|p| super::checked_picture_bytes(p).is_ok()).map(|p| p.to_string_lossy().into_owned()).unwrap_or_default(),
+            _ => panic!("a path"),
+        }
+    }
+
+    /// Daybreak 95: an agent's message never went through `pictures`, so
+    /// the image loader's own source checks the thread and the file.
+    #[test]
+    fn the_image_loader_only_gets_a_picture_file_on_this_macs_thread() {
+        let dir = std::env::temp_dir().join(format!("tb-picture-source-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let shot = dir.join("shot.png");
+        std::fs::write(&shot, b"\x89PNG\r\n\x1a\n and the rest").unwrap();
+        let shown = shot.to_string_lossy().into_owned();
+        assert_eq!(source_path(&shown, true), shown, "a picture on this Mac's thread");
+        assert_eq!(source_path(&["file://", shown.as_str()].concat(), true), shown);
+        assert_eq!(source_path(&shown, false), "", "another Mac's thread names no file here");
+        for url in ["file:///dev/zero", "/dev/zero", "/dev/urandom", "file:///etc/passwd", "/tmp", "https://x.y/c.png"] {
+            assert_eq!(source_path(url, true), "", "{url}");
+        }
+        // A link to a device with a picture's name, a folder with one, and
+        // a file too big to read whole.
+        let device = dir.join("zero.png");
+        let _ = std::fs::remove_file(&device);
+        // Windows has no /dev/zero to link to (and this didn't compile
+        // there, which stopped the Windows job's tests), so there the path
+        // leads nowhere, which is refused too.
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("/dev/zero", &device).unwrap();
+        assert_eq!(source_path(&device.to_string_lossy(), true), "");
+        let folder = dir.join("folder.png");
+        std::fs::create_dir_all(&folder).unwrap();
+        assert_eq!(source_path(&folder.to_string_lossy(), true), "");
+        let big = dir.join("big.png");
+        std::fs::File::create(&big).unwrap().set_len(super::PICTURE_MAX_BYTES + 1).unwrap();
+        assert_eq!(source_path(&big.to_string_lossy(), true), "");
+        // A path from a thread for any other picture (a review's shot, a
+        // tool's picture): only a regular file of a sane size.
+        assert_eq!(super::picture_file(&shown), std::path::PathBuf::from(&shown));
+        for path in ["/dev/zero", "/tmp", ""] {
+            assert_eq!(super::picture_file(path), std::path::PathBuf::new(), "{path}");
+        }
+        for path in [&device, &folder, &big] {
+            assert_eq!(super::picture_file(&path.to_string_lossy()), std::path::PathBuf::new(), "{path:?}");
+        }
+        // An SVG named as a picture, whose <image> would have the loader
+        // read /dev/zero, and text: neither starts as a picture does.
+        let svg = dir.join("payload.png");
+        std::fs::write(&svg, br#"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="1" height="1"><image width="1" height="1" xlink:href="/dev/zero"/></svg>"#)
+            .unwrap();
+        let text = dir.join("notes.jpg");
+        std::fs::write(&text, b"hello").unwrap();
+        for path in [&svg, &text] {
+            assert_eq!(super::picture_file(&path.to_string_lossy()), std::path::PathBuf::new(), "{path:?}");
+            assert_eq!(source_path(&path.to_string_lossy(), true), "", "{path:?}");
+        }
+        for head in [&b"\xFF\xD8\xFF\xE0"[..], b"GIF89a..", b"RIFF\0\0\0\0WEBPVP8 ", b"BM....", b"II*\0", b"MM\0*"] {
+            assert!(super::raster_signature(head), "{head:?}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn reads_paths_as_paths_and_commands_as_commands() {

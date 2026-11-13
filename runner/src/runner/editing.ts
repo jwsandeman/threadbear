@@ -2,6 +2,7 @@
 // Part of the Runner (runner.ts), split out on 4 Nov 2026 as a plain move so a
 // fork's change to one area doesn't clash with another's. Each method's `this`
 // is the Runner; runner.ts puts them on its prototype.
+import { COPIED_REFUSAL } from '../real-copy.ts';
 import { INSTRUCTIONS_REWOUND } from '../instructions.ts';
 import type { Runner } from '../runner.ts';
 import type { RunnerPart } from './part.ts';
@@ -25,6 +26,9 @@ export const editingPart = {
     const st = this.mustGet(threadId);
     const { rec, rt } = st;
     this.checkAccepting();
+    // Going back puts files back from the thread's diffs, which name the
+    // real folder's files (real-copy.ts).
+    if (rec.copied) throw new RpcError(ErrorCode.badParams, COPIED_REFUSAL);
     if (this.draining) throw new RpcError(ErrorCode.busy, 'The runner is handing over to a new one; edit again in a moment.');
     if (rt.editing) throw new RpcError(ErrorCode.busy, 'This thread is already going back to an earlier message.');
     if (!text && images.length === 0) throw new RpcError(ErrorCode.badParams, 'text or images required');
@@ -95,6 +99,8 @@ export const editingPart = {
       delete rec.contextUsage;
       // The cut may undo what the session was told about them (Codex review).
       if (!cut.fresh && rec.instructionsTold !== undefined) rec.instructionsTold = INSTRUCTIONS_REWOUND;
+      // And what it was told of reply button presses (Codex review).
+      this.retellPressesFrom(rec, seq, Boolean(cut.fresh));
       (rec.rewinds ??= []).push({ from: seq, to: toSeq });
       const ev = this.emit(st, { type: 'thread.rewound', fromSeq: seq, toSeq, files });
       // What the cut turns left open or found goes with them (pins stay).

@@ -560,6 +560,69 @@ final class TextFileController: NSObject, NSTextViewDelegate {
         textView.setSelectedRange(NSRange(location: textView.string.utf16.count, length: 0))
         textView.insertText(text, replacementRange: textView.selectedRange())
     }
+
+    // MARK: The find bar, for the automation
+
+    /// AppKit's own find bar (`usesFindBar`) over the text: `query` typed
+    /// into it after ⌘F, as keys would, and Return for the first match.
+    /// The menu item isn't there to press from a script (the dev window is
+    /// never key), so this asks the text view the way the item does.
+    func debugFind(_ query: String) {
+        textView.window?.makeFirstResponder(textView)
+        let show = NSMenuItem()
+        show.tag = NSTextFinder.Action.showFindInterface.rawValue
+        textView.performTextFinderAction(show)
+        guard let field = findField else { return }
+        field.stringValue = query
+        // What typing in the field tells the finder.
+        NotificationCenter.default.post(name: NSControl.textDidChangeNotification, object: field)
+        debugFindStep(previous: false)
+    }
+
+    /// ⌘G, or ⇧⌘G for `previous`.
+    func debugFindStep(previous: Bool) {
+        let step = NSMenuItem()
+        step.tag = (previous ? NSTextFinder.Action.previousMatch : NSTextFinder.Action.nextMatch).rawValue
+        textView.performTextFinderAction(step)
+    }
+
+    /// The bar's Done.
+    func debugFindDone() {
+        let hide = NSMenuItem()
+        hide.tag = NSTextFinder.Action.hideFindInterface.rawValue
+        textView.performTextFinderAction(hide)
+    }
+
+    private var findField: NSSearchField? {
+        guard scroll.isFindBarVisible, let bar = scroll.findBarView else { return nil }
+        var pending: [NSView] = [bar]
+        while let next = pending.popLast() {
+            if let field = next as? NSSearchField { return field }
+            pending += next.subviews
+        }
+        return nil
+    }
+
+    /// The find bar's words and where the selection is among their matches
+    /// ("the: 2 of 5", "the: not found"), the same search AppKit's bar does
+    /// (contains, ignoring case). Nil while the bar is down.
+    var debugFindLine: String? {
+        guard let field = findField else { return nil }
+        let query = field.stringValue
+        guard !query.isEmpty else { return "" }
+        let text = textView.string as NSString
+        var matches: [NSRange] = []
+        var from = 0
+        while from < text.length {
+            let found = text.range(of: query, options: .caseInsensitive, range: NSRange(location: from, length: text.length - from))
+            if found.location == NSNotFound { break }
+            matches.append(found)
+            from = NSMaxRange(found)
+        }
+        guard !matches.isEmpty else { return "\(query): not found" }
+        guard let current = matches.firstIndex(of: textView.selectedRange()) else { return "\(query): \(matches.count) found" }
+        return "\(query): \(current + 1) of \(matches.count)"
+    }
 }
 
 /// The pane's text view: a link in a rendered Markdown file to another

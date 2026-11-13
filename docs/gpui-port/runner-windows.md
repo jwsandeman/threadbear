@@ -40,7 +40,7 @@
 
 **PowerShell trap.** With Git Bash installed, the PowerShell tool is still [on by default](https://code.claude.com/docs/en/tools-reference.md) for claude.ai logins. Threadbear gates on the literal name `Bash`:
 
-- `src/secrets-guard.ts:43` (a security check)
+- `src/secrets-guard.ts:51` (a security check)
 - `src/adapters/claude/adapter.ts:336, 1099, 1112`
 - `src/relay.ts:1127`, `src/tb-dev.ts:691, 708`
 
@@ -82,8 +82,8 @@ For v1, set `CLAUDE_CODE_USE_POWERSHELL_TOOL=0` in `cliEnv`.
 | PATH delimiter `:` | `src/restart.ts:156`, `scripts/deploy.mjs:168`, `src/adapters/codex/approvals.ts` (`split(':')`) | `path.delimiter`. Today this corrupts the first PATH entry in every thread. | S |
 | `~/` expansion | 14 sites: `src/config.ts:222`, `src/usage.ts:69`, `src/patches.ts:761`, `src/share-images.ts:55`, `src/tools.ts:61`, `src/librarian.ts:1167`, `src/highlights.ts:403`, `src/pools.ts:110`, and others | One `expandHome` that also accepts `~\`. | S |
 | "Absolute means starts with `/`" | `src/share-images.ts:56,282`, `src/highlights.ts:283`, `src/secret-values.ts:62`, `src/runner/patches.ts:86`, `src/threadbear-mcp.ts:997`, `src/cli.ts:1107`, `src/runner/moves.ts:44`, `src/cross-runner.ts:113` | `path.isAbsolute`, and check `path.sep` rather than `/`. About 117 grep hits, roughly 45 real. | M |
-| Case-sensitive containment | About 13 `startsWith(x + path.sep)` checks, including security ones: `src/secrets-guard.ts:37`, `src/sandbox.ts:47`, `src/cross-runner.ts:112`, `src/project-icons.ts:188,192` | `isInside()` that folds case and normalises the drive letter on win32. | S-M |
-| Secrets guard text matching | `src/secrets-guard.ts:44-60` strips backslashes, so `C:\Users\...` forms never match. `Application Support/Threadbear` is the wrong name. | Rewrite the forms for Windows and include PowerShell. Plan a second-lab review. | S |
+| Case-sensitive containment | About 13 `startsWith(x + path.sep)` checks, including security ones: `src/sandbox.ts:47`, `src/cross-runner.ts:112`, `src/project-icons.ts:188,192`. The secrets guard's own `inside` (`src/secrets-guard.ts:42`) folds case now, on every platform, so it is done. | `isInside()` that folds case and normalises the drive letter on win32. | S-M |
+| Secrets guard text matching | `src/secrets-guard.ts:52-72` strips backslashes, so `C:\Users\...` forms never match. `Application Support/Threadbear` is the wrong name. | Rewrite the forms for Windows and include PowerShell. Plan a second-lab review. | S |
 | Symlinks | Create: `launch.mjs:79`, `src/release.ts:100`, `src/updates/codex.ts:230`, `root:worktree-setup.sh:77`. Read: `launch.mjs:66`, `src/release.ts:82`, `src/updates/codex.ts:82`. | Symlinks need Developer Mode or admin, and rename can't replace a directory link. Replace `current` with a text file on win32. Use a junction for `node_modules` (no privilege needed). | M |
 | Atomic rename and deleting in-use files | 24 rename sites, mainly `src/fsutil.ts:20`. Release deletion at `scripts/deploy.mjs:626,1445`. Spare `git clean`. | Retry on `EPERM`/`EBUSY`/`EACCES`, since antivirus and indexers hold files. Treat a busy old release as "delete later": a draining runner has `oxc` loaded. | S-M |
 | File permissions | About 28 sites: `src/config.ts:552-58`, `src/secrets.ts:49-59,115-17`, `src/runner-keys.ts:213,353`, `src/convex-keys.ts:226-46` | `chmod` only touches read-only here. `%LOCALAPPDATA%` is already private by profile ACL, as Claude's docs rely on. Add `icacls /inheritance:r /grant:r %USERNAME%:F` on `secrets\`, or DPAPI later. | S-M |

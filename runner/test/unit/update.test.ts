@@ -176,7 +176,8 @@ function harness(releaseExtra: Partial<ReleaseJson> = {}, depsExtra: Partial<Upd
       if (h.deployResult.ok) {
         // As deploy.mjs would: a new release, current pointing at it.
         fs.mkdirSync(path.join(home, 'runner', 'releases', h.deployResult.id), { recursive: true });
-        fs.rmSync(path.join(home, 'runner', 'current'));
+        // A symlink to a directory: unlink it, rmSync refuses it (Node 24.12).
+        fs.unlinkSync(path.join(home, 'runner', 'current'));
         fs.symlinkSync(path.join('releases', h.deployResult.id), path.join(home, 'runner', 'current'));
       }
       return h.deployResult;
@@ -229,6 +230,28 @@ test('a failed build or backend deploy goes to a fix thread instead of the notic
   assert.equal(failures.at(-1)!.kind, 'backend');
   assert.equal(h.notices.length, 1);
   assert.match(h.notices[0], /Convex backend couldn't be deployed at main c3/);
+});
+
+// A fix thread's follow-ups queued behind its turn for commits main has
+// since got past (fix-update.ts). 37fcdace and 4491e93a, 11 Nov.
+test('main getting through, by a build or being up to date, is told', async () => {
+  const through: string[] = [];
+  const h = harness({}, { onFailed: () => true, onThrough: (c) => void through.push(c) });
+  h.deployResult = { ok: false, error: 'Unit tests failed' };
+  h.u.start();
+  await h.u.check();
+  assert.deepEqual(through, []);
+  h.main = { commit: 'c3', short: 'c3', subject: 'Fix', tree: 'y+b+c+d' };
+  h.deployResult = { ok: true, id: 'r2' };
+  await h.u.check();
+  assert.deepEqual(through, ['c3']);
+  // The new release's own look at main.
+  const later: string[] = [];
+  const h2 = harness({}, { onThrough: (c) => void later.push(c) });
+  h2.main = { ...h2.main, commit: 'c9', short: 'c9', tree: 'a+b+c+d' };
+  h2.u.start();
+  await h2.u.check();
+  assert.deepEqual(later, ['c9']);
 });
 
 test('main at the same tree, or only tests and docs changed, is left alone', async () => {

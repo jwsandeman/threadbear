@@ -22,11 +22,15 @@ Feature: The thread's bar, banners and notes
 
   # The demo's "Draft the release notes" is on the Evenings pool, whose only
   # login is at its limit, so the runner is holding it until there's room.
-  @banner.limit
-  Scenario: A pool thread out of room says when it carries on, and offers a login outside the pool
+  # Since 10 Nov this is a box at the top of the message field, which says
+  # when it carries on and lets Mike turn that off. Since 12 Nov it asks:
+  # Continue now on, with a menu of the logins outside the pool with room.
+  @banner.limit @swift-pending
+  Scenario: A pool thread out of room says so, offers to continue now on a login outside the pool, and carries on by itself
     When I open the thread "Draft the release notes for 0.4"
-    Then the limit line starts "Every login in Evenings is out of room. It carries on"
-    And the limit line's button says "Pin to mike (78% left)"
+    Then the limit line starts "Every login in Evenings is out of room."
+    And the limit line's button says "Continue now on mike (78% left)"
+    And the limit box carries on by itself
     And the model chip is marked "Limit reached"
 
   @header.backforward
@@ -92,3 +96,18 @@ Feature: The thread's bar, banners and notes
     When I open the last thread in the Inbox
     And I press "down" with "cmd,opt"
     Then a note says I've reached the end of the inbox
+
+  @header.schedulechip
+  Scenario: The Scheduled chip says when its schedule runs, and opens it in the editor
+    When I open the thread "Export last quarter's invoices as CSV"
+    And I click the header's Scheduled chip for "Quarterly invoice export"
+    Then the schedule editor is open on "Export last quarter's invoices as CSV for the accountant." repeating on "0 8 1 1,4,7,10 *"
+
+  # The mock refuses a message saying "mock refusal" as Claude's safeguards
+  # do. The offer sits just above the box (RefusalOffer in ComposerView), not
+  # over the transcript at the top; the Swift dump has no "offerAbove".
+  @banner.refusal @swift-pending
+  Scenario: A refused message offers to carry on with Codex just above the box
+    When I open the thread "Morning brief"
+    And I send "mock refusal please"
+    Then the box has "Continue with Codex Sol" just above it

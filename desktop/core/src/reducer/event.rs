@@ -81,9 +81,15 @@ pub(crate) fn lenient_int(c: &Object, key: &str) -> Option<i64> {
 
 /// `c.lossyArray(_:forKey:)`: elements that don't decode are skipped, and a
 /// missing, null or non-array value is empty.
-fn lossy<T>(c: &Object, key: &str, mut decode: impl FnMut(&Value) -> Option<T>) -> Vec<T> {
+fn lossy<T>(c: &Object, key: &str, decode: impl FnMut(&Value) -> Option<T>) -> Vec<T> {
+    lossy_first(c, key, usize::MAX, decode)
+}
+
+/// `lossy` over at most the first `max` items: what a list from another
+/// runner can't be longer than, so a longer one isn't decoded to be cut.
+fn lossy_first<T>(c: &Object, key: &str, max: usize, mut decode: impl FnMut(&Value) -> Option<T>) -> Vec<T> {
     match c.get(key) {
-        Some(Value::Array(items)) => items.iter().filter_map(&mut decode).collect(),
+        Some(Value::Array(items)) => items.iter().take(max).filter_map(&mut decode).collect(),
         _ => Vec::new(),
     }
 }
@@ -204,13 +210,32 @@ impl LooseEnds {
 
     /// Any that should stop a plain Archive: a booked check-in doesn't.
     pub fn any_open(&self) -> bool {
-        self.ends.iter().any(|end| end.kind != "scheduled")
+        self.ends.iter().any(|end| !end.is_booked())
     }
 }
 
 impl LooseEnd {
     pub fn new(kind: &str, text: &str) -> LooseEnd {
         LooseEnd { kind: kind.to_owned(), text: text.to_owned(), thread_id: None, at: None }
+    }
+
+    /// A check-in booked on the thread (`scheduled`, Swift `isBooked`): it
+    /// comes back by itself, so it goes under "Coming back".
+    pub fn is_booked(&self) -> bool {
+        self.kind == "scheduled"
+    }
+
+    /// Its line on the done card (looseEndsText): a booked check-in says
+    /// when it comes back first, "Fri 13 Nov, 9:30 am: Review the week".
+    pub fn line<Tz: chrono::TimeZone>(&self, tz: &Tz) -> String {
+        let when = self.at.as_deref().filter(|_| self.is_booked()).and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok());
+        match when {
+            Some(at) => {
+                let at = at.with_timezone(tz);
+                format!("{}: {}", at.naive_local().format("%a %-d %b, ").to_string() + &crate::schedules::time_of_day(&at), self.text)
+            }
+            None => self.text.clone(),
+        }
     }
 
     // Synthesized Decodable: required fields strict, optionals strict in type.
@@ -237,7 +262,28 @@ pub struct Ask {
     pub option_notes: Vec<String>,
     pub suggested: Option<usize>,
     pub links: Vec<AskLink>,
+    /// A command the card offers to run (docs/protocol.md, "Run on the card").
+    pub run: Option<AskRun>,
     pub ticked: bool,
+}
+
+/// An ask's command, run once from the card by its button (`AskRun`). The
+/// runner sets `buttonId` as the card is made; `running` and `failed`
+/// mirror the button for clients that don't see it.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct AskRun {
+    pub command: String,
+    pub button_id: Option<String>,
+    pub cwd: Option<String>,
+    pub running: Option<bool>,
+    pub failed: Option<String>,
+}
+
+impl AskRun {
+    pub fn decode(v: &Value) -> Option<AskRun> {
+        let c = v.as_object()?;
+        Some(AskRun { command: c.get("command")?.as_str()?.to_owned(), button_id: string(c, "buttonId"), cwd: string(c, "cwd"), running: boolean(c, "running"), failed: string(c, "failed") })
+    }
 }
 
 impl Ask {
@@ -265,6 +311,7 @@ impl Ask {
             option_notes,
             suggested,
             links: lossy(c, "links", AskLink::decode),
+            run: c.get("run").and_then(AskRun::decode),
             ticked: boolean(c, "ticked").unwrap_or(false),
         })
     }
@@ -280,6 +327,25 @@ impl AskLink {
     pub fn decode(v: &Value) -> Option<AskLink> {
         let c = v.as_object()?;
         Some(AskLink { title: c.get("title")?.as_str()?.to_owned(), url: c.get("url")?.as_str()?.to_owned() })
+    }
+
+    /// What clicking it opens (`AskLink.target`): a web page, a file with `~`
+    /// expanded against `home`, or a review; None for anything else, which
+    /// isn't drawn.
+    pub fn target(&self, home: &str) -> Option<String> {
+        let url = self.url.trim();
+        if let Some(rest) = url.strip_prefix("~/") {
+            return (!home.is_empty()).then(|| format!("{}/{rest}", home.trim_end_matches('/')));
+        }
+        if url.starts_with('/') {
+            return Some(url.to_owned());
+        }
+        let (scheme, rest) = url.split_once(':')?;
+        match scheme.to_ascii_lowercase().as_str() {
+            "http" | "https" | "file" => Some(url.to_owned()),
+            "review" if !rest.trim().is_empty() => Some(url.to_owned()),
+            _ => None,
+        }
     }
 }
 
@@ -324,10 +390,15 @@ impl ReviewDraft {
             .and_then(Value::as_object)
             .and_then(|map| {
                 // A `[String: String]`: one value of the wrong type drops them all.
-                map.iter().map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_owned()))).collect::<Option<BTreeMap<_, _>>>()
+                // At most one note an option, each cut to what the runner
+                // takes (reviewDraft): a moved thread's events are the
+                // other runner's word.
+                map.iter().take(REVIEW_OPTIONS_MAX).map(|(k, v)| v.as_str().map(|s| (k.clone(), review_text(s.to_owned(), REVIEW_NOTE_MAX)))).collect::<Option<BTreeMap<_, _>>>()
             })
             .unwrap_or_default();
-        Some(ReviewDraft { picked_ids, notes, reply: string(c, "reply"), none: boolean(c, "none").unwrap_or(false) })
+        let mut picked_ids = picked_ids;
+        picked_ids.truncate(REVIEW_OPTIONS_MAX);
+        Some(ReviewDraft { picked_ids, notes, reply: string(c, "reply").map(|r| review_text(r, REVIEW_REPLY_MAX)), none: boolean(c, "none").unwrap_or(false) })
     }
 }
 
@@ -341,7 +412,7 @@ pub struct ReviewShot {
 impl ReviewShot {
     fn decode(v: &Value) -> Option<ReviewShot> {
         let c = v.as_object()?;
-        let title = string_strict(c, "title").ok()?;
+        let title = string_strict(c, "title").ok()?.map(|t| review_text(t, REVIEW_TITLE_MAX));
         let image = ImageRef::decode(c.get("image")?)?;
         let media = match c.get("media") {
             None | Some(Value::Null) => None,
@@ -362,18 +433,38 @@ pub struct ReviewOption {
     pub url: Option<String>,
 }
 
+/// What show_options takes (runner/src/reviews.ts reviewInput and
+/// reviewDraft): a title of 200 characters, a note of 4,000, 12 options of
+/// at most 8 shots, and a reply of 8,000. A review comes from the thread's
+/// record and from its events (`review.updated`), and a moved thread's
+/// events are the other runner's word. The runner counts UTF-16
+/// units, which are never fewer than characters, so nothing it took is cut.
+pub const REVIEW_TITLE_MAX: usize = 200;
+pub const REVIEW_NOTE_MAX: usize = 4000;
+pub const REVIEW_OPTIONS_MAX: usize = 12;
+/// An option's shots (maxReviewShots) and a draft's reply (reviewDraft).
+pub const REVIEW_SHOTS_MAX: usize = 8;
+pub const REVIEW_REPLY_MAX: usize = 8000;
+
+fn review_text(text: String, max: usize) -> String {
+    match text.char_indices().nth(max) {
+        Some((cut, _)) => text[..cut].to_owned(),
+        None => text,
+    }
+}
+
 impl ReviewOption {
     fn decode(v: &Value) -> Option<ReviewOption> {
         let c = v.as_object()?;
         let id = c.get("id")?.as_str()?.to_owned();
-        let title = string_strict(c, "title").ok()?.unwrap_or_else(|| id.clone());
-        let note = string_strict(c, "note").ok()?;
+        let title = review_text(string_strict(c, "title").ok()?.unwrap_or_else(|| id.clone()), REVIEW_TITLE_MAX);
+        let note = string_strict(c, "note").ok()?.map(|n| review_text(n, REVIEW_NOTE_MAX));
         let reference = boolean(c, "reference").unwrap_or(false);
         let image = ImageRef::decode(c.get("image")?)?;
         // Only a web page (LinkPolicy.web): a runner, maybe another Mac's,
         // sends this, and Open live hands it to the system.
         let url = string(c, "url").filter(|u| is_web_address(u));
-        Some(ReviewOption { id, title, note, reference, image, shots: lossy(c, "shots", ReviewShot::decode), url })
+        Some(ReviewOption { id, title, note, reference, image, shots: lossy_first(c, "shots", REVIEW_SHOTS_MAX, ReviewShot::decode), url })
     }
 }
 
@@ -421,13 +512,18 @@ impl DesignReview {
         self.status == "pending"
     }
 
+    /// A review as the runner keeps it. Its words are cut to what show_options
+    /// takes (runner/src/reviews.ts reviewInput) wherever it came from: a
+    /// thread moved from another runner brings its reviews as that runner
+    /// wrote them, and the window draws the notes on every render
+    /// (Daybreak 93).
     pub fn decode(v: &Value) -> Option<DesignReview> {
         let c = v.as_object()?;
         let id = c.get("id")?.as_str()?.to_owned();
-        let title = string_strict(c, "title").ok()?.unwrap_or_else(|| "Design options".to_owned());
-        let note = string_strict(c, "note").ok()?;
+        let title = review_text(string_strict(c, "title").ok()?.unwrap_or_else(|| "Design options".to_owned()), REVIEW_TITLE_MAX);
+        let note = string_strict(c, "note").ok()?.map(|n| review_text(n, REVIEW_NOTE_MAX));
         let recommended = string(c, "recommended");
-        let options = lossy(c, "options", ReviewOption::decode);
+        let options = lossy_first(c, "options", REVIEW_OPTIONS_MAX, ReviewOption::decode);
         let status = string_strict(c, "status").ok()?.unwrap_or_else(|| "unknown".to_owned());
         let revision = lenient_int(c, "revision").unwrap_or(0);
         let created_at = string_strict(c, "createdAt").ok()?.unwrap_or_default();
@@ -1064,6 +1160,16 @@ pub enum TurnErrorKind {
 }
 
 impl TurnErrorKind {
+    /// Its raw value, as the runner writes it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TurnErrorKind::UsageLimit => "usageLimit",
+            TurnErrorKind::ContextWindow => "contextWindow",
+            TurnErrorKind::Auth => "auth",
+            TurnErrorKind::Network => "network",
+        }
+    }
+
     fn from_raw(raw: &str) -> Option<TurnErrorKind> {
         match raw {
             "usageLimit" => Some(TurnErrorKind::UsageLimit),
@@ -1093,6 +1199,9 @@ pub struct TurnCompletion {
     pub asks: Vec<Ask>,
     /// With needs "nothing": follow-ups the agent suggested.
     pub next: Vec<String>,
+    /// On the turn that answered another lab's findings: the ledger
+    /// (`review`, docs/protocol.md "Review by another lab").
+    pub review: Option<LabReview>,
 }
 
 impl TurnCompletion {
@@ -1114,7 +1223,98 @@ impl TurnCompletion {
             needs: string(c, "needs"),
             asks: lossy(c, "asks", Ask::decode),
             next: lossy_strings(c, "next"),
+            review: c.get("review").and_then(LabReview::decode),
         }
+    }
+}
+
+/// One finding of another lab's review, and what the agent did about it
+/// (LabReview.Finding, docs/protocol.md "Review by another lab").
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReviewFinding {
+    pub id: i64,
+    pub round: i64,
+    /// high, medium or low.
+    pub severity: String,
+    pub claim: String,
+    pub where_: Option<String>,
+    pub case: Option<String>,
+    /// fixed, disputed or left; None when the agent didn't answer.
+    pub outcome: Option<String>,
+    pub note: Option<String>,
+}
+
+impl ReviewFinding {
+    fn decode(v: &Value) -> Option<ReviewFinding> {
+        let c = v.as_object()?;
+        Some(ReviewFinding {
+            id: c.get("id").and_then(int_value).unwrap_or(0),
+            round: c.get("round").and_then(int_value).unwrap_or(1),
+            severity: string(c, "severity").unwrap_or_else(|| "medium".to_owned()),
+            claim: string(c, "claim").unwrap_or_default(),
+            where_: string(c, "where"),
+            case: string(c, "case"),
+            outcome: string(c, "outcome"),
+            note: string(c, "note"),
+        })
+    }
+}
+
+/// The review ledger a turn that answered another lab's findings carries
+/// (LabReview, `turn.completed`'s `review`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct LabReview {
+    /// "Codex (codex-1)".
+    pub reviewer: String,
+    /// Another lab, not a fresh session of the same one.
+    pub independent: bool,
+    pub rounds: i64,
+    /// The latest round's review thread.
+    pub thread_id: String,
+    /// The latest round found nothing that holds up.
+    pub passed: bool,
+    /// A round's reviewer gave no verdict, so there are no findings to list.
+    pub unstructured: bool,
+    /// Fixes made in the last round there is, which no review looked at.
+    pub unchecked: bool,
+    pub findings: Vec<ReviewFinding>,
+}
+
+impl LabReview {
+    pub fn decode(v: &Value) -> Option<LabReview> {
+        let c = v.as_object()?;
+        Some(LabReview {
+            reviewer: string(c, "reviewer").unwrap_or_else(|| "Another lab".to_owned()),
+            independent: boolean(c, "independent").unwrap_or(true),
+            rounds: c.get("rounds").and_then(int_value).unwrap_or(1),
+            thread_id: string(c, "threadId").unwrap_or_default(),
+            passed: boolean(c, "passed").unwrap_or(false),
+            unstructured: boolean(c, "unstructured").unwrap_or(false),
+            unchecked: boolean(c, "unchecked").unwrap_or(false),
+            findings: lossy(c, "findings", ReviewFinding::decode).into_iter().filter(|f| !f.claim.is_empty()).collect(),
+        })
+    }
+
+    /// The one line over the findings: who, how many rounds, how it came out
+    /// (LabReview.heading). The reviewer's login ("Codex (codex-1)") is left
+    /// off: which account reviewed is noise here (Mike, 12 Nov 2026).
+    pub fn heading(&self) -> String {
+        let name = self.reviewer.split(" (").next().unwrap_or(&self.reviewer);
+        let who = if self.independent { format!("Reviewed by {name}") } else { format!("Reviewed by a fresh {name} session") };
+        let rounds = if self.rounds > 1 { format!(", {} rounds", self.rounds) } else { String::new() };
+        let open = self.findings.iter().filter(|f| f.outcome.is_none() || f.outcome.as_deref() == Some("left")).count();
+        let result = if self.unstructured {
+            "see its reply".to_owned()
+        } else if self.unchecked {
+            "last fixes not re-reviewed".to_owned()
+        } else if self.passed {
+            if self.findings.is_empty() { "nothing found".to_owned() } else { "passed".to_owned() }
+        } else if open > 0 {
+            format!("{open} open")
+        } else {
+            "all answered".to_owned()
+        };
+        format!("{who}{rounds}: {result}")
     }
 }
 

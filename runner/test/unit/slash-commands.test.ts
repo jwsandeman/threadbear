@@ -131,7 +131,7 @@ test('a Claude command reaches the CLI as typed, with no phone line or project n
   s.result();
   h.runner.send(thread.id, 'and now?', [], { origin: 'phone' });
   await tick();
-  assert.match(s.sent.at(-1)!.text, /^\[Sent from the iPhone app/);
+  assert.match(s.sent.at(-1)!.text, /^\[Sent from the phone app/);
 });
 
 test('a command sent during a turn waits for it rather than going into it', async () => {

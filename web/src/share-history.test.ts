@@ -86,10 +86,20 @@ test('a paced stream of big rows keeps older within its byte cap', () => {
   const text = 'x'.repeat(8192);
   const big = (a: number, b: number) => ({ messages: range(a, b).map((seq) => ({ seq, text })), images: [], hasMore: true });
   type B = { seq: number; text: string };
+  // This thread's CPU (the process's counts the garbage collector's helper
+  // threads too), best of up to three goes, as runner/test/unit/web-links.test.ts
+  // does: one go took 106 to 135 ms beside other threads' work and refused a
+  // landing (forks, 11 Nov 2026), and the copying this guards against cost
+  // seconds every time.
+  const now = () => { const t = process.threadCpuUsage(); return (t.user + t.system) / 1000; };
   let h = empty<B, P>();
-  const start = process.cpuUsage();
-  for (let i = 0; i <= 250; i++) h = takeLive(h, big(1 + i * 40, 400 + i * 40));
-  const cpu = process.cpuUsage(start);
+  let ms = Infinity;
+  for (let go = 0; go < 3 && ms >= 100; go++) {
+    h = empty<B, P>();
+    const start = now();
+    for (let i = 0; i <= 250; i++) h = takeLive(h, big(1 + i * 40, 400 + i * 40));
+    ms = Math.min(ms, now() - start);
+  }
   const bytes = h.older.reduce((n, m) => n + rowBytes(m), 0);
   assert.ok(bytes <= OLDER_MAX_BYTES, `older holds ${bytes} bytes`);
   assert.ok(h.older.length < 1100, `older kept ${h.older.length} rows`);
@@ -97,7 +107,7 @@ test('a paced stream of big rows keeps older within its byte cap', () => {
   assert.equal(h.older[h.older.length - 1]!.seq, h.live!.messages[0]!.seq - 1);
   // What went can be loaded again.
   assert.equal(nextBefore(h), h.older[0]!.seq);
-  assert.ok((cpu.user + cpu.system) / 1000 < 300, `took ${(cpu.user + cpu.system) / 1000} ms of CPU`);
+  assert.ok(ms < 100, `took ${ms} ms of CPU`);
 });
 
 test('a long stream of small rows keeps older within its row cap', () => {

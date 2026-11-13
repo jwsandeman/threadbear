@@ -253,6 +253,7 @@ if [ "$MODE" = "uninstall" ]; then
   rm -f "$PLIST"
   [ "$LINUX" = 0 ] || "$SYSTEMCTL" --user daemon-reload 2>/dev/null || true
   echo "Removed $LABEL. The data in $DATA_HOME (releases included) is untouched."
+  [ "$SANDBOX" = 1 ] || bash "$RUNNER_DIR/scripts/link-tb.sh" --remove || true
   # The app stays too: the privacy grants macOS gave it belong to it, and a
   # reinstall picks it up as it is.
   [ "$LINUX" = 1 ] || [ ! -d "$RUNNER_APP" ] || echo "$RUNNER_APP stays; delete it yourself if you're done with Threadbear."
@@ -659,6 +660,13 @@ else
 fi
 trap - EXIT
 rm -f "$PREV" "$PREV_LAUNCH"
+# tb in ~/.local/bin, so the tb commands setup prints run (issue #39). Only
+# for the real data dir: a sandbox's tb would talk to the wrong runner.
+if [ "$SANDBOX" = 0 ]; then
+  TB_ARGS=("$DATA_HOME" "$NODE" "$RUNNER_DIR")
+  [ "$FROM_SOURCE" = 0 ] || TB_ARGS+=(--from-source)
+  bash "$RUNNER_DIR/scripts/link-tb.sh" "${TB_ARGS[@]}" || true
+fi
 [ "$LINUX" = 1 ] || rm -rf "$OLD_APP"
 if [ "$LINUX" = 1 ]; then
   echo "Restart it with: systemctl --user restart $UNIT"

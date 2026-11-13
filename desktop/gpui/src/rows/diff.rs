@@ -13,6 +13,7 @@ use gpui_kit::*;
 // The zoom-aware px (style.rs), in place of GPUI's.
 use crate::style::px;
 use threadbear_core::reducer::{ChangedFiles, DiffBuilder, DiffDisplayLine, DiffLineKind, DiffPreview, EditDiff, PathDisplay, Row};
+use crate::tips::Tip as _;
 
 /// `previewLines`: how many lines a diff opened short shows (a break between
 /// two diffs counts as a line, as `diffText` draws it).
@@ -168,7 +169,7 @@ pub(crate) fn diff_with_note(key: impl Into<SharedString>, diffs: &[EditDiff], m
                 .text_color(quiet)
                 .cursor_pointer()
                 .hover(|s| s.underline())
-                .tooltip(super::tip("Show the whole diff"))
+                .tip("Show the whole diff")
                 .aria_label(SharedString::from(format!("Show {lines}")))
                 .role(Role::Button)
                 .on_click(move |e, window, cx| on_click(e, window, cx))
@@ -233,7 +234,7 @@ impl ThreadPane {
                 .rounded(px(6.))
                 .mx(px(4.))
                 .hover(move |s| s.bg(hover))
-                .tooltip(super::tip(&file.path))
+                .tip(&file.path)
                 .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.toggle_changed_file(&toggle_key, cx)))
                 .child(div().flex_none().w(px(16.)).flex().items_center().child(icon(if file.is_expanded { "chevron.down" } else { "chevron.right" }, 11., faint_icon)))
                 .child(

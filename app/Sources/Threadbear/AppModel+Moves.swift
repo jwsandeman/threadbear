@@ -2,7 +2,7 @@ import Foundation
 import ThreadbearCore
 
 /// Moving a thread to another runner (docs/protocol.md, "Moving a thread to
-/// another runner"; the `moveToRunner` experiment). Every move is asked of
+/// another runner"). Every move is asked of
 /// this Mac's own runner, which holds the owner key, wherever the thread is.
 extension AppModel {
     /// What the Move sheet is for: which thread, to which runner.
@@ -16,8 +16,8 @@ extension AppModel {
         var id: String { threadId + ">" + runnerId }
     }
 
-    /// The menu shows: the experiment's on here and there's somewhere to go.
-    var canMoveThreads: Bool { experiments.contains("moveToRunner") && client != nil }
+    /// The menu shows once the runner's there (and has somewhere to go).
+    var canMoveThreads: Bool { client != nil }
 
     /// Where a thread could go: every runner but the one it's on, in Mike's
     /// order, offline ones included so the menu can grey them.

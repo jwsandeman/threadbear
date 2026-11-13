@@ -108,6 +108,28 @@ test('a --quick run that touches the Mac app goes past a Linux host to a Mac', (
   assert.deepEqual(r.copies, ['h1']);
 });
 
+test("a --quick run that only touches what the GPUI app uses in app/ can take a Linux host", () => {
+  // The Swift app is frozen, so check.sh doesn't build it for the mock
+  // runner, fixtures or art (scripts/swift-freeze.sh --gpui-shared).
+  const s = setup({ h1: { state: 'free', os: 'Linux' }, h2: { state: 'free' } });
+  fs.mkdirSync(path.join(s.repo, 'app/Tools/mock-runner'), { recursive: true });
+  fs.writeFileSync(path.join(s.repo, 'app/Tools/mock-runner/x.mjs'), '\n');
+  const r = s.run('h1,h2', 3600);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.deepEqual(r.copies, ['h1']);
+});
+
+test('a big change to the Mac app still goes to a Mac', () => {
+  // Codex's review, 12 Nov: grep -q closing the pipe early failed the grep -v
+  // before it under pipefail, so thousands of changed files looked like none.
+  const s = setup({ h1: { state: 'free', os: 'Linux' }, h2: { state: 'free' } });
+  fs.mkdirSync(path.join(s.repo, 'app/Sources'), { recursive: true });
+  for (let i = 0; i < 5000; i++) fs.writeFileSync(path.join(s.repo, `app/Sources/F${i}.swift`), '');
+  const r = s.run('h1,h2', 3600);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.deepEqual(r.copies, ['h2']);
+});
+
 test('a Linux host that could not run it anyway is not named as short of room', () => {
   // Nothing changed, so this one needs a Mac; the Linux host's disk isn't the reason.
   const s = setup({ h1: { state: 'free', os: 'Linux', df: linuxDf(GiB) }, h2: { state: 'free' } });
@@ -115,4 +137,65 @@ test('a Linux host that could not run it anyway is not named as short of room', 
   assert.equal(r.status, 0, r.stdout + r.stderr);
   assert.doesNotMatch(r.stderr, /h1/);
   assert.deepEqual(r.copies, ['h2']);
+});
+
+// 12 Nov: Tinker Desk had 1.8 GiB free, with 63 GB of it idle GPUI targets
+// (desktop/scripts/remote.sh's), and the check gave up on it.
+const TRIM = path.join(import.meta.dirname, '..', '..', '..', 'desktop', 'scripts', 'trim-remote-cache.sh');
+// A host whose GPUI folder (under `home`) holds `idle` idle targets and
+// `busy` ones in use, with 1 GiB free and `per` more for each target gone.
+function gpuiHost(s: ReturnType<typeof setup>, h: string, home: string, idle: number, busy = 0, per = 6) {
+  const trim = path.join(s.repo, 'desktop', 'scripts', 'trim-remote-cache.sh');
+  fs.mkdirSync(path.dirname(trim), { recursive: true });
+  fs.copyFileSync(TRIM, trim);
+  const gpui = path.join(home, '.cache', 'threadbear-check', 'gpui');
+  const old = new Date(Date.now() - 24 * 3_600_000);
+  for (let i = 0; i < idle + busy; i++) {
+    const t = path.join(gpui, `target-${i}${i}${i}`);
+    fs.mkdirSync(path.join(t, 'debug'), { recursive: true });
+    if (i < idle) fs.utimesSync(path.join(t, 'debug'), old, old);
+    fs.utimesSync(t, old, old);
+  }
+  const all = idle + busy;
+  fs.writeFileSync(path.join(s.fake, h, 'bin', 'df'), `#!/bin/bash
+[ "$*" = "-Pk ." ] || exit 9
+n=$(ls -d ${JSON.stringify(gpui)}/target-* 2>/dev/null | wc -l)
+echo "Filesystem 1024-blocks Used Available Capacity Mounted on"
+echo "/dev/disk3s5 1 1 $(( (2 + (${all} - n) * ${per * 2}) * ${GiB / 2} )) 1% /"
+`, { mode: 0o755 });
+  return { gpui, targets: () => fs.readdirSync(gpui).filter((n) => n.startsWith('target-')) };
+}
+
+test('a host short only of what idle GPUI build folders hold gets them back and runs the check', () => {
+  const s = setup({ h1: { state: 'free' } });
+  const g = gpuiHost(s, 'h1', path.join(s.fake, 'h1', 'home'), 3);
+  const r = s.run('h1', 3600);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(r.stderr, /h1 was short of disk; idle GPUI build folders there were given back/);
+  assert.deepEqual(r.copies, ['h1']);
+  assert.equal(g.targets().length, 1, 'only until there was room');
+});
+
+test('a host still short after giving back what it can is passed over, with what it has then', () => {
+  const s = setup({ h1: { state: 'free' }, h2: { state: 'free' } });
+  const g = gpuiHost(s, 'h1', path.join(s.fake, 'h1', 'home'), 1, 1, 0.5);
+  const r = s.run('h1,h2', 3600);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(r.stderr, /Passing over h1: it has 1\.5 GiB free/);
+  assert.deepEqual(r.copies, ['h2']);
+  assert.equal(g.targets().length, 1, 'the one in use stays');
+});
+
+test('a host too full for the probe gets its build folders back and is probed again', () => {
+  const s = setup({ h1: { state: 'free' } });
+  // The fake host's ~ is this run's home, as its commands run here.
+  const g = gpuiHost(s, 'h1', s.home, 3);
+  // The probe fails until the folder holding this file is given back.
+  fs.writeFileSync(path.join(g.gpui, 'target-000', 'full'), '');
+  fs.symlinkSync(path.join(g.gpui, 'target-000', 'full'), path.join(s.fake, 'h1', 'probe-fails'));
+  fs.utimesSync(path.join(g.gpui, 'target-000'), new Date(Date.now() - 48 * 3_600_000), new Date(Date.now() - 48 * 3_600_000));
+  fs.utimesSync(path.join(g.gpui, 'target-000', 'full'), new Date(Date.now() - 48 * 3_600_000), new Date(Date.now() - 48 * 3_600_000));
+  const r = s.run('h1', 3600);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.deepEqual(r.copies, ['h1']);
 });

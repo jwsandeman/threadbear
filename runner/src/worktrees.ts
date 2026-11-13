@@ -13,6 +13,7 @@ import type { WorktreePatch } from './patches.ts';
 import { inBackground } from './background.ts';
 import { mainCheckoutOf as linkedMainCheckout } from './patch-trust.ts';
 import { untrustedGitArgs } from './safe-git.ts';
+import { joinQueue, leaveQueue, queueDir, readEntry, setRunning, waiting, waitingLine, writeEntry, type QueueEntry } from './land-queue.ts';
 
 // What a thread's record keeps about its worktree.
 export type WorktreeRecord = {
@@ -41,6 +42,14 @@ export type WorktreeRecord = {
   // runner picking the cleanup up again doesn't run it twice. The thread's
   // next turn in the worktree clears it too, saying the teardown ran.
   tornDownAt?: string;
+  // Made for a thread another runner moved here (runner/moves.ts placeMove):
+  // its files are that runner's work. Whether that work is held from the
+  // always-trust is patch-trust-unvouched.json's to say; this lets the runner
+  // work the list out again if that file is lost (settleUnvouched).
+  movedIn?: true;
+  // The mark a runner of 10 Nov 2026 put here instead of that file, read
+  // only by settleUnvouched.
+  unvouched?: true;
 };
 
 export const MAIN = 'main';
@@ -62,8 +71,8 @@ export const gitLimits = { timeoutMs: 5 * 60_000 };
 // runs from inside a git hook) are dropped, so -C always wins, and the
 // repo's own config can't start an fsmonitor program (safe-git.ts). Killed
 // past gitLimits, which makes it a failure (`ok: false`).
-export function git(cwd: string, args: string[]): Promise<GitResult> {
-  const env: NodeJS.ProcessEnv = { ...process.env, GIT_TERMINAL_PROMPT: '0' };
+export function git(cwd: string, args: string[], extraEnv: NodeJS.ProcessEnv = {}): Promise<GitResult> {
+  const env: NodeJS.ProcessEnv = { ...process.env, GIT_TERMINAL_PROMPT: '0', ...extraEnv };
   for (const k of ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_COMMON_DIR', 'GIT_PREFIX']) delete env[k];
   return new Promise((resolve) => {
     execFile('git', untrustedGitArgs(cwd, args), { env, maxBuffer: 16 * 1024 * 1024, timeout: gitLimits.timeoutMs, killSignal: 'SIGKILL' }, (err, stdout, stderr) => {
@@ -76,8 +85,8 @@ export function git(cwd: string, args: string[]): Promise<GitResult> {
   });
 }
 
-async function gitOut(cwd: string, args: string[]): Promise<string | undefined> {
-  const r = await git(cwd, args);
+async function gitOut(cwd: string, args: string[], extraEnv?: NodeJS.ProcessEnv): Promise<string | undefined> {
+  const r = await git(cwd, args, extraEnv);
   return r.ok ? r.stdout.trim() : undefined;
 }
 
@@ -110,7 +119,10 @@ export type Checkout = { path: string; branch?: string; head?: string; locked?: 
 
 export async function listCheckouts(cwd: string): Promise<Checkout[] | undefined> {
   const out = await gitOut(cwd, ['worktree', 'list', '--porcelain']);
-  if (out === undefined) return undefined;
+  return out === undefined ? undefined : parseCheckouts(out);
+}
+
+export function parseCheckouts(out: string): Checkout[] {
   const list: Checkout[] = [];
   for (const block of out.split(/\n\s*\n/)) {
     const c: Checkout = { path: '' };
@@ -284,12 +296,15 @@ async function reuse(where: string, branch: string, base: string, keep: string[]
   return true;
 }
 
-// What the agent is told in its appended system prompt.
+// What the agent is told in its appended system prompt. The timeout: time
+// queued behind another landing counts against the agent's own limit for a
+// command (Claude Code's background default is 30 minutes), and on 11 Nov
+// one cut a land off partway through its check that way.
 export function worktreeInstructions(w: WorktreeRecord): string {
   return [
     `This thread has its own git worktree of ${w.repo} at ${w.path}, on the branch ${w.branch}, made from ${MAIN}.`,
     `Commit your work there, on that branch. Other threads work in worktrees of their own, and the main checkout at ${w.mainCheckout} isn't yours to edit.`,
-    `When the work is done and checked, run \`tb land\` in the worktree: it rebases the branch on ${MAIN}, runs the repo's check and fast-forwards ${MAIN} to it. It never pushes. After landing you can carry on, and the next \`tb land\` lands only what's new.`,
+    `When the work is done and checked, run \`tb land\` in the worktree: it rebases the branch on ${MAIN}, runs the repo's check and fast-forwards ${MAIN} to it. It never pushes. It may first wait for another thread's landing, so run it in the background with the longest timeout allowed. After landing you can carry on, and the next \`tb land\` lands only what's new.`,
   ].join(' ');
 }
 
@@ -311,6 +326,16 @@ export type LandOptions = {
   // The CLI reads the patch after rebasing, including changes to the
   // required check made by a landing it just waited for.
   readCheck?: () => Promise<string | undefined>;
+  // Why these files (what the landing changes, from the worktree's root)
+  // can't land now, or undefined: the CLI's is a GitHub workflow that's red
+  // on main (land-gate.ts). Asked after the rebase, before the check, so a
+  // held landing doesn't wait out a check first.
+  hold?: (root: string, files: string[]) => Promise<string | undefined>;
+  // Where readCheck looks from, relative to the worktree's root (a
+  // subfolder's patch can ask for its own check). Only landings that look
+  // from the same place are checked together, so the check read on the
+  // stack is the one each of them asks for.
+  checkFrom?: string;
 };
 
 // How many lines of a failed check's output are shown.
@@ -319,65 +344,277 @@ const CHECK_TAIL_LINES = 40;
 // `tb land`: refuses with uncommitted changes, rebases on main, runs the
 // check, fast-forwards main in its checkout and prints what landed.
 // Returns the exit code. Every refusal leaves main as it was.
+//
+// One landing at a time holds the repo's lock, through its check and the
+// fast-forward, so main only ever moves to a commit whose check passed. But
+// the ones waiting don't each wait for a check of their own (12 Nov: a dozen
+// in the line, 40 minutes and more each): a landing joins the queue
+// (land-queue.ts) before it waits, and whoever holds the lock checks all
+// that are waiting together with its own, stacked on main in the order they
+// came, and lands them all at once. A failed group check is narrowed down by
+// halves (docs/thread-worktrees.md, "Landing together").
 export async function land(t: LandTarget, opts: LandOptions = {}): Promise<number> {
-  const common = await gitOut(t.path, ['rev-parse', '--git-common-dir']);
-  if (!common) {
-    (opts.err ?? console.error)(`${t.path} isn't a git checkout, so there's nothing to land.`);
+  const out = opts.out ?? ((l: string) => process.stdout.write(l + '\n'));
+  const err = opts.err ?? ((l: string) => process.stderr.write(l + '\n'));
+  const commonRel = await gitOut(t.path, ['rev-parse', '--git-common-dir']);
+  if (!commonRel) {
+    err(`${t.path} isn't a git checkout, so there's nothing to land.`);
     return 1;
   }
-  // The remote check queue only serializes checks, after their snapshots
-  // have been copied. Serialize the entire landing before rebasing, across
-  // CLI processes, so waiting for that queue cannot stale another landing.
-  let release: () => Promise<void>;
+  const common = path.resolve(t.path, commonRel);
+  const gitDir = path.resolve(t.path, (await gitOut(t.path, ['rev-parse', '--git-dir'])) ?? commonRel);
+  const timesFile = path.join(common, 'threadbear-land-times.log');
   const asked = Date.now();
+
+  // One tb land at a time in a worktree: it rebases before taking the
+  // repo's lock now, and two at once would abort each other's rebase.
+  let mineOnly: () => Promise<void>;
   try {
-    release = await lockLanding(path.resolve(t.path, common, 'threadbear-land.lock'), opts.out ?? console.log);
+    const now = await holdLock(path.join(gitDir, 'threadbear-land-worktree.lock'), false);
+    if (now) mineOnly = now;
+    else {
+      out('Another tb land is running in this worktree; waiting for it to finish...');
+      mineOnly = (await holdLock(path.join(gitDir, 'threadbear-land-worktree.lock'), true))!;
+    }
   } catch (e) {
-    (opts.err ?? console.error)(`Couldn't lock the repo for landing: ${(e as Error).message}`);
+    err(`Couldn't lock the worktree for landing: ${(e as Error).message}`);
     return 1;
   }
+  let entry: QueueEntry | undefined;
+  let entryHeld: (() => Promise<void>) | undefined;
   try {
-    return await landLocked(t, opts, { file: path.resolve(t.path, common, 'threadbear-land-times.log'), waitedMs: Date.now() - asked });
+    await recoverDetached(t, gitDir, out);
+    await recoverLandedFor(t, common, out);
+
+    // Refusals, and conflicts with main as it is now, come straight away
+    // rather than after the wait. It's done again with the lock held, as
+    // main will have moved.
+    const ready = await prepare(t, out, err, opts.hold);
+    if (typeof ready === 'number') return ready;
+
+    // A dry run, and a branch with a merge on it (it's merged with main,
+    // never replayed onto others), are never put in someone else's check.
+    // The entry carries the check this branch asks for: only landings that
+    // ask for the same one are checked together. Its own lock says its tb
+    // is still there (a pid can be reused; a lock dies with its holder).
+    if (!opts.dryRun && !ready.hasMerge) {
+      try {
+        const check = opts.readCheck ? await opts.readCheck() : t.check;
+        entry = joinQueue(common, { branch: t.branch, path: t.path, base: ready.base, commit: ready.commit, check: check ?? null, checkFrom: opts.checkFrom ?? '' });
+        entryHeld = await holdLock(entryLockFile(common, entry.id), false);
+        if (!entryHeld) throw new Error('entry lock taken');
+      } catch {
+        if (entry) leaveQueue(common, entry.id);
+        entry = undefined; // it still lands, by itself
+      }
+    }
+    let release: () => Promise<void>;
+    try {
+      release = await lockLanding(path.join(common, 'threadbear-land.lock'), out, () => waitingLine(common, timesFile, entry));
+    } catch (e) {
+      err(`Couldn't lock the repo for landing: ${(e as Error).message}`);
+      return 1;
+    }
+    try {
+      const mine = entry && readEntry(common, entry.id);
+      if (mine?.result) return await landedByAnother(t, mine, out);
+      // An earlier tb of this branch, killed, may have landed while this one
+      // waited.
+      await recoverLandedFor(t, common, out);
+      return await landLocked(t, opts, { file: timesFile, waitedMs: Date.now() - asked }, common, gitDir, mine?.limit);
+    } finally {
+      await release();
+    }
+  } finally {
+    if (entry) leaveQueue(common, entry.id);
+    await entryHeld?.();
+    if (entry) fs.rmSync(entryLockFile(common, entry.id), { force: true });
+    await mineOnly();
+  }
+}
+
+// What landed for a commit whose tb had gone by then (original commit ->
+// landed tip), in the git common dir, so its next tb land moves its branch
+// there before anything else, even if this one couldn't (the worktree was
+// busy or had changes). Otherwise that tb land would rebase the original
+// again, and a commit made empty on purpose would land twice.
+const landedForDir = (common: string): string => path.join(common, 'threadbear-land-done');
+
+function writeLandedFor(common: string, commit: string, landed: string): void {
+  try {
+    fs.mkdirSync(landedForDir(common), { recursive: true });
+    fs.writeFileSync(path.join(landedForDir(common), commit), landed);
+    // Old ones go: a branch moved on long since won't match them.
+    const old = Date.now() - 7 * 24 * 3600_000;
+    for (const f of fs.readdirSync(landedForDir(common))) {
+      const file = path.join(landedForDir(common), f);
+      if (fs.statSync(file).mtimeMs < old) fs.rmSync(file, { force: true });
+    }
+  } catch {
+    // moveGoneBranch still tries.
+  }
+}
+
+async function recoverLandedFor(t: LandTarget, common: string, out: (line: string) => void): Promise<void> {
+  const head = await gitOut(t.path, ['rev-parse', 'HEAD']);
+  if (!head || !/^[0-9a-f]{40,64}$/.test(head)) return;
+  const file = path.join(landedForDir(common), head);
+  let landed: string;
+  try {
+    landed = fs.readFileSync(file, 'utf8').trim();
+  } catch {
+    return;
+  }
+  if ((await gitOut(t.path, ['rev-parse', '--abbrev-ref', 'HEAD'])) !== t.branch) return;
+  if (!(await git(t.path, ['merge-base', '--is-ancestor', landed, `refs/heads/${MAIN}`])).ok) return;
+  if ((await git(t.path, ['reset', '-q', '--keep', landed])).ok) {
+    out(`An earlier tb land of ${t.branch} landed while its tb was stopped; the branch is moved to what landed.`);
+    fs.rmSync(file, { force: true });
+  }
+}
+
+// A landed entry's branch, moved to what landed for an owner that's gone,
+// with that worktree's own tb land lock held, and only while it's clean and
+// still on what it asked to land.
+async function moveGoneBranch(e: QueueEntry, landed: string): Promise<void> {
+  const gitDir = await gitOut(e.path, ['rev-parse', '--absolute-git-dir']);
+  if (!gitDir) return;
+  let release: (() => Promise<void>) | undefined;
+  try {
+    release = await holdLock(path.join(gitDir, 'threadbear-land-worktree.lock'), false);
+  } catch {
+    return;
+  }
+  if (!release) return; // a new tb land there sees to it
+  try {
+    if ((await gitOut(e.path, ['rev-parse', 'HEAD'])) === e.commit &&
+        (await gitOut(e.path, ['rev-parse', '--abbrev-ref', 'HEAD'])) === e.branch &&
+        (await gitOut(e.path, ['status', '--porcelain', '--untracked-files=all'])) === '') {
+      await git(e.path, ['reset', '-q', '--keep', landed]);
+    }
   } finally {
     await release();
   }
 }
 
+const entryLockFile = (common: string, id: string): string => path.join(queueDir(common), `${id}.lock`);
+
+// Whether an entry's tb is still waiting for its answer: it holds its
+// entry's lock until it exits.
+async function ownerWaiting(common: string, e: QueueEntry): Promise<boolean> {
+  if (!fs.existsSync(entryLockFile(common, e.id))) return false;
+  const now = readEntry(common, e.id);
+  if (!now || now.result) return false;
+  try {
+    const free = await holdLock(entryLockFile(common, e.id), false);
+    if (!free) return true;
+    await free();
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+// A group check runs with HEAD detached at the stack (landLocked). This
+// marker, in the worktree's own git dir, says so while it runs; a tb killed
+// partway leaves it, and the next tb land in the worktree (none can be
+// running: it holds the worktree's lock) puts the branch back.
+const detachedMarker = (gitDir: string): string => path.join(gitDir, 'threadbear-land-checking.json');
+
+async function recoverDetached(t: LandTarget, gitDir: string, out: (line: string) => void): Promise<void> {
+  let m: { branch?: string; own?: string } | undefined;
+  try {
+    m = JSON.parse(fs.readFileSync(detachedMarker(gitDir), 'utf8'));
+  } catch {
+    return;
+  }
+  if (m?.branch === t.branch &&
+      (await gitOut(t.path, ['rev-parse', '--abbrev-ref', 'HEAD'])) === 'HEAD' &&
+      (await gitOut(t.path, ['rev-parse', t.branch])) === m.own &&
+      (await git(t.path, ['checkout', '-q', t.branch])).ok) {
+    out(`An earlier tb land was stopped during a check with others' work; ${t.branch} is checked out again as it was.`);
+    fs.rmSync(detachedMarker(gitDir), { force: true });
+    return;
+  }
+  // Only once it no longer applies: on the branch again, or the branch
+  // moved on by hand. Kept while it could still put things back.
+  const on = await gitOut(t.path, ['rev-parse', '--abbrev-ref', 'HEAD']);
+  if (on !== 'HEAD' || (await gitOut(t.path, ['rev-parse', t.branch])) !== m?.own) fs.rmSync(detachedMarker(gitDir), { force: true });
+}
+
+// Another landing's check took this one with it. Its branch is moved to
+// the commits as they landed (rebased on the ones ahead), unless it's
+// moved on since it asked: then the next tb land rebases what's new.
+async function landedByAnother(t: LandTarget, e: QueueEntry, out: (line: string) => void): Promise<number> {
+  const r = e.result!;
+  const head = await gitOut(t.path, ['rev-parse', 'HEAD']);
+  const on = await gitOut(t.path, ['rev-parse', '--abbrev-ref', 'HEAD']);
+  const clean = (await gitOut(t.path, ['status', '--porcelain', '--untracked-files=all'])) === '';
+  out(`Landed on ${MAIN} in ${t.mainCheckout}, in one check with ${r.together.join(', ')}:`);
+  out(r.commits);
+  if (head === e.commit && on === t.branch && clean && (await git(t.path, ['reset', '-q', '--keep', r.landed])).ok) return 0;
+  out(`${t.branch} has moved on since, so it's left as it is; the next tb land lands only what's new.`);
+  return 0;
+}
+
 // Advisory locks are released by the OS, including when tb crashes. The
 // holder exits when its parent's pipe closes; no PID files to go stale or
 // delete under another waiter. Keep the lock file itself between runs.
-async function lockLanding(file: string, out: (line: string) => void): Promise<() => Promise<void>> {
+// While it waits it says where it is in the line, and again every few
+// minutes.
+// An OS lock on `file`, held by a small child until released or this
+// process exits; undefined if `wait` is false and someone else has it.
+async function holdLock(file: string, wait: boolean): Promise<(() => Promise<void>) | undefined> {
   const holder = "process.stdin.resume(); process.stdin.on('end', () => process.exit(0)); process.stdout.write('locked');";
   const mac = process.platform === 'darwin';
-  const take = async (wait: boolean): Promise<(() => Promise<void>) | undefined> => {
-    // 75 is EX_TEMPFAIL for lockf, and explicitly chosen for flock. A
-    // nonblocking try distinguishes contention from a slow Node startup.
-    const args = mac ? ['-k', ...(wait ? [] : ['-t', '0'])] : ['-x', '-E', '75', ...(wait ? [] : ['-n'])];
-    const child = spawn(mac ? '/usr/bin/lockf' : 'flock', [...args, file, process.execPath, '-e', holder], {
-      stdio: ['pipe', 'pipe', 'pipe'],
+  // 75 is EX_TEMPFAIL for lockf, and explicitly chosen for flock. A
+  // nonblocking try distinguishes contention from a slow Node startup.
+  const args = mac ? ['-k', ...(wait ? [] : ['-t', '0'])] : ['-x', '-E', '75', ...(wait ? [] : ['-n'])];
+  const child = spawn(mac ? '/usr/bin/lockf' : 'flock', [...args, file, process.execPath, '-e', holder], {
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  const closed = new Promise<void>((resolve) => child.once('close', () => resolve()));
+  let errors = '';
+  child.stderr.on('data', (d) => { errors += d; });
+  const acquired = await new Promise<boolean>((resolve, reject) => {
+    child.once('error', reject);
+    child.once('close', (code) => {
+      if (!wait && code === 75) resolve(false);
+      else reject(new Error(errors.trim() || `landing lock exited (${code})`));
     });
-    const closed = new Promise<void>((resolve) => child.once('close', () => resolve()));
-    let errors = '';
-    child.stderr.on('data', (d) => { errors += d; });
-    const acquired = await new Promise<boolean>((resolve, reject) => {
-      child.once('error', reject);
-      child.once('close', (code) => {
-        if (!wait && code === 75) resolve(false);
-        else reject(new Error(errors.trim() || `landing lock exited (${code})`));
-      });
-      child.stdout.once('data', () => resolve(true));
-    });
-    if (!acquired) return undefined;
-    return async () => {
-      child.stdin.end();
-      await closed;
-    };
+    child.stdout.once('data', () => resolve(true));
+  });
+  if (!acquired) return undefined;
+  return async () => {
+    child.stdin.end();
+    await closed;
   };
+}
+
+async function lockLanding(file: string, out: (line: string) => void, where: () => string): Promise<() => Promise<void>> {
+  const take = (wait: boolean) => holdLock(file, wait);
   const release = await take(false);
   if (release) return release;
-  out('Waiting for another landing of this repo to finish...');
-  return (await take(true))!;
+  const say = (first: boolean) => {
+    let line: string;
+    try {
+      line = where();
+    } catch {
+      line = '...';
+    }
+    out(`${first ? 'Waiting for another landing of this repo to finish' : 'Still waiting to land'}${line}`);
+  };
+  say(true);
+  const timer = setInterval(() => say(false), landLimits.progressMs);
+  try {
+    return (await take(true))!;
+  } finally {
+    clearInterval(timer);
+  }
 }
+
+// How often a waiting landing says where it is. Tests shorten it.
+export const landLimits = { progressMs: 3 * 60_000 };
 
 // A passing check prints nothing of its own, so on 9 Nov finding out where
 // landings spent their time meant scraping transcripts and running timed
@@ -437,9 +674,15 @@ function logCheckTimes(file: string, entry: Record<string, unknown>): void {
   }
 }
 
-async function landLocked(t: LandTarget, opts: LandOptions, times: { file: string; waitedMs: number }): Promise<number> {
-  const out = opts.out ?? ((l: string) => process.stdout.write(l + '\n'));
-  const err = opts.err ?? ((l: string) => process.stderr.write(l + '\n'));
+// Steps 1 and 2: the worktree's on its branch and clean, the branch is on
+// main (rebased, or main merged in), there's something to land and its
+// Important: lines will be read. A number is the exit code to stop with.
+async function prepare(
+  t: LandTarget,
+  out: (line: string) => void,
+  err: (line: string) => void,
+  hold?: LandOptions['hold'],
+): Promise<number | { hasMerge: boolean; base: string; commit: string; commits: string }> {
   const fail = (...lines: string[]): number => {
     err(lines.join('\n'));
     return 1;
@@ -448,10 +691,8 @@ async function landLocked(t: LandTarget, opts: LandOptions, times: { file: strin
   const head = await gitOut(t.path, ['rev-parse', '--abbrev-ref', 'HEAD']);
   if (head === undefined) return fail(`${t.path} isn't a git checkout, so there's nothing to land.`);
   if (head !== t.branch) return fail(`The worktree at ${t.path} is on ${head}, not ${t.branch}. Check out ${t.branch} there, then run tb land again.`);
-  const mainHead = await gitOut(t.mainCheckout, ['rev-parse', '--abbrev-ref', 'HEAD']);
-  if (mainHead !== MAIN) {
-    return fail(`The main checkout at ${t.mainCheckout} is on ${mainHead ?? 'nothing git can read'}, not ${MAIN}, so tb land can't move ${MAIN} there.`);
-  }
+  const notReady = await mainNotReady(t.mainCheckout);
+  if (notReady) return fail(notReady);
 
   // 1. Nothing uncommitted: it wouldn't land, and a rebase could trip on it.
   const status = await gitOut(t.path, ['status', '--porcelain', '--untracked-files=all']);
@@ -471,10 +712,12 @@ async function landLocked(t: LandTarget, opts: LandOptions, times: { file: strin
   // merges main in instead, when main has moved.
   // Unreadable (git timed out) is a failure, never "no merges": that would
   // rebase a merge flat (Codex's third look, 9 Nov).
-  const merges = await gitOut(t.path, ['rev-list', '--merges', `${MAIN}..${t.branch}`]);
+  const base = await gitOut(t.path, ['rev-parse', MAIN]);
+  if (!base) return fail(`Couldn't read ${MAIN} in ${t.path}, so nothing landed. Run tb land again.`);
+  const merges = await gitOut(t.path, ['rev-list', '--merges', `${base}..${t.branch}`]);
   if (merges === undefined) return fail(`Couldn't read ${t.branch}'s history in ${t.path}, so nothing landed. Run tb land again.`);
   const hasMerge = Boolean(merges);
-  const behind = !(await git(t.path, ['merge-base', '--is-ancestor', MAIN, t.branch])).ok;
+  const behind = !(await git(t.path, ['merge-base', '--is-ancestor', base, t.branch])).ok;
   if (hasMerge && behind) {
     const merged = await git(t.path, ['merge', '--no-edit', MAIN]);
     if (!merged.ok) {
@@ -490,7 +733,7 @@ async function landLocked(t: LandTarget, opts: LandOptions, times: { file: strin
       return fail(`git merge ${MAIN} failed in ${t.path}, so nothing landed: ${firstLine(merged.stderr || merged.stdout)}`);
     }
   } else if (!hasMerge) {
-    const rebase = await git(t.path, ['rebase', MAIN]);
+    const rebase = await git(t.path, ['rebase', base]);
     if (!rebase.ok) {
       const conflicted = (await gitOut(t.path, ['diff', '--name-only', '--diff-filter=U'])) ?? '';
       await git(t.path, ['rebase', '--abort']);
@@ -506,7 +749,7 @@ async function landLocked(t: LandTarget, opts: LandOptions, times: { file: strin
   }
 
   // Unreadable is a failure, not "nothing to land".
-  const commits = await gitOut(t.path, ['log', '--oneline', '--first-parent', `${MAIN}..${t.branch}`]);
+  const commits = await gitOut(t.path, ['log', '--oneline', '--first-parent', `${base}..${t.branch}`]);
   if (commits === undefined) return fail(`Couldn't read what ${t.branch} has to land in ${t.path}, so nothing landed. Run tb land again.`);
   if (!commits) {
     out(`Nothing to land: ${t.branch} has no commits that aren't on ${MAIN}.`);
@@ -519,7 +762,7 @@ async function landLocked(t: LandTarget, opts: LandOptions, times: { file: strin
   // Co-Authored-By block flags nothing and forks never hear (9 Nov: seven
   // security fixes went out that way). Merged-in commits (a fork bringing
   // in Mike's release) aren't this branch's own, so first-parent only.
-  const unread = await unreadImportant(t.path, `${MAIN}..${t.branch}`);
+  const unread = await unreadImportant(t.path, `${base}..${t.branch}`);
   if (unread === undefined) return fail(`Couldn't read ${t.branch}'s commit messages in ${t.path}, so nothing landed. Run tb land again.`);
   if (unread.length) {
     return fail(
@@ -528,79 +771,361 @@ async function landLocked(t: LandTarget, opts: LandOptions, times: { file: strin
       'Put the Important: line in the same last paragraph as Co-Authored-By (no blank line between them), or at the end of the message if there is none. Use git commit --amend or git rebase to reword, then run tb land again.',
     );
   }
-
-  // 3. The repo's check, in the worktree. Pin what passed, rather than
-  // merging a branch name that another process could move during checks.
-  const checked = await gitOut(t.path, ['rev-parse', 'HEAD']);
-  if (!checked) return fail(`Couldn't read HEAD in ${t.path}.`);
-  let check: string | undefined;
-  try {
-    check = opts.readCheck ? await opts.readCheck() : t.check;
-  } catch (e) {
-    return fail(`Couldn't read the repo's patches for its check: ${(e as Error).message}`);
+  // 2c. Held while something it would set off on GitHub is red on main.
+  if (hold) {
+    const held = await holdFor(t.path, base, t.branch, hold);
+    if (held) return fail(held);
   }
-  if (check) {
-    out(`Running the check: ${check}`);
-    const r = await runCheck(check, t.path, opts.shell);
-    logCheckTimes(times.file, {
-      at: new Date().toISOString(),
-      branch: t.branch,
-      commit: checked,
-      ok: r.ok,
-      ...(r.ok ? {} : { exit: r.code }),
-      seconds: Math.round(r.durationMs / 1000),
-      waitedSeconds: Math.round(times.waitedMs / 1000),
-      ...(opts.dryRun ? { dryRun: true } : {}),
-      ...parseCheckTimes(r.text),
+
+  const commit = await gitOut(t.path, ['rev-parse', 'HEAD']);
+  if (!commit) return fail(`Couldn't read HEAD in ${t.path}.`);
+  return { hasMerge, base, commit, commits };
+}
+
+// Why what `from...to` changes can't land now (opts.hold), or undefined.
+// NUL-separated: git quotes a name with other letters in it otherwise
+// ("desktop/caf\303\251.rs"), which no path filter matches.
+async function holdFor(cwd: string, from: string, to: string, hold: NonNullable<LandOptions['hold']>): Promise<string | undefined> {
+  const changed = await git(cwd, ['diff', '--name-only', '-z', `${from}...${to}`]);
+  if (!changed.ok) return `Couldn't read what ${to} changes in ${cwd}, so nothing landed. Run tb land again.`;
+  return hold(cwd, changed.stdout.split('\0').filter(Boolean));
+}
+
+// `from..to`'s commits (first parent, no merges) made again on `onto`, as a
+// rebase would, without touching any working tree: a three-way merge of
+// each one's change (git merge-tree), then a commit with its author and
+// message. A change that's already there is dropped, as rebase drops it.
+// Undefined on a conflict or if git can't say.
+async function replay(cwd: string, from: string, to: string, onto: string): Promise<string | undefined> {
+  // As rebase picks them: `from` is on `onto`, so `onto...to`'s right side
+  // is from..to, less any whose change is already on `onto` (a cherry-pick
+  // of it, say), as rebase leaves those out.
+  if (!(await git(cwd, ['merge-base', '--is-ancestor', from, onto])).ok) return undefined;
+  // A commit made empty is never one of those, as rebase keeps it.
+  const marked = await gitOut(cwd, ['rev-list', '--reverse', '--right-only', '--cherry-mark', '--no-merges', `${onto}...${to}`]);
+  if (marked === undefined) return undefined;
+  const list: string[] = [];
+  for (const line of marked.split('\n').filter(Boolean)) {
+    const c = line.slice(1);
+    if (line[0] === '=' && (await gitOut(cwd, ['rev-parse', `${c}^{tree}`])) !== (await gitOut(cwd, ['rev-parse', `${c}^^{tree}`]))) continue;
+    list.push(c);
+  }
+  let tip = onto;
+  for (const c of list) {
+    const merged = await git(cwd, ['merge-tree', '--write-tree', `--merge-base=${c}^`, tip, c]);
+    if (!merged.ok) return undefined;
+    const tree = merged.stdout.split('\n')[0].trim();
+    // A commit made empty is kept, as rebase keeps it; one that only
+    // becomes empty here is dropped, as rebase drops it.
+    const wasEmpty = (await gitOut(cwd, ['rev-parse', `${c}^{tree}`])) === (await gitOut(cwd, ['rev-parse', `${c}^^{tree}`]));
+    if (!wasEmpty && tree === (await gitOut(cwd, ['rev-parse', `${tip}^{tree}`]))) continue;
+    const meta = await gitOut(cwd, ['log', '-1', '--format=%an%x00%ae%x00%ad', '--date=raw', c]);
+    const message = await git(cwd, ['log', '-1', '--format=%B', c]);
+    if (!meta || !message.ok) return undefined;
+    const [name, email, date] = meta.split('\0');
+    const made = await gitOut(cwd, ['commit-tree', tree, '-p', tip, '-m', message.stdout.replace(/\n+$/, '')], {
+      GIT_AUTHOR_NAME: name,
+      GIT_AUTHOR_EMAIL: email,
+      GIT_AUTHOR_DATE: date,
     });
-    if (!r.ok) {
-      const tail = r.text.trimEnd().split('\n').slice(-CHECK_TAIL_LINES);
+    if (!made) return undefined;
+    tip = made;
+  }
+  return tip;
+}
+
+// The others waiting, stacked on `main` first come first, as far as
+// `limit` allows (counting this one). One that has moved on since it asked,
+// or doesn't go on cleanly, is left waiting: its own tb land sees to it.
+async function stackWaiting(
+  t: LandTarget,
+  common: string,
+  main: string,
+  limit: number,
+  check: string | null,
+  checkFrom: string,
+): Promise<{ tip: string; group: { entry: QueueEntry; tip: string; commits: string }[] }> {
+  let tip = main;
+  let cap = limit;
+  const group: { entry: QueueEntry; tip: string; commits: string }[] = [];
+  for (const e of waiting(common)) {
+    if (e.pid === process.pid && e.path === t.path) continue; // this one
+    const c = Math.min(cap, e.limit ?? Infinity);
+    if (group.length + 2 > c) continue;
+    if (e.path === t.path || e.branch === t.branch) continue;
+    if ((e.check ?? null) !== check || (e.checkFrom ?? '') !== checkFrom) continue;
+    if (!(await ownerWaiting(common, e))) continue;
+    if ((await gitOut(e.path, ['rev-parse', 'HEAD'])) !== e.commit) continue;
+    if (!(await git(t.path, ['merge-base', '--is-ancestor', e.base, main])).ok) continue;
+    if ((await gitOut(t.path, ['rev-list', '--merges', `${e.base}..${e.commit}`])) !== '') continue;
+    const next = await replay(t.path, e.base, e.commit, tip);
+    if (!next || next === tip) continue;
+    const commits = await gitOut(t.path, ['log', '--oneline', '--first-parent', `${tip}..${next}`]);
+    if (commits === undefined) continue;
+    group.push({ entry: e, tip: next, commits });
+    tip = next;
+    cap = c;
+  }
+  return { tip, group };
+}
+
+async function landLocked(
+  t: LandTarget,
+  opts: LandOptions,
+  times: { file: string; waitedMs: number },
+  common: string,
+  gitDir: string,
+  startLimit: number | undefined,
+): Promise<number> {
+  const out = opts.out ?? ((l: string) => process.stdout.write(l + '\n'));
+  const err = opts.err ?? ((l: string) => process.stderr.write(l + '\n'));
+  const fail = (...lines: string[]): number => {
+    err(lines.join('\n'));
+    return 1;
+  };
+
+  // Steps 1 and 2 again: main has likely moved while this waited.
+  const ready = await prepare(t, out, err, opts.hold);
+  if (typeof ready === 'number') return ready;
+  const own = ready.commit;
+  const main = ready.base;
+  let limit = startLimit ?? Infinity;
+
+  for (;;) {
+    // 3. The others waiting go on main first, then this branch on top. The
+    // check runs here, on that stack, with HEAD detached at it: the branch
+    // itself only moves once it has all landed, so a tb killed partway never
+    // leaves other threads' unlanded work on it.
+    let checked = own;
+    let group: { entry: QueueEntry; tip: string; commits: string }[] = [];
+    let check: string | undefined;
+    try {
+      check = opts.readCheck ? await opts.readCheck() : t.check;
+    } catch (e) {
+      return fail(`Couldn't read the repo's patches for its check: ${(e as Error).message}`);
+    }
+    if (!opts.dryRun && !ready.hasMerge && limit > 1) {
+      const stacked = await stackWaiting(t, common, main, limit, check ?? null, opts.checkFrom ?? '');
+      if (stacked.group.length) {
+        const top = await replay(t.path, main, own, stacked.tip);
+        // Held on GitHub for what the others change: they go by themselves
+        // later, and each hears why.
+        if (top && top !== stacked.tip && !(opts.hold && (await holdFor(t.path, main, top, opts.hold)))) {
+          try {
+            fs.writeFileSync(detachedMarker(gitDir), JSON.stringify({ branch: t.branch, own }));
+          } catch {
+            // Only recovery after a crash reads it.
+          }
+          if ((await git(t.path, ['checkout', '-q', '--detach', top])).ok) {
+            checked = top;
+            group = stacked.group;
+          } else {
+            fs.rmSync(detachedMarker(gitDir), { force: true });
+          }
+        }
+      }
+    }
+    const together = group.map((g) => g.entry.branch);
+    // Back on the branch, as it was, after a group check that didn't land.
+    const back = async (): Promise<boolean> => {
+      if (!group.length) return true;
+      const ok = (await git(t.path, ['checkout', '-q', t.branch])).ok;
+      if (ok) fs.rmSync(detachedMarker(gitDir), { force: true });
+      return ok;
+    };
+    const stuck = `${t.path} is left with HEAD detached at the checked group; run git checkout ${t.branch} there.`;
+
+    try {
+      // The stack has the others' patches too, so read it again there.
+      if (group.length) check = opts.readCheck ? await opts.readCheck() : t.check;
+    } catch (e) {
+      await back();
+      return fail(`Couldn't read the repo's patches for its check: ${(e as Error).message}`);
+    }
+    if (check) {
+      out(group.length
+        ? `Running the check, together with ${together.join(', ')}: ${check}`
+        : `Running the check: ${check}`);
+      setRunning(common, { startedAt: Date.now(), branches: [t.branch, ...together] });
+      const r = await runCheck(check, t.path, opts.shell);
+      setRunning(common, undefined);
+      logCheckTimes(times.file, {
+        at: new Date().toISOString(),
+        branch: t.branch,
+        ...(group.length ? { together } : {}),
+        commit: checked,
+        ok: r.ok,
+        ...(r.ok ? {} : { exit: r.code }),
+        seconds: Math.round(r.durationMs / 1000),
+        waitedSeconds: Math.round(times.waitedMs / 1000),
+        ...(opts.dryRun ? { dryRun: true } : {}),
+        ...parseCheckTimes(r.text),
+      });
+      if (!r.ok && group.length) {
+        // One of them (or two together) broke it. Halve the group and go
+        // again, this one with the first half; the rest wait their turn.
+        // Nothing's told it failed until it fails in a check of its own.
+        if (!(await back())) return fail(`The check failed with ${group.length + 1} landings together, so nothing landed. ${stuck}`);
+        limit = Math.ceil((group.length + 1) / 2);
+        for (const g of group) {
+          const now = readEntry(common, g.entry.id);
+          if (now && !now.result) writeEntry(common, { ...now, limit: Math.min(now.limit ?? Infinity, limit) });
+        }
+        out(`The check failed with ${group.length + 1} landings together, so ${MAIN} wasn't touched. Checking them in smaller groups to find which.`);
+        continue;
+      }
+      if (!r.ok) {
+        const tail = r.text.trimEnd().split('\n').slice(-CHECK_TAIL_LINES);
+        return fail(
+          `The check failed${r.code !== undefined ? ` (exit ${r.code})` : ''}, so ${MAIN} wasn't touched. The last lines of its output:`,
+          '',
+          ...tail,
+          '',
+          'Fix it, commit, and run tb land again.',
+        );
+      }
+      out(`The check passed (${Math.round(r.durationMs / 1000)} s).`);
+    }
+
+    if ((await gitOut(t.path, ['rev-parse', 'HEAD'])) !== checked ||
+        (await gitOut(t.path, ['rev-parse', t.branch])) !== own ||
+        (await gitOut(t.path, ['rev-parse', '--abbrev-ref', 'HEAD'])) !== (group.length ? 'HEAD' : t.branch) ||
+        (await gitOut(t.path, ['status', '--porcelain', '--untracked-files=all'])) !== '') {
+      if (group.length && (await gitOut(t.path, ['rev-parse', t.branch])) === own &&
+          (await gitOut(t.path, ['status', '--porcelain', '--untracked-files=all'])) === '') await back();
+      return fail(`The branch or files in ${t.path} changed while the check ran, so nothing landed.${group.length ? ` (The check was of ${t.branch} with ${together.join(', ')}; HEAD was detached at it, so check out ${t.branch} if it still is.)` : ''} Commit the changes and run tb land again.`);
+    }
+
+    // One whose tb went during the check (killed: on 12 Nov session
+    // restarts killed waiting tb lands again and again, and checking again
+    // without each one meant two passing group checks in a row landed
+    // nothing) still lands, as long as its branch is still what it asked to
+    // land: that's what it asked for. Its next tb land then has nothing to
+    // land. One whose branch has moved on is checked again without.
+    if (group.length) {
+      const movedOn = [];
+      for (const g of group) {
+        if (await ownerWaiting(common, g.entry)) continue;
+        if ((await gitOut(g.entry.path, ['rev-parse', 'HEAD'])) !== g.entry.commit) movedOn.push(g.entry.branch);
+      }
+      if (movedOn.length) {
+        if (!(await back())) return fail(`${movedOn.join(', ')} stopped waiting and moved on during the check, so nothing landed. ${stuck}`);
+        out(`${movedOn.join(', ')} stopped waiting and moved on during the check, so it's checked again without ${movedOn.length > 1 ? 'them' : 'it'}.`);
+        continue;
+      }
+    }
+
+    // Asked again now the check is done: a run that was going when it
+    // started may have failed since. Others in the group wait their turn.
+    if (opts.hold && !opts.dryRun) {
+      const held = await holdFor(t.path, main, checked, opts.hold);
+      if (held) {
+        if (!(await back())) err(stuck);
+        return fail(held);
+      }
+    }
+
+    if (opts.dryRun) {
+      out(`Would land on ${MAIN} in ${t.mainCheckout}:`);
+      out(ready.commits);
+      return 0;
+    }
+
+    // 4. Fast-forward main where it's checked out. Asked again first: the
+    // check took minutes, and on 12 Nov a rebase someone started in the
+    // main checkout meanwhile had HEAD detached, so the merge moved that
+    // instead of main, and the rebase's end set main without it.
+    const unready = await mainNotReady(t.mainCheckout);
+    if (unready) {
+      if (!(await back())) err(stuck);
+      return fail(unready);
+    }
+    const before = await gitOut(t.mainCheckout, ['rev-parse', `refs/heads/${MAIN}`]);
+    const merge = await git(t.mainCheckout, ['merge', '--ff-only', checked]);
+    if (!merge.ok) {
+      if (!(await back())) err(stuck);
+      const text = merge.stderr + merge.stdout;
+      const files = overwrittenFiles(text);
+      if (files.length) {
+        return fail(
+          `The main checkout at ${t.mainCheckout} has uncommitted changes in files this would change, so nothing landed:`,
+          ...files.map((f) => `  ${f}`),
+          `Commit or move those changes there (someone else may be working on them), then run tb land again.`,
+        );
+      }
+      if (/fast-forward/i.test(text)) return fail(`${MAIN} moved while this ran, so nothing landed. Run tb land again.`);
+      return fail(`git merge --ff-only ${t.branch} failed in ${t.mainCheckout}, so nothing landed: ${firstLine(text)}`);
+    }
+    // And it's main that moved, as its reflog says, not some other HEAD.
+    const after = await gitOut(t.mainCheckout, ['rev-parse', `refs/heads/${MAIN}`]);
+    const logged = await gitOut(t.mainCheckout, ['reflog', '-1', '--format=%H', `refs/heads/${MAIN}`]);
+    const onMain = await gitOut(t.mainCheckout, ['symbolic-ref', '-q', 'HEAD']);
+    if (after !== checked || logged !== checked || onMain !== `refs/heads/${MAIN}`) {
+      if (!(await back())) err(stuck);
       return fail(
-        `The check failed${r.code !== undefined ? ` (exit ${r.code})` : ''}, so ${MAIN} wasn't touched. The last lines of its output:`,
-        '',
-        ...tail,
-        '',
-        'Fix it, commit, and run tb land again.',
+        `git merge --ff-only in ${t.mainCheckout} finished, but ${MAIN} is at ${after?.slice(0, 9) ?? 'nothing git can read'} (was ${before?.slice(0, 9) ?? '?'}), not the checked ${checked.slice(0, 9)}, and HEAD there is ${onMain || 'detached'}. Nothing landed.`,
+        `Something else is working in the main checkout. Look at git status and git reflog there, then run tb land again.`,
       );
     }
-    out(`The check passed (${Math.round(r.durationMs / 1000)} s).`);
-  }
 
-  if ((await gitOut(t.path, ['rev-parse', 'HEAD'])) !== checked ||
-      (await gitOut(t.path, ['rev-parse', t.branch])) !== checked ||
-      (await gitOut(t.path, ['rev-parse', '--abbrev-ref', 'HEAD'])) !== t.branch ||
-      (await gitOut(t.path, ['status', '--porcelain', '--untracked-files=all'])) !== '') {
-    return fail(`The branch or files in ${t.path} changed while the check ran, so nothing landed. Commit the changes and run tb land again.`);
-  }
-
-  if (opts.dryRun) {
-    out(`Would land on ${MAIN} in ${t.mainCheckout}:`);
-    out(commits);
+    // 5. What landed. The others hear from their entries; this branch moves
+    // to its commits as they landed.
+    let mine = ready.commits;
+    if (group.length) {
+      for (const g of group) {
+        const now = readEntry(common, g.entry.id);
+        if (now) writeEntry(common, { ...now, result: { landed: g.tip, commits: g.commits, together: [t.branch, ...together.filter((b) => b !== g.entry.branch)] } });
+        // One whose tb has gone never hears: move its branch here, as it
+        // would have, or its next tb land would land a commit made empty
+        // on purpose a second time (rebase keeps those).
+        if (!(await ownerWaiting(common, g.entry))) {
+          writeLandedFor(common, g.entry.commit, g.tip);
+          await moveGoneBranch(g.entry, g.tip);
+        }
+      }
+      const moved = (await git(t.path, ['update-ref', `refs/heads/${t.branch}`, checked, own])).ok &&
+        (await git(t.path, ['checkout', '-q', t.branch])).ok;
+      if (moved) fs.rmSync(detachedMarker(gitDir), { force: true });
+      else err(`It landed, but ${t.branch} couldn't be moved to it in ${t.path}: HEAD is detached at what landed. Run git checkout ${t.branch} there and git reset --keep ${MAIN}.`);
+      mine = (await gitOut(t.path, ['log', '--oneline', '--first-parent', `${group.at(-1)!.tip}..${checked}`])) ?? mine;
+    }
+    out(`Landed on ${MAIN} in ${t.mainCheckout}:`);
+    out(mine);
+    if (group.length) out(`In the same check, and landed with it: ${together.join(', ')}.`);
     return 0;
   }
+}
 
-  // 4. Fast-forward main where it's checked out.
-  const before = await gitOut(t.mainCheckout, ['rev-parse', MAIN]);
-  const merge = await git(t.mainCheckout, ['merge', '--ff-only', checked]);
-  if (!merge.ok) {
-    const text = merge.stderr + merge.stdout;
-    const files = overwrittenFiles(text);
-    if (files.length) {
-      return fail(
-        `The main checkout at ${t.mainCheckout} has uncommitted changes in files this would change, so nothing landed:`,
-        ...files.map((f) => `  ${f}`),
-        `Commit or move those changes there (someone else may be working on them), then run tb land again.`,
-      );
-    }
-    if (/fast-forward/i.test(text)) return fail(`${MAIN} moved while this ran, so nothing landed. Run tb land again.`);
-    return fail(`git merge --ff-only ${t.branch} failed in ${t.mainCheckout}, so nothing landed: ${firstLine(text)}`);
+// Why tb land can't move main in the main checkout now, or undefined: HEAD
+// has to be main itself (not detached) with nothing half done there, as a
+// rebase, merge or cherry-pick in progress would move a detached HEAD and
+// then set main without what landed (12 Nov: a sync with GitHub, by hand,
+// lost a landing that way).
+export async function mainNotReady(mainCheckout: string): Promise<string | undefined> {
+  const head = await gitOut(mainCheckout, ['symbolic-ref', '-q', 'HEAD']);
+  const gitDirRel = await gitOut(mainCheckout, ['rev-parse', '--git-dir']);
+  if (!gitDirRel) return `Git couldn't read the main checkout at ${mainCheckout}, so tb land can't move ${MAIN} there.`;
+  const gitDir = path.resolve(mainCheckout, gitDirRel);
+  const busy: [string, string][] = [
+    ['rebase-merge', 'a rebase'],
+    ['rebase-apply', 'a rebase'],
+    ['MERGE_HEAD', 'a merge'],
+    ['CHERRY_PICK_HEAD', 'a cherry-pick'],
+    ['REVERT_HEAD', 'a revert'],
+    ['BISECT_LOG', 'a bisect'],
+    // A cherry-pick or revert of several, stopped: it's still going after
+    // a hand commit takes CHERRY_PICK_HEAD away.
+    ['sequencer', 'a cherry-pick or revert'],
+  ];
+  const found = busy.find(([f]) => fs.existsSync(path.join(gitDir, f)));
+  if (found) {
+    return `The main checkout at ${mainCheckout} is in the middle of ${found[1]} (${path.join(gitDir, found[0])}), so tb land can't move ${MAIN} there and nothing landed. Someone may be syncing it with GitHub: let them finish or abort it (git status there says which), then run tb land again.`;
   }
-
-  // 5. What landed.
-  const landed = (await gitOut(t.mainCheckout, ['log', '--oneline', '--first-parent', `${before}..${MAIN}`])) ?? commits;
-  out(`Landed on ${MAIN} in ${t.mainCheckout}:`);
-  out(landed);
-  return 0;
+  if (head !== `refs/heads/${MAIN}`) {
+    const what = head ? head.replace(/^refs\/heads\//, '') : 'a detached HEAD';
+    return `The main checkout at ${mainCheckout} is on ${what}, not ${MAIN}, so tb land can't move ${MAIN} there.`;
+  }
+  return undefined;
 }
 
 // The files git names when a merge would overwrite local changes (or
@@ -644,16 +1169,42 @@ function runCheck(command: string, cwd: string, shell = ['/bin/sh', '-c']): Prom
 // (thread/<its id8>) is refused, as that's another thread's work. On 8 Nov
 // a borrowed worktree turned out to be shared with a thread brought back,
 // and the borrower committed on that thread's branch without noticing.
+// The top of the git checkout `cwd` is in, or undefined outside one.
+export function checkoutTop(cwd: string): Promise<string | undefined> {
+  return gitOut(cwd, ['rev-parse', '--show-toplevel']);
+}
+
+// A worktree Claude Code made for a sub-agent (Agent's worktree isolation,
+// `claude --worktree`): `<repo>/.claude/worktrees/<name>` on
+// `worktree-<name>`. The thread/ rule is there so a stray tb land doesn't
+// put main, or a branch someone keeps by hand, onto main; these are made
+// for one helper's work and thrown away, like a thread's own.
+function isClaudeWorktree(top: string, branch: string): boolean {
+  return branch === `worktree-${path.basename(top)}` && path.basename(path.dirname(top)) === 'worktrees' && path.basename(path.dirname(path.dirname(top))) === '.claude';
+}
+
 export async function landTargetFromGit(cwd: string, threadId?: string): Promise<{ target?: Omit<LandTarget, 'check'>; reason?: string }> {
-  const top = await gitOut(cwd, ['rev-parse', '--show-toplevel']);
+  const top = await checkoutTop(cwd);
   if (!top) return { reason: `${cwd} isn't in a git checkout. Run tb land in a thread's worktree.` };
-  const branch = await gitOut(top, ['rev-parse', '--abbrev-ref', 'HEAD']);
+  let branch = await gitOut(top, ['rev-parse', '--abbrev-ref', 'HEAD']);
+  // Detached by a tb land killed during a group check: its marker names the
+  // branch, and land() puts it back.
+  if (branch === 'HEAD') {
+    const gitDir = await gitOut(top, ['rev-parse', '--absolute-git-dir']);
+    try {
+      const m = gitDir ? JSON.parse(fs.readFileSync(detachedMarker(gitDir), 'utf8')) as { branch?: unknown } : undefined;
+      if (typeof m?.branch === 'string' && m.branch.startsWith('thread/') &&
+          (await git(top, ['rev-parse', '--verify', '--quiet', `refs/heads/${m.branch}`])).ok) branch = m.branch;
+    } catch {
+      // No marker: detached some other way.
+    }
+  }
   if (branch === 'HEAD') {
     // A worktree borrowed before borrow-worktree.sh made a branch, or one
     // detached by hand.
     return { reason: `${top} is detached, not on a thread/ branch. tb land runs in a thread's own worktree; to land from this one, git checkout -b thread/<name> in it first.` };
   }
-  if (!branch?.startsWith('thread/')) {
+  if (!branch?.startsWith('thread/') && !(branch && isClaudeWorktree(top, branch))) {
     return { reason: `${top} is on ${branch ?? 'no branch'}, not a thread/ branch. tb land runs in a thread's own worktree.` };
   }
   const owner = /^thread\/([0-9a-f]{8})$/.exec(branch)?.[1];

@@ -73,10 +73,9 @@ final class DraftStore {
             }
             let saved = all.mapValues { Saved(text: $0.text, images: $0.images) }
             let data = try JSONEncoder().encode(saved)
-            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-            try data.write(to: url, options: [.atomic])
-            // Private words: only Mike's account reads them.
-            try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+            // Private words: only Mike's account reads them, from the first
+            // byte written (PrivateFile), not after a chmod.
+            try PrivateFile.write(data, to: url)
         } catch {
             AppLog.write("drafts", "couldn't save the drafts: \(error.localizedDescription)")
         }

@@ -11,7 +11,6 @@ use crate::style::{self, size};
 use crate::{call, now_ms};
 use gpui_kit::assets::IconName;
 use gpui_kit::base::TestSupportExt as _;
-use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{h_flex, v_flex, ActiveTheme as _, Icon, Sizable as _};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
@@ -23,6 +22,7 @@ use threadbear_core::inbox::ThreadSummary;
 use threadbear_core::logins::RunnerLogins;
 use threadbear_core::new_thread::{self as draft_rules, Draft, NewThreadPicks, RoomCard, RoomLook};
 use threadbear_core::reducer::ImageRef;
+use crate::tips::Tip as _;
 
 /// Everything about the new thread being written; the app holds one.
 pub(crate) struct NewThreadState {
@@ -104,6 +104,7 @@ impl Threadbear {
         let app = cx.entity().downgrade();
         let composer = cx.new(|cx| Composer::new(None, client, app, window, cx));
         self.new_thread.composer = Some(composer.clone());
+        self.restore_saved_draft(crate::drafts::NEW_THREAD, &composer, cx);
         composer
     }
 
@@ -138,6 +139,7 @@ impl Threadbear {
         let used_pool = params.get("poolId").is_some();
         self.new_thread.creating = true;
         self.new_thread.error = None;
+        crate::activity::sent(None, images.len(), 0, false);
         cx.notify();
         let client = self.client.clone();
         let runner_name = runner.as_deref().map(|id| self.runner_name_of(id));
@@ -371,7 +373,10 @@ impl Threadbear {
         if std::mem::take(&mut self.new_thread.focus_pending) {
             // After the frame: focusing is for the next render, not this one.
             let target = composer.clone();
-            window.defer(cx, move |window, cx| target.update(cx, |c, cx| c.focus(window, cx)));
+            window.defer(cx, move |window, cx| {
+                target.update(cx, |c, cx| c.focus(window, cx));
+                crate::web_panels::keyboard_to_app(window);
+            });
         }
         let logins = self.new_thread_logins().cloned();
         let logins_known = logins.is_some();
@@ -383,7 +388,7 @@ impl Threadbear {
         let heading = div().w_full().flex().justify_center().px(px(24.)).child(
             div().text_size(px(24.)).font_weight(FontWeight::SEMIBOLD).text_color(cx.theme().foreground).text_center().child(draft_rules::HEADING),
         );
-        let note_text = div().id("new-thread-note").text_size(px(size::LABEL)).text_color(style::faint_text(cx)).child(note).tooltip(move |window, cx| Tooltip::new(note_tip.clone()).build(window, cx));
+        let note_text = div().id("new-thread-note").text_size(px(size::LABEL)).text_color(style::faint_text(cx)).child(note).tip(note_tip.clone());
         let error = self.new_thread.error.clone();
         let danger = cx.theme().danger;
         let notes = v_flex()
@@ -422,10 +427,7 @@ impl Threadbear {
             .py(px(5.))
             .rounded_full()
             .bg(style::primary_opacity(cx, 0.06))
-            .tooltip({
-                let tip = format!("The thread joins {title} as it starts, so the agent has its goals from the first message");
-                move |window, cx| Tooltip::new(tip.clone()).build(window, cx)
-            })
+            .tip(format!("The thread joins {title} as it starts, so the agent has its goals from the first message"))
             .child(self.project_glyph(&project, 16., cx))
             .child(div().text_size(px(size::LABEL)).font_weight(FontWeight::MEDIUM).child(format!("In {}", project.title)))
             .child(
@@ -435,7 +437,7 @@ impl Threadbear {
                     .text_color(style::quiet_text(cx))
                     .hover(|s| s.text_color(cx.theme().foreground))
                     .child(Icon::from(IconName::X).with_size(px(9.)))
-                    .tooltip(|window, cx| Tooltip::new("Start it outside the project").build(window, cx))
+                    .tip("Start it outside the project")
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                         this.new_thread.picks.project = None;
                         cx.notify();
@@ -492,7 +494,7 @@ impl Threadbear {
             .border_1()
             .border_color(edge)
             .cursor_pointer()
-            .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
+            .tip(tip.clone())
             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                 // Pins the draft to that login, like the picker's "Pin to a login".
                 this.new_thread.picks.pool = None;

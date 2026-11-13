@@ -95,7 +95,11 @@ one. The containers' settings change, so setup makes them again on the
 same volume; the admin key still works, as it comes from the instance
 secret in the volume; runner.json gets the new `sync.url` and `sync.site`;
 and the website is rebuilt, as its built-in backend address changed.
-Moving to local takes this backend's own `tailscale serve` ports off.
+Moving to local takes this backend's own `tailscale serve` ports off, and
+checks they're off before it saves the local address: if Tailscale isn't
+running or can't be found, setup stops and says so (a stopped Tailscale
+keeps what it serves and puts it back when it starts), and the next run
+tries again. Every later local run checks those ports again.
 Phones paired on the tailnet need pairing again after a move back. Plain
 `--self-hosted` on a local Mac keeps it local, so an agent running the
 usual command again can't put it on a tailnet (a work one, for the person

@@ -44,7 +44,14 @@ impl FloatingWindows {
         let gone: Vec<PanelId> = self.windows.keys().filter(|p| !floating.iter().any(|f| &f.panel == *p)).cloned().collect();
         for panel in gone {
             if let Some(handle) = self.windows.remove(&panel) {
-                let _ = handle.update(cx, |_, window, _| window.remove_window());
+                let gone_activation = options.window_activation.clone();
+                let _ = handle.update(cx, |_, window, cx| {
+                    // Gone, it isn't in front, whether it said so first or not.
+                    if let Some(told) = &gone_activation {
+                        told(false, window, cx);
+                    }
+                    window.remove_window();
+                });
             }
         }
         let focus = model.read(cx).controller.focus_next.clone();
@@ -266,7 +273,12 @@ impl FloatingPanelView {
             let panel = this.panel.clone();
             this.model.update(cx, |m, cx| m.update_controller(cx, |c| c.remember_window_frame(&panel, frame)));
         });
-        Self { panel, model, content, options, press: None, _subscriptions: vec![observed, bounds] }
+        let activation = cx.observe_window_activation(window, |this, window, cx| {
+            if let Some(told) = this.options.window_activation.clone() {
+                told(window.is_window_active(), window, cx);
+            }
+        });
+        Self { panel, model, content, options, press: None, _subscriptions: vec![observed, bounds, activation] }
     }
 
     /// Where the window is, and where the pointer is on screen.
@@ -481,6 +493,15 @@ impl Render for FloatingPanelView {
             .size_full()
             .flex()
             .flex_col()
+            // A press in a window that was never told it's in front (an X
+            // server with no window manager) is still someone at it.
+            .capture_any_mouse_down(cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                if !window.is_window_active() {
+                    if let Some(told) = this.options.window_activation.clone() {
+                        told(true, window, cx);
+                    }
+                }
+            }))
             .bg(theme.panel)
             .text_color(theme.header_text)
             .child(bar)

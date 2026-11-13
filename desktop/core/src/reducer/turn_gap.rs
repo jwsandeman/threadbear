@@ -29,6 +29,21 @@ impl TurnGap {
         }
     }
 
+    /// The label as the Swift app's one-line field draws it
+    /// (`maximumNumberOfLines = 1`): only up to the first line break, with
+    /// "…" when more followed. What finished can be a whole command, commit
+    /// message and all, and every line of it was drawn over the rows below
+    /// (thread a92fcf9a, 12 Nov). Cutting it to the column's width is the
+    /// view's job.
+    pub fn label_line(&self) -> String {
+        let label = self.label();
+        match label.split_once(text::is_newline) {
+            Some((first, rest)) if !text::trim_ws_nl(rest).is_empty() => format!("{}…", first.trim_end()),
+            Some((first, _)) => first.trim_end().to_owned(),
+            None => label,
+        }
+    }
+
     /// How long, in the words someone would say it.
     pub fn later(milliseconds: f64) -> String {
         let seconds = int_saturating((milliseconds / 1000.0).round()).max(0);

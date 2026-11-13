@@ -35,7 +35,9 @@ public protocol Backend: Sendable {
     /// Archived threads with these words in their title or last reply
     /// (backend API 16), for the search to find ones older than the den's
     /// newest 100. Once, not live: it runs again as the words change.
-    func search(_ text: String) async throws -> [PhoneThread]
+    /// `everywhere` (API 74): threads in any list, by their search words
+    /// or a word in any message as well.
+    func search(_ text: String, everywhere: Bool) async throws -> [PhoneThread]
     /// Every runner's schedules whole, for a backend older than API 45.
     func schedules() -> AsyncThrowingStream<[PhoneSchedule], Error>
     /// The active schedules, for the inbox's Hibernating section: which
@@ -249,8 +251,11 @@ public final class ConvexBackend: Backend, @unchecked Sendable {
         }
     }
 
-    public func search(_ text: String) async throws -> [PhoneThread] {
-        try Self.decode([PhoneThread].self, try await transport.query("phone:search", args(["text": .string(text)])))
+    public func search(_ text: String, everywhere: Bool) async throws -> [PhoneThread] {
+        // Only when asked: an older backend's validator refuses the argument.
+        var fields: [String: JSONValue] = ["text": .string(text)]
+        if everywhere { fields["everywhere"] = .bool(true) }
+        return try Self.decode([PhoneThread].self, try await transport.query("phone:search", args(fields)))
     }
 
     public func pocket() -> AsyncThrowingStream<[PocketCard], Error> {

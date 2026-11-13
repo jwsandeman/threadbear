@@ -21,7 +21,8 @@ pub(crate) fn save_collapsed(folds: &HashSet<String>) {
     let mut list: Vec<&String> = folds.iter().collect();
     list.sort();
     if let Ok(text) = serde_json::to_string(&list) {
-        // Best effort: it's a preference, not data.
-        let _ = std::fs::write(path(), text);
+        // Best effort: it's a preference, not data. Written whole, and only
+        // this user's, as everything in the data folder is.
+        let _ = threadbear_core::private_file::write(&path(), text.as_bytes());
     }
 }

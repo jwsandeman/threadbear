@@ -195,6 +195,17 @@ extension AppModel {
         }
     }
 
+    /// A link off a patch's url panel to another site: where Default says,
+    /// as a highlight's would, but in the panel it's over that panel, so
+    /// Back comes back to the patch's page.
+    func openLink(_ url: URL, overPanel panelId: String, in thread: ThreadSummary) {
+        if PreviewRules.isWebPage(url), WebLinkAction.click == .panel {
+            show(PanePreview(target: .page(url), title: HighlightText.address(url.absoluteString), from: .panel(panelId)), in: thread.id)
+        } else {
+            openWebPage(url)
+        }
+    }
+
     /// A web page in the browser, unless an agent already has it open in
     /// Chrome through BrowserBear: then that tab comes to Mike instead of
     /// a second one opening (BrowserBear.swift).

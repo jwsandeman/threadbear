@@ -854,14 +854,33 @@ extension AppModel {
             try? await Task.sleep(for: Self.slideTime)
             // Undone while the row was still on its way: it never leaves.
             guard archivesNotSent.remove(threadId) != nil else { return }
+            // Out of the list as soon as it has slid, not when the runner
+            // answers: on a busy Mac (or with the runner restarting) that
+            // took seconds, and the row's empty space sat in the inbox till
+            // then (Mike, 11 Nov).
+            let guess = Date()
+            if threads[threadId]?.isArchived == false {
+                // Marked first: setting archivedAt runs threads' didSet,
+                // which would stop its Terminal shell if it weren't.
+                archivesInFlight.insert(threadId)
+                threads[threadId]?.archivedAt = guess
+            }
             do {
                 let client = try await rowClient(for: threadId)
-                threads[threadId] = try await inRestartOrder(threadId, sentOn: client) { client in
+                let archived = try await inRestartOrder(threadId, sentOn: client) { client in
                     try await client.updateThread(threadId, ThreadUpdate(archived: true))
+                }
+                // Undone meanwhile: the unarchive behind it has the last word,
+                // so the row doesn't leave again on its way back.
+                if archivesInFlight.remove(threadId) != nil || threads[threadId]?.isArchived == true {
+                    threads[threadId] = archived
                 }
                 await endSlide(threadId)
             } catch {
                 // Still in the inbox: bring the row back.
+                if archivesInFlight.remove(threadId) != nil, threads[threadId]?.archivedAt == guess {
+                    threads[threadId]?.archivedAt = nil
+                }
                 slidingOff.remove(threadId)
                 if archivedNote?.threadId == threadId { archivedNote = nil }
                 show(error)
@@ -905,7 +924,7 @@ extension AppModel {
     private func flyToArchive(_ threadId: String) {
         guard transcript.session?.threadId == threadId, transcript.session?.subagentId == nil else { return }
         noteFlightLeaving(threadId)
-        let started = ArchiveFlight.launch(from: transcript.scrollView) { [weak self] in
+        let started = ArchiveFlight.launch(from: transcript.scrollView, thread: threadId) { [weak self] in
             self?.flyingToArchive.remove(threadId)
             self?.leavingTheInbox.remove(threadId)
             self?.archiveLandings &+= 1
@@ -928,7 +947,7 @@ extension AppModel {
         // waiting on a schedule) counts: its heading is there and stays.
         let headingThere = !flyingToHibernate.isEmpty || !sections.hibernating.isEmpty
         if showing { noteFlightLeaving(threadId) }
-        let started = showing && ArchiveFlight.launch(from: transcript.scrollView, to: .hibernate, headingThere: headingThere) { [weak self] in
+        let started = showing && ArchiveFlight.launch(from: transcript.scrollView, to: .hibernate, headingThere: headingThere, thread: threadId) { [weak self] in
             self?.flyingToHibernate.remove(threadId)
             self?.leavingTheInbox.remove(threadId)
             self?.moonStirs()
@@ -962,6 +981,10 @@ extension AppModel {
     }
 
     func unarchive(_ threadId: String) {
+        // An archive still on its way: take its guess back first, so a
+        // failed unarchive puts back what the runner last said (not archived),
+        // not the guess.
+        if archivesInFlight.remove(threadId) != nil { threads[threadId]?.archivedAt = nil }
         update(threadId, ThreadUpdate(archived: false))
     }
 

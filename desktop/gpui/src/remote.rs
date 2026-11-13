@@ -31,9 +31,11 @@ pub(crate) struct RemoteState {
     pub(crate) fetching: HashSet<String>,
     /// `runners.list`: every runner, this Mac's too.
     pub(crate) all_runners: Vec<RunnerInfo>,
-    /// `hello.experiments`: what's on for this runner (the Move to menu is
-    /// `moveToRunner`'s).
+    /// `hello.experiments`: what's on for this runner.
     pub(crate) experiments: Vec<String>,
+    /// The runner has said which other Macs' threads there are (or that it
+    /// can't), so a thread not among them isn't coming.
+    pub(crate) heard: bool,
 }
 
 impl Threadbear {
@@ -44,8 +46,18 @@ impl Threadbear {
         let client = self.client.clone();
         cx.spawn(async move |this, cx| {
             let res = call(client.clone(), "remoteThreads.list", json!({})).await;
-            if let Ok(value) = res {
-                this.update(cx, |this, cx| this.receive_remote(&value, cx)).ok();
+            match res {
+                Ok(value) => {
+                    this.update(cx, |this, cx| this.receive_remote(&value, cx)).ok();
+                }
+                // None to come (a runner from before them).
+                Err(_) => {
+                    this.update(cx, |this, cx| {
+                        this.remote.heard = true;
+                        this.try_waiting_link(cx);
+                    })
+                    .ok();
+                }
             }
             // Every runner, this Mac's too: its icon and where a move can go.
             if let Ok(value) = call(client, "runners.list", json!({})).await {
@@ -70,8 +82,15 @@ impl Threadbear {
         let remote = remote::decode_remote_threads(value);
         self.remote.runners = remote.runners.clone();
         self.remote.index = remote;
+        self.remote.heard = true;
+        // Mike's runner order, for the Runners panel.
+        self.receive_runner_order();
         self.apply_remote_index(cx);
         self.apply_default_runner(cx);
+        // The Dock badge counts other runners' threads too, as Swift's does.
+        self.refresh_dock_badge();
+        // A link to one of their threads, opened before they'd come.
+        self.try_waiting_link(cx);
         cx.notify();
     }
 
@@ -94,7 +113,8 @@ impl Threadbear {
             self.threads.remove(&id);
             self.failed_on_account.remove(&id);
         }
-        // An open remote thread keeps up with its row.
+        // An open remote thread keeps up with its row, and so do the ones
+        // kept loaded (pane_cache.rs).
         if let Some(id) = self.selected.clone() {
             if let (Some(pane), Some(t)) = (self.pane.clone(), self.threads.get(&id).cloned()) {
                 if t.runner_id.is_some() {
@@ -102,6 +122,14 @@ impl Threadbear {
                 }
             }
         }
+        for pane in self.kept.panes().cloned().collect::<Vec<_>>() {
+            let Some(t) = self.threads.get(&pane.read(cx).summary.id).filter(|t| t.runner_id.is_some()).cloned() else { continue };
+            pane.update(cx, |p, cx| p.summary_changed(&t, cx));
+        }
+        // A kept thread that's no longer listed (deleted, here or on its
+        // runner, while the connection was down) goes from the kept ones.
+        let listed: HashSet<String> = self.threads.keys().cloned().collect();
+        self.kept.retain(cx, |id| listed.contains(id));
     }
 
     /// `loadRelayLogins`: that runner's logins for the pickers, from the

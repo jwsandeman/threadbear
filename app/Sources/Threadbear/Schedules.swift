@@ -40,6 +40,19 @@ struct ScheduleEditorState: Identifiable, Equatable {
     var draftKey: String?
     /// Images in that draft, which a schedule can't send.
     var draftImages = 0
+    /// The folder an existing schedule showed when the editor opened. A save
+    /// sends a folder only when it's changed from this: every save used to,
+    /// and the runner took that as a move, which approved the schedule's
+    /// check again as its scripts were then, though the editor never shows
+    /// the check (security review, 11 Nov 2026).
+    var openedCwd: String?
+
+    /// The folder an update sends: nil unless it changed.
+    var updateCwd: String? {
+        let now = cwd.trimmingCharacters(in: .whitespacesAndNewlines)
+        let was = (openedCwd ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        return now == was ? nil : now
+    }
 
     var isNew: Bool { scheduleId == nil }
     /// Runs on another runner's Mac.
@@ -224,6 +237,7 @@ extension AppModel {
         } else {
             state.cwd = schedule.cwd ?? defaults.cwd
         }
+        state.openedCwd = state.cwd
         // Shown so they can be changed; only the model and effort are sent
         // back (ScheduleEditor's model rows), so the login stays as it was.
         state.accountId = schedule.accountId
@@ -249,7 +263,7 @@ extension AppModel {
                 let ownModel = state.threadId == nil && !state.isAway
                 saved = try await client.updateSchedule(id, ScheduleUpdate(
                     title: title.isEmpty ? nil : title, text: text, when: state.when,
-                    cwd: state.threadId == nil ? state.cwd.trimmingCharacters(in: .whitespacesAndNewlines) : nil,
+                    cwd: state.threadId == nil ? state.updateCwd : nil,
                     model: ownModel ? .some(state.model) : .none, effort: ownModel ? .some(state.effort) : .none
                 ))
             } else if state.isAway && state.threadId == nil {
@@ -268,7 +282,7 @@ extension AppModel {
                     permissionMode: state.permissionMode
                 ))
             }
-            replace(saved)
+            replace(saved, insert: state.isNew)
             if let key = state.draftKey {
                 // Images can't go with a schedule, so they stay in the box.
                 if var draft = drafts[key], !draft.images.isEmpty {
@@ -368,11 +382,14 @@ extension AppModel {
     }
 
     /// A reply's schedule goes in straight away; `schedules.updated` brings
-    /// the whole list (in order) a moment later anyway.
-    private func replace(_ schedule: Schedule) {
+    /// the whole list (in order) a moment later anyway. Only a new one is
+    /// added: a Run now or Pause answered after the schedule was deleted
+    /// brought it back as a row with nothing behind it (found reviewing the
+    /// GPUI app's copy of this, 11 Nov).
+    private func replace(_ schedule: Schedule, insert: Bool = false) {
         if let index = schedules.firstIndex(where: { $0.id == schedule.id }) {
             schedules[index] = schedule
-        } else {
+        } else if insert {
             schedules.insert(schedule, at: 0)
         }
     }

@@ -12,12 +12,19 @@ use threadbear_dock::*;
 
 struct Panels;
 
+const WORDS: &str = "Words in a panel that can be selected with a drag, a long enough line of them";
+
 impl DockContent for Panels {
     fn title(&self, panel: &str, _: &App) -> SharedString {
         panel.to_string().into()
     }
 
     fn view(&self, panel: &str, _ghost: bool, _: &mut Window, _: &mut App) -> AnyElement {
+        // Panel b has words that can be selected along its top, as a
+        // thread's replies are; the rest of it is background.
+        if panel == "b" {
+            return div().size_full().child(gpui_kit::base::SelectableText::new("b-words", WORDS)).into_any_element();
+        }
         div().size_full().child(panel.to_string()).into_any_element()
     }
 }
@@ -170,3 +177,36 @@ async fn a_divider_drag_moves_the_share_and_stays_above_the_minimum(cx: &mut Tes
     let DockNode::Split(root) = cx.read(|cx| model.read(cx).layout().root.clone()) else { panic!("expected a split") };
     assert!(root.fractions[0] >= 80. / 999. && root.fractions[0] < 0.1, "the left share is {}", root.fractions[0]);
 }
+
+#[gpui_kit::test]
+async fn a_held_press_on_words_selects_them_and_leaves_the_panel_where_it_is(cx: &mut TestAppContext) {
+    let (handle, model) = open(cx);
+    // The words' first line, at the top of the panel's body under its bar.
+    let (body, bar) = (frame(cx, &model, "right"), bar(cx, &model, "right"));
+    // Clear of the divider on its left, which takes presses near it.
+    let start = gpui_kit::point(px(body.x as f32 + 20.), px(bar.max_y() as f32 + 8.));
+    cx.update_window(handle, |_, w, cx| {
+        w.pointer_move(start, None, cx);
+        w.pointer_down(start, MouseButton::Left, cx);
+        w.render_frame(cx);
+    })
+    .unwrap();
+    // Resting on the press as a careful hand does, past the hold, then
+    // dragging along the words a step at a time.
+    std::thread::sleep(Duration::from_millis(400));
+    for step in 1..=10 {
+        let at = gpui_kit::point(start.x + px(12. * step as f32), start.y);
+        cx.update_window(handle, |_, w, cx| {
+            w.pointer_move(at, Some(MouseButton::Left), cx);
+            w.render_frame(cx);
+        })
+        .unwrap();
+        assert_eq!(drag_panel(cx, &model), None, "the panel came up {step} steps into selecting its words");
+    }
+    let end = gpui_kit::point(start.x + px(120.), start.y);
+    cx.update_window(handle, |_, w, cx| w.pointer_up(end, MouseButton::Left, cx)).unwrap();
+    let selected = cx.update_window(handle, |_, w, cx| gpui_kit::base::TextSelection::selected_text(w, cx)).unwrap();
+    assert!(selected.trim().len() > 10 && WORDS.contains(selected.trim()), "selected {selected:?}");
+    assert_eq!(drag_panel(cx, &model), None);
+}
+

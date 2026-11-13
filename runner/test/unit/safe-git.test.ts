@@ -8,7 +8,7 @@ import { claudeCommands } from '../../src/claude-trust.ts';
 import { trackedNodeModules } from '../../src/tracked-packages.ts';
 import { git as worktreeGit } from '../../src/worktrees.ts';
 import { changedFiles } from '../../src/move-git.ts';
-import { untrustedGitSync } from '../../src/safe-git.ts';
+import { untrustedGit, untrustedGitSync } from '../../src/safe-git.ts';
 
 // A folder that arrived with its own .git (a zip, a shared drive), whose
 // .git/config names an fsmonitor program. Nothing the runner does before
@@ -122,4 +122,103 @@ test("a listing before trust doesn't fetch a partial clone's missing objects", (
   claudeCommands(repo, tmpDir());
   trackedNodeModules(repo);
   assert.equal(ran(), 0);
+});
+
+// A submodule is a repo of its own, and git runs another git inside it to
+// see whether it changed, which reads the submodule's own config: a
+// `filter.<name>.clean` there ran through untrustedGit's `git status`,
+// though every filter the outer repo's config names was switched off
+// (security review, 11 Nov 2026). The outer repo can also say to look
+// (`submodule.<name>.ignore none`), which beats -c diff.ignoreSubmodules.
+test("untrustedGit never looks inside a submodule, whatever the repo's config says", async () => {
+  const root = tmpDir();
+  const marker = path.join(root, 'ran');
+  const payload = path.join(root, 'payload.sh');
+  fs.writeFileSync(payload, `#!/bin/sh\necho ran >> '${marker}'\ncat\n`, { mode: 0o755 });
+  const env = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' };
+  const g = (dir: string, ...args: string[]) => execFileSync('git', ['-C', dir, '-c', 'user.email=t@t', '-c', 'user.name=t', ...args], { stdio: 'pipe', env }).toString().trim();
+  const sub = path.join(root, 'sub-src');
+  fs.mkdirSync(sub);
+  g(sub, 'init', '-q');
+  fs.writeFileSync(path.join(sub, '.gitattributes'), '*.txt filter=sub\n');
+  fs.writeFileSync(path.join(sub, 'v.txt'), 'one\n');
+  g(sub, 'add', '-A');
+  g(sub, 'commit', '-qm', 'v');
+  const repo = path.join(root, 'outer');
+  fs.mkdirSync(repo);
+  g(repo, 'init', '-q');
+  fs.writeFileSync(path.join(repo, 'a.txt'), 'a\n');
+  g(repo, 'add', '-A');
+  g(repo, 'commit', '-qm', 'a');
+  g(repo, '-c', 'protocol.file.allow=always', 'submodule', 'add', '-q', sub, 'vendor');
+  g(repo, 'commit', '-qm', 'vendor');
+  const base = g(repo, 'rev-parse', 'HEAD');
+  g(repo, 'config', 'submodule.vendor.ignore', 'none');
+  g(repo, 'config', 'submodule.vendor.fetchRecurseSubmodules', 'true');
+  g(path.join(repo, 'vendor'), 'config', 'filter.sub.clean', payload);
+  const file = path.join(repo, 'vendor', 'v.txt');
+  fs.writeFileSync(file, 'two\n');
+  const ran = () => fs.existsSync(marker);
+  const stale = (n: number) => fs.utimesSync(file, new Date(2020, 0, 1, 0, n), new Date(2020, 0, 1, 0, n));
+  stale(0);
+  execFileSync('git', ['-C', repo, 'status', '--porcelain'], { stdio: 'pipe', env });
+  assert.ok(ran(), 'plain git runs it, so the checks below mean something');
+  fs.rmSync(marker);
+  const calls: string[][] = [
+    ['status', '--porcelain', '--untracked-files=all'],
+    ['diff', '--name-only', '-z', '--no-renames', '--no-ext-diff', '--no-textconv', base],
+    ['diff', '--quiet', '--no-ext-diff', '--no-textconv', base, '--', 'vendor'],
+    ['diff-index', '--name-only', base],
+    ['diff-files', '--name-only'],
+    // What a move's pack and unpack run in a worktree (Muse's review).
+    ['ls-files', '-z', '--others'],
+    ['read-tree', 'HEAD'],
+    ['reset', '--quiet'],
+  ];
+  for (const [i, args] of calls.entries()) {
+    stale(i + 1);
+    await untrustedGit(repo, args, { env: { GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' } });
+    assert.equal(ran(), false, `${args.join(' ')} ran the submodule's filter`);
+  }
+  // git submodule is git in each submodule, by design: refused outright.
+  const r = await untrustedGit(repo, ['submodule', 'foreach', `${payload} </dev/null`]);
+  assert.equal(r.ok, false);
+  assert.equal(ran(), false);
+});
+
+// Muse's review of the fix above: diff.external was never blanked, so a
+// caller's --ext-diff (or one smuggled in as a revision) ran the repo's own;
+// and anything not looked at (log, show, merge, stash) went through as is.
+test('untrustedGit runs no diff.external, and only the commands it has been looked at for', async () => {
+  const root = tmpDir();
+  const repo = path.join(root, 'r');
+  fs.mkdirSync(repo);
+  const marker = path.join(root, 'ran');
+  const payload = path.join(root, 'ext.sh');
+  fs.writeFileSync(payload, `#!/bin/sh\necho ran >> '${marker}'\n`, { mode: 0o755 });
+  const env = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' };
+  const g = (...args: string[]) => execFileSync('git', ['-C', repo, '-c', 'user.email=t@t', '-c', 'user.name=t', ...args], { stdio: 'pipe', env }).toString().trim();
+  g('init', '-q');
+  fs.writeFileSync(path.join(repo, 'a.txt'), 'a\n');
+  g('add', '-A');
+  g('commit', '-qm', 'a');
+  g('config', 'diff.external', payload);
+  fs.writeFileSync(path.join(repo, 'a.txt'), 'b\n');
+  execFileSync('git', ['-C', repo, 'diff'], { stdio: 'pipe', env });
+  assert.ok(fs.existsSync(marker), 'plain git runs it, so the checks below mean something');
+  fs.rmSync(marker);
+  const quiet = { env: { GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' } };
+  // A blank program is none: asked for, git fails rather than run one.
+  await untrustedGit(repo, ['diff', '--ext-diff', 'HEAD'], quiet);
+  assert.equal(fs.existsSync(marker), false, 'diff --ext-diff');
+  const plain = await untrustedGit(repo, ['diff', 'HEAD'], quiet);
+  assert.ok(plain.ok && plain.stdout.includes('+b'), 'a plain diff is git\'s own');
+  assert.equal(fs.existsSync(marker), false, 'diff');
+  for (const args of [['log', '-p'], ['show', 'HEAD'], ['merge', 'HEAD'], ['stash'], ['worktree', 'add', path.join(root, 'w')], ['submodule', 'status'], []]) {
+    const out = await untrustedGit(repo, args, quiet);
+    assert.equal(out.ok, false, `git ${args.join(' ')} is refused`);
+  }
+  assert.ok((await untrustedGit(repo, ['worktree', 'list', '--porcelain'], quiet)).ok);
+  assert.equal(fs.existsSync(marker), false);
+  assert.throws(() => untrustedGitSync(repo, ['diff']), /listings/);
 });

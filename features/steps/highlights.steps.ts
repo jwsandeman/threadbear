@@ -130,3 +130,15 @@ When('I choose {string} from the menu of the highlight {string}', async function
   await this.until(`a highlight called "${title}"`, (d) => sections(d).some((s) => s.rows.some((r) => r.title === title)));
   await this.app.do({ cmd: 'highlight', choose: item, row: title });
 });
+
+Then('the menu of the Scheduled highlight {string} offers {string}', async function (this: ThreadbearWorld, title: string, list: string) {
+  await this.until(`a Scheduled highlight called "${title}"`, (d) => sections(d).some((s) => s.rows.some((r) => r.title === title)));
+  const out = await this.app.do({ cmd: 'highlight', scheduleMenu: title });
+  const items = out.replace(/^(\w+ )?ok /, '').split(' | ');
+  for (const item of wanted(list)) assert.ok(items.some((i) => sameItem(i, item)), `no "${item}" in: ${items.join(' | ')}`);
+});
+
+When('I click the Scheduled highlight {string}', async function (this: ThreadbearWorld, title: string) {
+  await this.until(`a Scheduled highlight called "${title}"`, (d) => sections(d).some((s) => s.rows.some((r) => r.title === title)));
+  await this.app.do({ cmd: 'highlight', schedule: title });
+});

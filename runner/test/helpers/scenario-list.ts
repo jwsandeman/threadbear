@@ -52,14 +52,55 @@ export const SCENARIOS: Scenario[] = [
     },
   },
   {
-    // The box itself needs 12 quiet hours, which a seeded thread doesn't
-    // have, so `shows` is the reply and the routes compare the recap.
-    name: 'a thread the librarian has written a recap for',
-    shows: ['Parked until Nipunn replies.'],
+    // The done card's loose ends (experiment looseEnds): a check-in it
+    // booked, under "Coming back" with its time (API 73 for the phone).
+    name: 'a done card with a check-in booked',
+    shows: ['Checked it in.', 'Coming back', 'Look at how the experiment went'],
     play: (p) => {
-      p.say('Parked until Nipunn replies.');
+      p.looseEnds({ title: 'Look at how the experiment went', at: '2026-11-15T01:30:00.000Z' });
+      p.say('Checked it in.');
       p.endTurn({ needs: 'nothing' });
-      p.librarianWrites('- Asked Nipunn how to go ahead\n- Nothing goes out until he replies', 'A community port of the clients, and what to say about it.');
+    },
+  },
+  {
+    // Review by another lab (runner/lab-review.ts): the turn that answered
+    // the reviewer's findings carries the ledger to its done card.
+    name: "a done card with another lab's review findings and what was done about each",
+    shows: ['Fixed the refresh bug.', 'Drops the session on refresh.', 'Logs the token.'],
+    play: (p) => {
+      p.reviewed({
+        reviewer: 'Codex (codex-1)', independent: true, rounds: 1, threadId: 'review-1', passed: false,
+        findings: [
+          { id: 1, round: 1, severity: 'high', claim: 'Drops the session on refresh.', where: 'src/app.ts:3' },
+          { id: 2, round: 1, severity: 'low', claim: 'Logs the token.' },
+        ],
+      });
+      p.say('Fixed the refresh bug.');
+      p.endTurn({ needs: 'nothing', findings: [{ id: 1, outcome: 'fixed' }, { id: 2, outcome: 'disputed', note: 'It logs a hash.' }] });
+    },
+  },
+  {
+    // Plan first: the plan in full goes to the phone as a plan row (API 72).
+    name: 'a Plan first plan',
+    shows: ['Bots and webhook triggers', 'Add a bots table'],
+    play: (p) => {
+      p.proposePlan('# Bots and webhook triggers\n\n1. Add a bots table\n2. Call the webhook on each new message');
+      p.say('The plan is ready for you.');
+      p.endTurn({ needs: 'you' });
+    },
+  },
+  {
+    // Go ahead pressed on that runner: another Mac's card says so too, from
+    // the plan's row (planDecision, API 76), not a guess from what follows.
+    name: 'a Plan first plan that went ahead',
+    shows: ['Bots and webhook triggers', 'Building it.'],
+    play: (p) => {
+      p.proposePlan('# Bots and webhook triggers\n\n1. Add a bots table');
+      p.say('The plan is ready for you.');
+      p.endTurn({ needs: 'you' });
+      p.approvePlan();
+      p.say('Building it.');
+      p.endTurn({ needs: 'nothing' });
     },
   },
   {

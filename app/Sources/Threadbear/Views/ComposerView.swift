@@ -1,5 +1,6 @@
 import AppKit
 import BearDock
+import Quartz
 import SwiftUI
 import ThreadbearCore
 import UniformTypeIdentifiers
@@ -59,7 +60,6 @@ struct ComposerView: View {
         let cardCollapsed = needsYou && thread.map { app.collapsedCards[$0.id] == cardRow?.seq } == true
         VStack(alignment: .leading, spacing: 0) {
         if let thread {
-            RecapBox(thread: thread)
             RefusalOffer(thread: thread)
         }
         // The folder's actions (patches), on shelves sitting on the box's
@@ -98,7 +98,9 @@ struct ComposerView: View {
                 AnswerChips(thread: thread, picks: picks)
             }
             if !draft.wrappedValue.images.isEmpty || importing > 0 {
-                AttachmentStrip(images: draft.wrappedValue.images, importing: importing) { removePicture(at: $0, from: draft) }
+                AttachmentStrip(images: draft.wrappedValue.images, importing: importing,
+                                onOpen: { handle.textView?.previewPicture(at: $0) },
+                                onRemove: { removePicture(at: $0, from: draft) })
                     .disabled(locked)
                     .opacity(locked ? 0.5 : 1)
             }
@@ -500,12 +502,13 @@ private struct EditingBanner: View {
 private struct AttachmentStrip: View {
     let images: [ImageRef]
     let importing: Int
+    let onOpen: (Int) -> Void
     let onRemove: (Int) -> Void
 
     var body: some View {
         HStack(spacing: zoomed(8)) {
             ForEach(Array(images.enumerated()), id: \.offset) { index, image in
-                AttachmentThumbnail(path: image.path) { onRemove(index) }
+                AttachmentThumbnail(path: image.path, onOpen: { onOpen(index) }, onRemove: { onRemove(index) })
             }
             // One placeholder per image still being imported, so the strip
             // doesn't jump when they arrive.
@@ -521,6 +524,8 @@ private struct AttachmentStrip: View {
 
 struct AttachmentThumbnail: View {
     let path: String
+    /// A click on the picture: Quick Look (ComposerTextView.previewPicture).
+    var onOpen: (() -> Void)?
     let onRemove: () -> Void
     @State private var hovering = false
 
@@ -534,6 +539,9 @@ struct AttachmentThumbnail: View {
         AsyncThumbnail(path: path)
             .frame(width: Self.size, height: Self.size)
             .clipShape(shape)
+            .contentShape(shape)
+            // The remove badge is a button over it, so its click stays its own.
+            .onTapGesture { onOpen?() }
             .overlay(shape.strokeBorder(Color(nsColor: .separatorColor), lineWidth: 0.5))
             .overlay(alignment: .topTrailing) {
                 if hovering || Self.debugShowRemove {
@@ -922,11 +930,12 @@ final class ComposerTextView: NSTextView {
         storage.endEditing()
     }
 
-    // MARK: A chip's hover card
+    // MARK: A chip's hover card, and Quick Look on a click
     //
     // The picture over a chip in the box, as in Mike's bubble, to tell which
-    // is which. A click stays the cursor's (PictureChipCell), so here it's
-    // the hover alone.
+    // is which. A plain click on a chip still puts the cursor beside it
+    // (PictureChipCell), then opens the picture in Quick Look, as a click
+    // on the strip's thumbnail does (Mike, 11 Nov).
 
     private var chipTracking: NSTrackingArea?
     private var chipCard: ChipCardWindow?
@@ -953,8 +962,54 @@ final class ComposerTextView: NSTextView {
 
     override func mouseDown(with event: NSEvent) {
         hoverChip(nil)
+        let plain = event.clickCount == 1 && event.modifierFlags.intersection([.shift, .command, .option, .control]).isEmpty
+        let pressed = plain ? chipUnder(convert(event.locationInWindow, from: nil)) : nil
+        // NSTextView tracks the press until the button comes up.
         super.mouseDown(with: event)
+        // A drag from the chip selects words instead, and letting go
+        // somewhere else is a change of mind.
+        guard let pressed, selectedRange().length == 0, let up = NSApp.currentEvent, up.type == .leftMouseUp,
+              chipUnder(convert(up.locationInWindow, from: nil)) === pressed else { return }
+        previewPicture(pressed)
     }
+
+    /// Quick Look on the strip's `index`-th picture (the ones copied in).
+    @discardableResult
+    func previewPicture(at index: Int) -> Bool {
+        var found: PictureAttachment?
+        var seen = 0
+        textStorage?.enumerateAttribute(.attachment, in: whole) { value, _, stop in
+            guard let chip = value as? PictureAttachment, chip.picture != nil else { return }
+            if seen == index {
+                found = chip
+                stop.pointee = true
+            }
+            seen += 1
+        }
+        guard let found else { return false }
+        return previewPicture(found)
+    }
+
+    /// Quick Look on `chip`'s picture, stepping through the box's others.
+    @discardableResult
+    func previewPicture(_ chip: PictureAttachment) -> Bool {
+        var chips: [PictureAttachment] = []
+        textStorage?.enumerateAttribute(.attachment, in: whole) { value, _, _ in
+            if let chip = value as? PictureAttachment { chips.append(chip) }
+        }
+        // One still being copied in shows from the file it came from.
+        let path = { (chip: PictureAttachment) in chip.picture?.path ?? chip.source }
+        let shown = chips.map(path).filter(QuickLookCoordinator.isPicture)
+        guard let index = shown.firstIndex(of: path(chip)) else { return false }
+        // Quick Look asks the first responder for its pictures (below).
+        if window?.firstResponder !== self { window?.makeFirstResponder(self) }
+        QuickLookCoordinator.shared.show(paths: shown, index: index, from: self)
+        return true
+    }
+
+    override func acceptsPreviewPanelControl(_ panel: QLPreviewPanel!) -> Bool { true }
+    override func beginPreviewPanelControl(_ panel: QLPreviewPanel!) { QuickLookCoordinator.shared.begin(panel) }
+    override func endPreviewPanelControl(_ panel: QLPreviewPanel!) { QuickLookCoordinator.shared.end(panel) }
 
     override func viewWillMove(toWindow newWindow: NSWindow?) {
         super.viewWillMove(toWindow: newWindow)
@@ -1014,6 +1069,34 @@ final class ComposerTextView: NSTextView {
     }
 
     func debugEndHover() { hoverChip(nil) }
+
+    /// A press and release on the chip numbered `number`, through
+    /// mouseDown as a real click goes, or with `strip` the strip
+    /// thumbnail's open (`previewPicture(at:)`, a 0-based place): what
+    /// Quick Look would show, without its panel coming up over Mike's work.
+    func debugOpenPicture(chip number: Int?, strip: Int?) -> (paths: [String], index: Int)? {
+        var opened: (paths: [String], index: Int)?
+        QuickLookCoordinator.shared.debugOpened = { opened = ($0, $1) }
+        defer { QuickLookCoordinator.shared.debugOpened = nil }
+        if let strip {
+            previewPicture(at: strip)
+            return opened
+        }
+        var found: PictureAttachment?
+        textStorage?.enumerateAttribute(.attachment, in: whole) { value, _, _ in
+            if let chip = value as? PictureAttachment, chip.number == number { found = chip }
+        }
+        guard let found, let window, let rect = range(of: found).flatMap(chipRect) else { return nil }
+        let spot = convert(NSPoint(x: rect.midX, y: rect.midY), to: nil)
+        func mouse(_ type: NSEvent.EventType) -> NSEvent? {
+            NSEvent.mouseEvent(with: type, location: spot, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                               windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1)
+        }
+        guard let down = mouse(.leftMouseDown), let up = mouse(.leftMouseUp) else { return nil }
+        window.postEvent(up, atStart: true)
+        mouseDown(with: down)
+        return opened
+    }
     #endif
 
     override func keyDown(with event: NSEvent) {

@@ -14,6 +14,9 @@ const m = (await import(planModule)) as {
   backendContainer: (mode: string, tailnet?: { name: string; ip: string }) => Container;
   origins: (mode: string, name?: string) => { url: string; site: string; dashboard: string };
   isLoopbackUrl: (u: string) => boolean;
+  servedOn: (status: unknown, tailnetPort: number) => { Proxy?: string }[] | undefined;
+  mustSeeTailnetOff: (a: { from?: string; pending?: boolean }) => boolean;
+  offTailnetStep: (a: { cli: boolean; handlers?: { Proxy?: string }[]; tailnetPort: number; localPort: number; moving: boolean }) => { do: string; message?: string };
 };
 
 const LOCAL_URL = 'http://127.0.0.1:13210';
@@ -90,4 +93,72 @@ test('a tailnet backend is unchanged by the local way (7 Nov containers aren\'t 
 test('only loopback URLs count as local', () => {
   for (const u of [LOCAL_URL, 'http://localhost:13210', 'http://[::1]:13210']) assert.ok(m.isLoopbackUrl(u), u);
   for (const u of [TAILNET_URL, 'https://happy-otter-123.convex.cloud', 'http://127.0.0.1.evil.com', 'not a url']) assert.ok(!m.isLoopbackUrl(u), u);
+});
+
+// Daybreak, 11 Nov 2026 (finding 101): moving to --local while Tailscale was
+// stopped read its failed `serve status` as "nothing served", saved the
+// local URL and left the backend's ports on the tailnet, saved for when
+// Tailscale came back; later runs, now local, never looked again.
+test("a Tailscale that can't say what it serves is never read as serving nothing", () => {
+  const status = (stdout: string, code = 0, error?: Error) => ({ status: code, stdout, stderr: '', error });
+  const served = JSON.stringify({ Web: { 'mac.tail1.ts.net:3210': { Handlers: { '/': { Proxy: 'http://127.0.0.1:13210' } } } } });
+  assert.deepEqual(m.servedOn(status(served), 3210), [{ Proxy: 'http://127.0.0.1:13210' }]);
+  assert.deepEqual(m.servedOn(status(served), 3211), []);
+  assert.deepEqual(m.servedOn(status('{}'), 3210), []);
+  assert.deepEqual(m.servedOn(status(''), 3210), []);
+  assert.equal(m.servedOn(status('', 1), 3210), undefined); // its daemon not running
+  assert.equal(m.servedOn(status(served, 1), 3210), undefined);
+  assert.equal(m.servedOn(status('not json'), 3210), undefined);
+  assert.equal(m.servedOn(status('[]'), 3210), undefined);
+  assert.equal(m.servedOn(status('null'), 3210), undefined);
+  assert.equal(m.servedOn(status(JSON.stringify({ Web: 'x' })), 3210), undefined);
+  assert.equal(m.servedOn(status(JSON.stringify({ Web: { 'mac:3210': null } })), 3210), undefined);
+  assert.equal(m.servedOn({ status: null, stdout: '', error: new Error('ENOENT') }, 3210), undefined); // didn't run
+  assert.equal(m.servedOn(undefined, 3210), undefined);
+});
+
+test('a move off the tailnet stops unless it can see each port is off', () => {
+  const ours = [{ Proxy: 'http://127.0.0.1:13210/' }];
+  const step = (a: Partial<Parameters<typeof m.offTailnetStep>[0]>) => m.offTailnetStep({ cli: true, tailnetPort: 3210, localPort: 13210, moving: true, ...a });
+  // Couldn't ask, or no Tailscale found: stops, so the tailnet URL stays and the next run tries again.
+  assert.equal(step({ handlers: undefined }).do, 'fail');
+  assert.equal(step({ cli: false, handlers: undefined }).do, 'fail');
+  assert.match(step({ cli: false }).message ?? '', /can't find Tailscale/);
+  // Serving it: off. Serving nothing, or only someone else's: nothing.
+  assert.equal(step({ handlers: ours }).do, 'off');
+  assert.equal(step({ handlers: [] }).do, 'nothing');
+  assert.equal(step({ handlers: [{ Proxy: 'http://127.0.0.1:8080' }] }).do, 'nothing');
+  // Ours and someone else's on one port: can't take only ours off.
+  assert.equal(step({ handlers: [...ours, { Proxy: 'http://127.0.0.1:8080' }] }).do, 'fail');
+  assert.equal(step({ handlers: [{}] }).do, 'nothing');
+  // A local run that isn't a move still takes ours off, every time, and only says it when it can't ask.
+  assert.equal(step({ moving: false, handlers: ours }).do, 'off');
+  assert.equal(step({ moving: false, handlers: undefined }).do, 'note');
+  assert.equal(step({ moving: false, cli: false }).do, 'nothing');
+});
+
+// Cross-lab review of that fix: a --tailnet run that served the ports and
+// then stopped before saving its URL left a local URL, so a later --local
+// run with Tailscale stopped only said it couldn't check. The note setup
+// leaves before serving makes that run check too.
+test('a local run after the backend was served on the tailnet has to see it off, URL or not', () => {
+  assert.equal(m.mustSeeTailnetOff({ from: 'tailnet' }), true);
+  assert.equal(m.mustSeeTailnetOff({ pending: true }), true);
+  assert.equal(m.mustSeeTailnetOff({ from: undefined, pending: false }), false);
+  const step = (moving: boolean) => m.offTailnetStep({ cli: true, handlers: undefined, tailnetPort: 3210, localPort: 13210, moving });
+  assert.equal(step(m.mustSeeTailnetOff({ pending: true })).do, 'fail');
+  assert.equal(step(m.mustSeeTailnetOff({ pending: false })).do, 'note');
+});
+
+// The order that makes it hold: the note is written before the first
+// tailscale serve, and removed only after every port's step, in setup itself.
+test('setup leaves the tailnet note before serving and clears it only after every port is off', async () => {
+  const fs = await import('node:fs');
+  const src = fs.readFileSync(new URL('../../../scripts/setup.mjs', import.meta.url), 'utf8');
+  const write = src.indexOf('fs.writeFileSync(pendingFile');
+  const serveLoop = src.indexOf('serve(tailnet.ts, tailnetPort, localPort)');
+  const unserveLoop = src.indexOf('unserve(ts, tailnetPort, localPort, moving)');
+  const remove = src.indexOf('fs.rmSync(pendingFile');
+  assert.ok(write > 0 && write < serveLoop, 'written before serving');
+  assert.ok(unserveLoop > 0 && unserveLoop < remove, 'removed after the ports');
 });

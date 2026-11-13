@@ -1608,6 +1608,13 @@ enum RowRenderer {
                 ]))
             }
         }
+        // The review's ledger under the asks (one it left for Mike is
+        // usually what they're about): under them all, or on the last page
+        // when the composer pages a tall card.
+        if let review = card.review, card.isOpen, page == nil || page == card.asks.count - 1 {
+            let (labelStyle, labelOffset) = Theme.lines(TypeScale.scaled(19), font: small, before: zoomed(10))
+            output.append(reviewText(review, inset: 0, labelStyle: labelStyle, labelOffset: labelOffset))
+        }
         return output
     }
 
@@ -1858,6 +1865,7 @@ enum RowRenderer {
         // the text view clips anything drawn left of its text.
         let inset = rowInset
         let (labelStyle, labelOffset) = Theme.lines(TypeScale.scaled(19), font: small, before: zoomed(10), head: inset)
+        if let review = card.review { output.append(reviewText(review, inset: inset, labelStyle: labelStyle, labelOffset: labelOffset)) }
         if let ends, !ends.isEmpty { output.append(looseEndsText(ends, inset: inset, labelStyle: labelStyle, labelOffset: labelOffset)) }
         guard !card.next.isEmpty else { return output }
         output.append(NSAttributedString(string: "\nOr carry on", attributes: [
@@ -1914,6 +1922,48 @@ enum RowRenderer {
             if end.isBooked, let when = end.at.flatMap(ISO8601.parse) { text = "\(bookedFormat.string(from: when)): \(text)" }
             if let id = end.threadId, let url = URL(string: "thread:\(id)") { attributes[.link] = url }
             output.append(NSAttributedString(string: "\t" + text, attributes: attributes))
+        }
+        return output
+    }
+
+    /// Review by another lab's ledger (protocol "Review by another lab"):
+    /// a line saying who reviewed and how it came out, which opens the
+    /// review thread, then each finding with what the agent did about it
+    /// (fixed, disputed and why, left for Mike, or no answer) and where.
+    /// Mike picked this over a fixes-only gate and a gate at landing
+    /// (11 Nov, thread d42a3d91). Plain lines: nothing on it is his to
+    /// press, as the agent has already acted on each.
+    private static func reviewText(_ review: LabReview, inset: CGFloat, labelStyle: NSParagraphStyle, labelOffset: CGFloat) -> NSAttributedString {
+        let output = NSMutableAttributedString()
+        let small = Theme.smallFont
+        var label: [NSAttributedString.Key: Any] = [
+            .font: small, .foregroundColor: NSColor.secondaryLabelColor, .paragraphStyle: labelStyle, .baselineOffset: labelOffset,
+        ]
+        if !review.threadId.isEmpty, let url = URL(string: "thread:\(review.threadId)") { label[.link] = url }
+        output.append(NSAttributedString(string: "\n" + review.heading, attributes: label))
+        let font = Theme.bodyFont
+        let words = inset + ceil(font.pointSize * 1.2) + zoomed(8)
+        let (rowStyle, rowOffset) = Theme.lines(TypeScale.bodyLine, font: font, spacing: zoomed(2), before: zoomed(6), head: words, first: inset)
+        rowStyle.tabStops = [NSTextTab(textAlignment: .left, location: words)]
+        let (detailStyle, detailOffset) = Theme.lines(TypeScale.scaled(17), font: small, head: words, first: words)
+        for finding in review.findings {
+            output.append(NSAttributedString(string: "\n", attributes: [.font: font, .paragraphStyle: rowStyle]))
+            let attributes: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: NSColor.labelColor, .paragraphStyle: rowStyle, .baselineOffset: rowOffset]
+            let (name, word, color): (String, String, NSColor?) = switch finding.outcome {
+            case "fixed": ("checkmark.circle", "Fixed", .systemGreen)
+            case "disputed": ("exclamationmark.bubble", "Disputed", .systemOrange)
+            case "left": ("person.crop.circle", "Left for you", .systemBlue)
+            default: ("circle", "No answer", nil)
+            }
+            output.append(symbol(name, label: word, font: font, attributes: attributes, color: color ?? Theme.faintText))
+            output.append(NSAttributedString(string: "\t" + finding.claim, attributes: attributes))
+            var detail = word
+            if let note = finding.note { detail += ": " + note }
+            if finding.severity == "high" { detail += " · serious" }
+            if let place = finding.where { detail += " · " + place }
+            output.append(NSAttributedString(string: "\n" + detail, attributes: [
+                .font: small, .foregroundColor: NSColor.secondaryLabelColor, .paragraphStyle: detailStyle, .baselineOffset: detailOffset,
+            ]))
         }
         return output
     }

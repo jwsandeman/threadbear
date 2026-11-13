@@ -14,6 +14,12 @@
 // Archiving it (it does that itself when it's done) lets the next failure
 // start a fresh one.
 //
+// A follow-up waits in the thread's queue while its turn runs, and the turn
+// may be the one that lands the fix. So a follow-up still waiting is taken
+// back when a newer one goes, and when main gets through (through()): the
+// backend fix thread was woken twice on 11 Nov, after its fix went through,
+// by follow-ups for two commits from before it.
+//
 // On a machine that follows GitHub's main (follow-origin.ts) nothing can land:
 // bruce's and the Pixel's fix threads committed on their own main on 6 and 9
 // Nov, and each machine stopped following for days. There the thread hands
@@ -34,7 +40,8 @@ export type UpdateFailure = {
   logFile: string;
 };
 
-type State = { threadId: string; kind: UpdateFailure['kind']; commit: string };
+// queued: the turn id of the last follow-up, which may still be waiting.
+type State = { threadId: string; kind: UpdateFailure['kind']; commit: string; queued?: string };
 
 export type UpdateFixerDeps = {
   home: string;
@@ -43,8 +50,10 @@ export type UpdateFixerDeps = {
   start: (r: { text: string; title: string; why: string }) => string;
   // Whether a thread is still there and not archived.
   open: (threadId: string) => boolean;
-  // Queues a message to it.
-  send: (threadId: string, text: string) => void;
+  // Queues a message to it; returns its turn id.
+  send: (threadId: string, text: string) => string | void;
+  // Takes a queued message back if it hasn't started; whether it had.
+  unqueue?: (threadId: string, turnId: string) => boolean;
   // followOrigin in runner.json: main here is GitHub's, so nothing lands here.
   followsOrigin?: () => boolean;
   // The checkout it follows, to name in the thread's instructions.
@@ -82,8 +91,9 @@ export class UpdateFixer {
     const s = this.read();
     if (s && this.deps.open(s.threadId)) {
       if (s.commit === f.commit && s.kind === f.kind) return 'already';
-      this.deps.send(s.threadId, followUp(f, this.follows()));
-      this.write({ threadId: s.threadId, kind: f.kind, commit: f.commit });
+      this.takeBack(s);
+      const queued = this.deps.send(s.threadId, followUp(f, this.follows()));
+      this.write({ threadId: s.threadId, kind: f.kind, commit: f.commit, ...(queued ? { queued } : {}) });
       this.deps.log.info('told the fix-update thread about a newer failure', { threadId: s.threadId, commit: f.short });
       return 'sent';
     }
@@ -93,6 +103,25 @@ export class UpdateFixer {
     this.write({ threadId, kind: f.kind, commit: f.commit });
     this.deps.log.info('started a thread to fix a failed update', { threadId, commit: f.short, kind: f.kind });
     return 'started';
+  }
+
+  // When main gets through at commit (a release built, or up to date): a
+  // follow-up still waiting is about a commit before it.
+  through(commit: string): void {
+    const s = this.read();
+    if (!s?.queued) return;
+    if (this.takeBack(s)) this.deps.log.info('took back a fix-update follow-up main has got past', { threadId: s.threadId, commit });
+    const { queued: _q, ...rest } = s;
+    this.write(rest);
+  }
+
+  private takeBack(s: State): boolean {
+    if (!s.queued || !this.deps.unqueue) return false;
+    try {
+      return this.deps.unqueue(s.threadId, s.queued);
+    } catch {
+      return false;
+    }
   }
 
   private follows(): boolean {
@@ -142,6 +171,6 @@ This machine follows GitHub's main (followOrigin in runner.json), and nothing la
 }
 
 function followUp(f: UpdateFailure, follows: boolean): string {
-  if (follows) return `It failed again at a newer commit. ${what(f)}. The whole output is in ${f.logFile}. Carry on the same way: Never commit on main on this machine, and hand any fix to the main Mac. Archive this thread once the runner gets through.`;
-  return `It failed again at a newer commit. ${what(f)}. The whole output is in ${f.logFile}. Carry on the same way, and archive this thread once main goes through.`;
+  if (follows) return `It failed again at a newer commit. ${what(f)}. The whole output is in ${f.logFile}. Carry on the same way: Never commit on main on this machine, and hand any fix to the main Mac. Archive this thread once the runner gets through, or now if \`tb status\` says it already has, past this commit.`;
+  return `It failed again at a newer commit. ${what(f)}. The whole output is in ${f.logFile}. Carry on the same way, and archive this thread once main goes through, or now if \`tb status\` says it already has, past this commit.`;
 }

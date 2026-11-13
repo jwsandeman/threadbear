@@ -92,6 +92,8 @@ struct DevicesSettings: View {
         .onChange(of: app.connection) { _, state in if state == .connected { app.loadDevices() } }
         // The automation's {"cmd":"settings","pair":true}, for screenshots.
         .onChange(of: app.pairRequest) { pairPhone() }
+        // And {"cmd":"settings","pairDone":true} closes it, as Done does.
+        .onChange(of: app.pairDoneRequest) { pairingLink = nil }
         .sheet(isPresented: Binding(get: { pairingLink != nil }, set: { if !$0 { pairingLink = nil } })) {
             if let pairingLink { PairPhoneSheet(link: pairingLink) }
         }

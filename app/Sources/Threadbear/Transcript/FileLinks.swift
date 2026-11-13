@@ -179,8 +179,11 @@ final class FileLinkMenu: NSObject {
 
     @objc private func copyPath() {
         guard let path else { return }
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(path, forType: .string)
+        // The app's pasteboard, as its other Copy items use: a scripted
+        // run's own, so a script's copies leave Mike's clipboard be.
+        let pasteboard = AppModel.shared.pasteboard
+        pasteboard.clearContents()
+        pasteboard.setString(path, forType: .string)
     }
 }
 
@@ -312,7 +315,8 @@ final class WebLinkMenu: NSObject {
     }
 
     @objc private func copyLink() {
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(url.absoluteString, forType: .string)
+        let pasteboard = AppModel.shared.pasteboard
+        pasteboard.clearContents()
+        pasteboard.setString(url.absoluteString, forType: .string)
     }
 }

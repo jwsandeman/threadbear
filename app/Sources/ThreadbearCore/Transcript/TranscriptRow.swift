@@ -446,9 +446,12 @@ public struct AsksCard: Sendable, Hashable {
     /// The done card's loose ends, as the runner checked them (protocol
     /// "Loose ends"): nil when it didn't, empty when nothing's left.
     public var looseEnds: [LooseEnd]?
+    /// Review by another lab's findings and what the agent did about each.
+    public var review: LabReview?
 
-    public init(seq: Int, asks: [Ask], ticked: Set<Int> = [], isOpen: Bool = true, picks: [Int: Int] = [:], next: [String] = [], notes: [Int: AskNote] = [:], pickedNext: Set<Int> = [], explainNext: Set<Int> = [], looseEnds: [LooseEnd]? = nil) {
+    public init(seq: Int, asks: [Ask], ticked: Set<Int> = [], isOpen: Bool = true, picks: [Int: Int] = [:], next: [String] = [], notes: [Int: AskNote] = [:], pickedNext: Set<Int> = [], explainNext: Set<Int> = [], looseEnds: [LooseEnd]? = nil, review: LabReview? = nil) {
         self.seq = seq
+        self.review = review
         self.looseEnds = looseEnds
         self.notes = notes
         self.pickedNext = pickedNext

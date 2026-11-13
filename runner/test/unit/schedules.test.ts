@@ -562,7 +562,7 @@ test('a check\'s output survives a handover in the backend too, and is sent once
   };
   // Both releases share the runner's data dir, as in a real handover.
   const make = () => {
-    const s = new Scheduler({ runner: h.runner, home: h.home, clock: h.clock, log: nullLogger, zone: () => 'UTC', self: M5, syncOn: true, checksOn: () => true, runCheck });
+    const s = new Scheduler({ runner: h.runner, home: h.home, clock: h.clock, log: nullLogger, zone: () => 'UTC', self: M5, syncOn: true, runCheck });
     s.start();
     return s;
   };
@@ -596,7 +596,7 @@ test('a backend schedule deleted while its check runs sends nothing', async () =
   const h = makeHarness();
   const b = fakeBackend(h.clock, [M5]);
   let finish!: (r: { ok: true; output: string }) => void;
-  const s = new Scheduler({ runner: h.runner, home: h.home, clock: h.clock, log: nullLogger, zone: () => 'UTC', self: M5, syncOn: true, checksOn: () => true, runCheck: () => new Promise((r) => (finish = r)) });
+  const s = new Scheduler({ runner: h.runner, home: h.home, clock: h.clock, log: nullLogger, zone: () => 'UTC', self: M5, syncOn: true, runCheck: () => new Promise((r) => (finish = r)) });
   s.start();
   await s.attach(b.for('m5', M5.id));
   const sc = await s.create({ text: 'Look', title: 'Fork watch', cron: '*/5 * * * *', check: 'fork-watch' });
@@ -617,7 +617,7 @@ test('a backend run uses the schedule as it is once its claim comes back, not as
   const b = fakeBackend(h.clock, [M5]);
   const seen: string[] = [];
   const s = new Scheduler({
-    runner: h.runner, home: h.home, clock: h.clock, log: nullLogger, zone: () => 'UTC', self: M5, syncOn: true, checksOn: () => true,
+    runner: h.runner, home: h.home, clock: h.clock, log: nullLogger, zone: () => 'UTC', self: M5, syncOn: true,
     runCheck: async (p) => {
       seen.push(p.command);
       return { ok: true, output: '' };
@@ -831,7 +831,7 @@ for (const how of ['secondary', 'owner'] as const) {
     const h = makeHarness();
     const b = fakeBackend(h.clock, [M5, BRUCE]);
     let finish: ((r: { ok: true; output: string }) => void) | undefined;
-    const s = new Scheduler({ runner: h.runner, home: h.home, clock: h.clock, log: nullLogger, zone: () => 'UTC', self: M5, syncOn: true, checksOn: () => true, runCheck: () => new Promise((r) => (finish = r)) });
+    const s = new Scheduler({ runner: h.runner, home: h.home, clock: h.clock, log: nullLogger, zone: () => 'UTC', self: M5, syncOn: true, runCheck: () => new Promise((r) => (finish = r)) });
     s.start();
     await s.attach(b.for('m5', M5.id));
     const sc = await s.create({ text: 'Benign', title: 'BENIGN JOB', cron: '*/5 * * * *', check: 'news-check', permissionMode: 'ask' });

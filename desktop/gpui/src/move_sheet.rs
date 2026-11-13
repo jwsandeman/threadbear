@@ -1,5 +1,5 @@
 // The Move sheet (MoveSheet.swift) and the Move to menu's path through
-// AppModel+Moves.swift, for the `moveToRunner` experiment. A move that can just
+// AppModel+Moves.swift. A move that can just
 // go (threads.movePreview says nothing's in the way) goes straight away; the
 // sheet is for a problem or something that won't come, and it asks the other
 // runner again as the folder or login changes, so what it says can't be done
@@ -12,7 +12,6 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::popover::Popover;
 use gpui_kit::component::spinner::Spinner;
-use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{h_flex, v_flex, ActiveTheme as _, Disableable as _, Icon, Selectable, Sizable as _, StyledExt as _, WindowExt as _};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
@@ -21,8 +20,10 @@ use crate::style::px;
 use serde_json::json;
 #[cfg(feature = "automation")]
 use serde_json::Value;
-use threadbear_client::runner::Status;
+use std::sync::Arc;
+use threadbear_client::runner::{Client, Status};
 use threadbear_core::remote::{MovePreview, RunnerInfo};
+use crate::tips::Tip as _;
 
 /// `AppModel.MoveRequest`: which thread, to which runner.
 #[derive(Clone)]
@@ -33,11 +34,6 @@ pub(crate) struct MoveRequest {
 }
 
 impl Threadbear {
-    /// The menu shows: the experiment's on here and there's somewhere to go.
-    pub(crate) fn can_move_threads(&self) -> bool {
-        self.remote.experiments.iter().any(|e| e == "moveToRunner")
-    }
-
     /// `moveTargets`: every runner but the one it's on, offline ones included
     /// so the menu can grey them.
     pub(crate) fn move_targets(&self, runner_id: Option<&str>) -> Vec<RunnerInfo> {
@@ -126,17 +122,24 @@ impl Threadbear {
     }
 
     /// Cancel on a moving row, before the thread has gone (`cancelMove`).
+    /// The banner says so until the runner answers, as the click came from
+    /// a menu, and a second Cancel meanwhile does nothing (`whileBusy(note:)`).
     pub(crate) fn cancel_move(&mut self, thread_id: String, cx: &mut Context<Self>) {
+        let key = format!("moveThread/{thread_id}");
+        if !self.begin_note(&key, "Cancelling the move…", cx) {
+            return;
+        }
         let client = self.client.clone();
         cx.spawn(async move |this, cx| {
             let res = call(client, "threads.moveCancel", json!({ "threadId": thread_id })).await;
-            if let Err(e) = res {
-                this.update(cx, |this, cx| {
+            this.update(cx, |this, cx| {
+                this.end_note(&key, cx);
+                if let Err(e) = res {
                     this.list_error = Some(e.message);
-                    cx.notify();
-                })
-                .ok();
-            }
+                }
+                cx.notify();
+            })
+            .ok();
         })
         .detach();
     }
@@ -147,7 +150,11 @@ impl Threadbear {
         let busy = self.threads.get(&request.thread_id).is_some_and(|t| t.busy());
         let app = cx.entity().downgrade();
         let app_for_close = app.clone();
-        let view = cx.new(|cx| MoveSheet::new(app, request, title, busy, answer, window, cx));
+        // Handed the client: the sheet asks the runner as it's made, inside
+        // this update, and reading it back from the app then is a double
+        // lease (Move to while the runner was away crashed the app).
+        let client = self.client.clone();
+        let view = cx.new(|cx| MoveSheet::new(app, client, request, title, busy, answer, window, cx));
         self.move_sheet = Some(view.clone());
         cx.notify();
         window.open_dialog(cx, move |dialog, _, _| {
@@ -172,6 +179,7 @@ impl Threadbear {
 /// The sheet's content (`MoveSheet`).
 pub(crate) struct MoveSheet {
     app: WeakEntity<Threadbear>,
+    client: Arc<Client>,
     request: MoveRequest,
     title: String,
     busy: bool,
@@ -190,14 +198,15 @@ pub(crate) struct MoveSheet {
 }
 
 impl MoveSheet {
-    fn new(app: WeakEntity<Threadbear>, request: MoveRequest, title: String, busy: bool, answer: Option<MovePreview>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    #[allow(clippy::too_many_arguments)]
+    fn new(app: WeakEntity<Threadbear>, client: Arc<Client>, request: MoveRequest, title: String, busy: bool, answer: Option<MovePreview>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let folder = cx.new(|cx| InputState::new(window, cx).placeholder(format!("Folder on {}", request.runner_name)));
         let sub = cx.subscribe_in(&folder, window, |this, _, ev: &InputEvent, window, cx| {
             if matches!(ev, InputEvent::PressEnter { .. }) {
                 this.ask(window, cx);
             }
         });
-        let mut sheet = MoveSheet { app, request, title, busy, preview: None, asking: false, folder, login: String::new(), guessed_folder: String::new(), guessed_login: String::new(), filled: false, asks: 0, _subs: vec![sub] };
+        let mut sheet = MoveSheet { app, client, request, title, busy, preview: None, asking: false, folder, login: String::new(), guessed_folder: String::new(), guessed_login: String::new(), filled: false, asks: 0, _subs: vec![sub] };
         match answer {
             // Opened with the runner's answer in hand (`request.answer`).
             Some(known) => sheet.apply(known, None, None, window, cx),
@@ -226,7 +235,7 @@ impl MoveSheet {
         }
         self.asking = true;
         cx.notify();
-        let Some(client) = self.app.upgrade().map(|a| a.read(cx).client.clone()) else { return };
+        let client = self.client.clone();
         cx.spawn_in(window, async move |this, cx| {
             let answer = call(client, "threads.movePreview", params).await;
             this.update_in(cx, |this, window, cx| {
@@ -350,30 +359,24 @@ impl MoveSheet {
         let accounts = self.preview.as_ref().map(|p| p.accounts.clone()).unwrap_or_default();
         let current = accounts.iter().find(|a| a.id == self.login).map_or_else(|| self.login.clone(), |a| a.label());
         let sheet = cx.entity().downgrade();
-        Popover::new("move-login")
+        style::menu::popover(Popover::new("move-login"), cx)
             .anchor(Anchor::BottomLeft)
             .trigger(MoveLoginTrigger { label: current.into() })
             .content(move |_, _window, cx| {
                 let popover = cx.entity();
-                v_flex().w(px(300.)).p(px(4.)).children(accounts.iter().enumerate().map(|(i, account)| {
+                // A menu, drawn as the app's are (style::menu).
+                v_flex().w(gpui_kit::px(300.)).children(accounts.iter().enumerate().map(|(i, account)| {
                     let (popover, sheet, id) = (popover.clone(), sheet.clone(), account.id.clone());
                     let on = sheet.upgrade().is_some_and(|s| s.read(cx).login == account.id);
-                    h_flex()
-                        .id(("move-login", i))
-                        .gap(px(8.))
-                        .px(px(10.))
-                        .py(px(6.))
-                        .rounded(px(6.))
-                        .cursor_pointer()
-                        .hover(|s| s.bg(style::hover_fill(cx)))
+                    style::menu::row(("move-login", i), None, cx)
                         .on_click(move |_, window, cx| {
                             popover.update(cx, |s, cx| s.dismiss(window, cx));
                             if let Some(sheet) = sheet.upgrade() {
                                 sheet.update(cx, |s, cx| s.set_login(id.clone(), window, cx));
                             }
                         })
-                        .child(div().flex_1().min_w_0().truncate().text_size(px(size::LABEL)).child(account.label()))
-                        .when(on, |s| s.child(Icon::from(gpui_kit::assets::IconName::Check).with_size(px(14.))))
+                        .child(div().flex_1().min_w_0().truncate().child(account.label()))
+                        .when(on, |s| s.child(style::menu::tick(cx)))
                 }))
             })
     }
@@ -407,7 +410,7 @@ impl RenderOnce for MoveLoginTrigger {
             .border_color(style::hairline(cx))
             .bg(style::button_fill(cx))
             .cursor_pointer()
-            .tooltip(|window, cx| Tooltip::new("The login it carries on with there").build(window, cx))
+            .tip("The login it carries on with there")
             .child(div().flex_1().min_w_0().truncate().text_size(px(size::LABEL)).child(self.label))
             .child(Icon::from(gpui_kit::assets::IconName::ChevronDown).with_size(px(11.)).text_color(style::faint_icon(cx)))
     }
@@ -441,7 +444,7 @@ impl Render for MoveSheet {
                             .gap(px(10.))
                             .items_center()
                             .child(label("Folder"))
-                            .child(div().id("move-folder").flex_1().min_w_0().tooltip(move |window, cx| Tooltip::new(folder_tip.clone()).build(window, cx)).child(Input::new(&self.folder).small().font_family(cx.theme().mono_font_family.clone()))),
+                            .child(div().id("move-folder").flex_1().min_w_0().tip(folder_tip.clone()).child(Input::new(&self.folder).small().font_family(cx.theme().mono_font_family.clone()))),
                     )
                     .child(h_flex().gap(px(10.)).items_center().child(label("Login")).child(div().flex_1().min_w_0().child(login_picker))),
             )
@@ -484,6 +487,11 @@ pub(crate) fn automation(app: &Entity<Threadbear>, cmd: &Value, window: &mut Win
         Some(id) => app.read(cx).thread_id_from(id)?,
         None => app.read(cx).selected.clone().ok_or("no thread open")?,
     };
+    // `cancel: true`: the row's Cancel Move.
+    if cmd["cancel"].as_bool() == Some(true) {
+        app.update(cx, |t, cx| t.cancel_move(thread_id.clone(), cx));
+        return Ok(json!(format!("ok {thread_id}")));
+    }
     let want = cmd["runner"].as_str().unwrap_or("").to_lowercase();
     let runner_id_of_thread = app.read(cx).threads.get(&thread_id).and_then(|t| t.runner_id.clone());
     let runner = app.read(cx).move_targets(runner_id_of_thread.as_deref()).into_iter().find(|r| r.name.to_lowercase() == want || r.id == want).ok_or_else(|| format!("no runner {want} to move it to"))?;

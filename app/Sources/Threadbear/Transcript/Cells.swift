@@ -347,8 +347,8 @@ final class TextRowCell: RowCellView {
         phoneMark.target = self
         phoneMark.action = #selector(phoneClicked)
         phoneMark.isHidden = true
-        phoneMark.setTip("Sent from the iPhone app")
-        phoneMark.setAccessibilityLabel("Sent from the iPhone app")
+        phoneMark.setTip("Sent from the phone app")
+        phoneMark.setAccessibilityLabel("Sent from the phone app")
         addSubview(phoneMark)
         footerTip.isHidden = true
         addSubview(footerTip)
@@ -1278,7 +1278,10 @@ final class GapRowCell: RowCellView {
         let (x, width) = RowMetrics.column(for: row, tableWidth: tableWidth)
         label.font = Theme.smallFont
         label.textColor = Theme.faintText
-        label.stringValue = gap.label
+        // One line: a label holding a line break measured every line, so its
+        // frame outgrew the row and the clipped middle of a commit message
+        // showed instead of the first line (thread a92fcf9a).
+        label.stringValue = gap.labelLine
         label.setTip(Self.tip(gap))
         let space = zoomed(12)
         // The words never take more than the column less a short rule each side.

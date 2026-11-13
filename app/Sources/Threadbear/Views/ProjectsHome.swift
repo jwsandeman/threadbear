@@ -8,10 +8,15 @@ import ThreadbearCore
 /// project's page; the sidebar's Projects view lists the threads.
 struct ProjectsHome: View {
     @Environment(AppModel.self) private var app
+    /// It's kept built while hidden (DetailView, `keptAlive`).
+    var shown = true
+    /// While hidden it draws the sections as they were when it was hidden,
+    /// as ProjectsList does, so thread changes elsewhere don't rebuild it.
+    @State private var frozen: ProjectSections?
 
     var body: some View {
         @Bindable var app = app
-        let sections = app.projectSections
+        let sections = !shown ? frozen ?? app.projectSections : app.projectSections
         // With the projectDecisions experiment on, each card says how many
         // decisions its threads are waiting on.
         let all = ProjectCard.build(sections, decisions: app.projectDecisionsOn)
@@ -39,7 +44,7 @@ struct ProjectsHome: View {
                         .layoutPriority(1)
                         // Return opens the top result, Escape clears, so a
                         // project is a few keys away from this page.
-                        .onSubmit { if searching, let first = cards.first { app.openProjectPage(first.project.id) } }
+                        .onSubmit { if shown, searching, let first = cards.first { app.openProjectPage(first.project.id) } }
                         .onExitCommand { app.projectSearchQuery = "" }
                     Button { app.newProject(with: nil) } label: {
                         Label("New project", systemImage: "plus")
@@ -74,6 +79,7 @@ struct ProjectsHome: View {
             .padding(.bottom, zoomed(48))
             .frame(maxWidth: .infinity)
         }
+        .onChange(of: shown) { _, now in frozen = now ? nil : app.projectSections }
     }
 
     /// "4 projects · 3 decisions · 2 working · 1 needs you", each thread
@@ -110,6 +116,16 @@ private struct ProjectCardView: View {
                         .foregroundStyle(.primary)
                         .lineLimit(1)
                     StatusLine(card: card, now: app.now)
+                    // Its parts are inside its card rather than cards of their
+                    // own (docs/protocol.md, Projects, "Parts"); its page lists
+                    // them with their state.
+                    if !card.parts.isEmpty {
+                        Label(card.parts.map(\.title).joined(separator: " · "), systemImage: "square.stack")
+                            .font(.system(size: TypeScale.sidebarMeta + 1))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .labelStyle(.titleAndIcon)
+                    }
                     if !card.project.state.isEmpty {
                         Text(Self.firstLines(card.project.state))
                             .font(.system(size: TypeScale.label))

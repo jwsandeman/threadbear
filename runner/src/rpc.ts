@@ -147,7 +147,7 @@ export type RpcServerOptions = {
   // hello's `updates` (docs/protocol.md, "Runner updates").
   updates?: () => unknown;
   // The Mac app's hello with its build (docs/protocol.md, "App restarts").
-  appHello?: (build: { commit: string; short: string; tree: string }) => void;
+  appHello?: (build: { commit: string; short: string; tree: string }, app: 'mac' | 'desktop') => void;
   // What a connection that belongs to a thread may do (rpc-gate.ts).
   gate?: CallerGate;
   // The thread whose CLI a client port's process runs under, if any
@@ -560,11 +560,13 @@ export class RpcServer {
         conn.clientVersion = typeof p.version === 'string' ? p.version : undefined;
         conn.clientPid = typeof p.pid === 'number' ? p.pid : undefined;
         conn.browserPanel = conn.caller === undefined && p.browserPanel === true;
-        // Only the Mac app's own builds: a dev build has none.
+        // Only the Mac apps' own builds, the Swift app's and the GPUI app's,
+        // each followed on its own: a dev build has none.
         const build = p.build as Record<string, unknown> | undefined;
-        if (conn.client === 'threadbear-mac' && build && typeof build === 'object'
+        const app = conn.client === 'threadbear-mac' ? 'mac' : conn.client === 'threadbear-desktop' ? 'desktop' : undefined;
+        if (app && build && typeof build === 'object'
           && typeof build.commit === 'string' && typeof build.short === 'string' && typeof build.tree === 'string' && build.tree) {
-          this.opts.appHello?.({ commit: build.commit, short: build.short, tree: build.tree });
+          this.opts.appHello?.({ commit: build.commit, short: build.short, tree: build.tree }, app);
         }
         const updates = this.opts.updates?.();
         // The experiments on here, for the app to show what's theirs (the
@@ -691,6 +693,10 @@ export class RpcServer {
           if (typeof p.carryOnAtReset !== 'boolean') throw bad('carryOnAtReset must be a boolean');
           upd.carryOnAtReset = p.carryOnAtReset;
         }
+        if (p.carryOn !== undefined) {
+          if (typeof p.carryOn !== 'boolean') throw bad('carryOn must be a boolean');
+          upd.carryOn = p.carryOn;
+        }
         return r.update(upd);
       }
       case 'threads.retitle': {
@@ -755,7 +761,7 @@ export class RpcServer {
       case 'threads.panelShown':
         return r.panelShown(reqString(p, 'threadId'), reqString(p, 'requestId'));
       case 'threads.showPanel':
-        return r.showPanel(reqString(p, 'threadId'), { panel: reqString(p, 'panel') }).then(result => ({ available: true, ...result }));
+        return r.showPanel(reqString(p, 'threadId'), { panel: reqString(p, 'panel'), ...(p.reload === true ? { reload: true } : {}) }).then(result => ({ available: true, ...result }));
       case 'threads.share': {
         const access = reqString(p, 'access');
         if (access !== 'off' && access !== 'link') throw bad('access is "off" or "link"');

@@ -1066,11 +1066,11 @@ Today that's four Claude logins and one Codex login (ChatGPT Pro Lite). Nothing 
 3. `.claude.json`, for Claude;
 4. the id.
 
-`limits.json`'s email wins over `.claude.json`'s because it comes from the profile endpoint. `~/.claude.json` once held a stale gmail address for the cannstudios login.
+`limits.json`'s email wins over `.claude.json`'s because it comes from the profile endpoint. `~/.claude.json` once held a stale gmail address for the studio login.
 
 `limits.json` names providers with capitals (`"Claude"`, `"Codex"`), writes `configDir` as `~/.codex` or a full path, and also lists Grok and Muse. Compare providers without case, and skip any provider Threadbear doesn't run.
 
-Codex titles get the "Codex · " prefix (see Contracts). `codex-main` and `claude-1` are both `mike.cann@gmail.com` in `limits.json`, and an old app would otherwise show two identical entries.
+Codex titles get the "Codex · " prefix (see Contracts). `codex-main` and `claude-1` are both `mike@example.net` in `limits.json`, and an old app would otherwise show two identical entries.
 
 **Wiring.** `AccountRegistry` takes the `UsageStore`, so `list()` carries each account's `usage`, and gains `onChange(fn)`, fired when a rescan finds a different list. C does the timing and the throttle.
 
@@ -1304,7 +1304,7 @@ Plain copy: no eyebrow or kicker labels, no em dashes. Build against the mock ru
 
 **Account names.** `AccountName` becomes provider-aware, built from `email` plus `provider` rather than `title`.
 
-- claude-1 and codex-main are both `mike.cann@gmail.com` today, so the clash check runs within a provider only.
+- claude-1 and codex-main are both `mike@example.net` today, so the clash check runs within a provider only.
 - A Codex account's short label is "Codex" when there's one Codex login, and "Codex mike.cann" when there are several.
 
 **Sidebar rows.** These keep today's rule of showing the account label only when it isn't the main account. Every Codex row then says "Codex", and Claude rows don't change. There's no separate provider badge.
@@ -1350,7 +1350,7 @@ The app never polls. It redraws relative times once a minute.
 
 **Update messages.** These use the existing quiet line under the toolbar: "Updating Claude Code to 2.1.312", "Installing Codex 0.165.0". A failure stays until it's dismissed.
 
-**Limit errors.** When a turn fails with `errorKind: "usageLimit"`, or the account is `blocked`, the error row gets a button like "Switch to gangbusters (78% left)".
+**Limit errors.** When a turn fails with `errorKind: "usageLimit"`, or the account is `blocked`, the error row gets a button like "Switch to org (78% left)".
 
 - It calls `threads.update` with the account that has the most room, same provider first.
 - `contextWindow` and `auth` get their own plain sentences, with no button.

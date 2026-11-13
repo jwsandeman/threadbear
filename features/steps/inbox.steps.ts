@@ -71,3 +71,8 @@ When('I archive the open thread', async function (this: ThreadbearWorld) {
 When('I hibernate the open thread for an hour', async function (this: ThreadbearWorld) {
   await this.app.do({ cmd: 'snooze', seconds: 3600 });
 });
+
+Given('the librarian filed {string} under {string}', async function (this: ThreadbearWorld, title: string, keywords: string) {
+  await this.until(`a thread called "${title}"`, (d) => this.thread(d, title));
+  await this.app.do({ cmd: 'mock', method: 'keywords', params: { title, keywords } });
+});

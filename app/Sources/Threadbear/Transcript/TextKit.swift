@@ -709,13 +709,14 @@ final class TranscriptTextView: NSTextView {
             // The thread this transcript is, so the command only ever goes to
             // that thread's own shell (AppModel.putInTerminal(_:from:)).
             AppModel.shared.putInTerminal(ShellBlock(command: hit.command), from: transcriptThreadId) { [weak self] outcome in
-                guard outcome == .busy, let self else { return }
-                // Nothing typed over a running program or someone's own
-                // half-typed line, and the command isn't lost.
+                guard outcome == .busy || outcome == .occupied, let self else { return }
+                // Nothing typed over a running program, someone's own
+                // half-typed line or another command, and it isn't lost.
                 ShellBlockIcons.clearPressed(.put, hit.command)
                 ShellBlockIcons.copy(hit.command)
                 self.setNeedsDisplay(hit.rect)
-                CopiedBubble.show(above: hit.rect, in: self, text: "Terminal's in use, so it's copied")
+                let why = outcome == .busy ? "Terminal's in use, so it's copied" : "Another command's waiting for Return, so it's copied"
+                CopiedBubble.show(above: hit.rect, in: self, text: why)
             }
         }
     }
@@ -749,8 +750,8 @@ final class TranscriptTextView: NSTextView {
         case .drawn: RichBlocks.shared.setShowsSource(block.id, false)
         case .source: RichBlocks.shared.setShowsSource(block.id, true)
         case .copy:
-            NSPasteboard.general.clearContents()
-            NSPasteboard.general.setString(block.source, forType: .string)
+            RichBlockCell.pasteboard.clearContents()
+            RichBlockCell.pasteboard.setString(block.source, forType: .string)
         case .open:
             RichRenderer.shared.openWindow(block)
         }
@@ -808,6 +809,33 @@ final class TranscriptTextView: NSTextView {
         let changed = newSize.width != frame.width
         super.setFrameSize(newSize)
         if changed { placeRichTips() }
+    }
+
+    /// The kind of card button under a click, for the activity log
+    /// (ActivityRecorder): "archive", "next", "explain". Only the name
+    /// before any ":", never what follows, which can be an answer's index
+    /// or a page; and only a plain word, so no text of a card gets out.
+    func activityAction(atWindow windowPoint: NSPoint) -> String? {
+        let point = convert(windowPoint, from: nil)
+        guard let action = row(at: point)?.action ?? character(at: point).flatMap({ textStorage?.attribute(.tbAction, at: $0, effectiveRange: nil) as? String }) else { return nil }
+        let name = action.split(separator: ":", maxSplits: 1).first.map(String.init) ?? ""
+        return name.range(of: "^[a-z][a-z-]{0,30}$", options: .regularExpression) != nil ? name : nil
+    }
+
+    /// Where the first run with this `.tbAction` is drawn, in window
+    /// coordinates (scripted runs only: Automation's activity command).
+    func windowPoint(ofAction action: String) -> NSPoint? {
+        guard let storage = textStorage, let layoutManager, let textContainer else { return nil }
+        var found: NSRange?
+        storage.enumerateAttribute(.tbAction, in: NSRange(location: 0, length: storage.length)) { value, range, stop in
+            if value as? String == action { found = range; stop.pointee = true }
+        }
+        guard let found else { return nil }
+        let glyphs = layoutManager.glyphRange(forCharacterRange: found, actualCharacterRange: nil)
+        var rect = layoutManager.boundingRect(forGlyphRange: glyphs, in: textContainer)
+        rect.origin.x += textContainerOrigin.x
+        rect.origin.y += textContainerOrigin.y
+        return convert(NSPoint(x: rect.midX, y: rect.midY), to: nil)
     }
 
     private func character(at point: NSPoint) -> Int? {
@@ -1217,6 +1245,62 @@ final class TranscriptTextView: NSTextView {
         return fileLinkMenu(atCharacter: range.location)
     }
 
+    /// The first link whose words have `words`, followed as a click on it
+    /// is, with ⌘ held or not (`followLink` reads the key from the event,
+    /// which a script's call has none of). False when there's no such link.
+    func debugFollowLink(_ words: String, commandKey: Bool) -> Bool {
+        guard let storage = textStorage else { return false }
+        let found = (storage.string as NSString).range(of: words)
+        guard found.location != NSNotFound, let link = storage.attribute(.link, at: found.location, effectiveRange: nil) else { return false }
+        forItsThread {
+            let app = AppModel.shared
+            if let url = link as? URL, let text = FilePathRefs.text(of: url) {
+                _ = app.openTranscriptPathRef(text, commandKey: commandKey)
+            } else if let url = link as? URL, url.isFileURL {
+                _ = app.openTranscriptFileLink(url, commandKey: commandKey)
+            } else if let web = webURL(link) {
+                // A real click hands a page for the browser to AppKit; the
+                // gate's open goes to the same browser, and a scripted app's
+                // gate opens nothing (`opened`).
+                if !commandKey, WebLinkAction.click == .panel { _ = app.openTranscriptWebLink(web, .panel) } else { app.openExternally(web) }
+            } else if let text = Self.relativeTarget(link) {
+                _ = app.openTranscriptPathRef(text, commandKey: commandKey)
+            } else {
+                openOtherLink(link)
+            }
+        }
+        return true
+    }
+
+    /// Where each draft's header is (DraftBlockCell), in order.
+    private func debugDraftHeaders() -> [Int] {
+        guard let storage = textStorage else { return [] }
+        var found: [Int] = []
+        storage.enumerateAttribute(.attachment, in: NSRange(location: 0, length: storage.length)) { value, range, _ in
+            if (value as? NSTextAttachment)?.attachmentCell is DraftBlockCell { found.append(range.location) }
+        }
+        return found
+    }
+
+    func debugDraftCount() -> Int { debugDraftHeaders().count }
+
+    /// A real press on the `index`-th draft's Copy, through mouseDown: the
+    /// copy, the Copied button and the bubble, as a click gives them.
+    func debugCopyDraft(_ index: Int) -> Bool {
+        let headers = debugDraftHeaders()
+        guard index < headers.count, let layoutManager, let textContainer, let window else { return false }
+        layoutManager.ensureLayout(for: textContainer)
+        let frame = richFrame(glyph: layoutManager.glyphIndexForCharacter(at: headers[index]))
+        guard let cell = (textStorage?.attribute(.attachment, at: headers[index], effectiveRange: nil) as? NSTextAttachment)?.attachmentCell as? DraftBlockCell
+        else { return false }
+        let button = cell.button(in: frame)
+        let spot = convert(NSPoint(x: button.midX, y: button.midY), to: nil)
+        guard let down = NSEvent.mouseEvent(with: .leftMouseDown, location: spot, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                                            windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1) else { return false }
+        mouseDown(with: down)
+        return cell.wasJustCopied()
+    }
+
     func debugClickChip(_ word: String) {
         guard let chip = debugChip(word) else { return }
         closeChipCard()
@@ -1357,7 +1441,8 @@ final class TranscriptTextView: NSTextView {
         case .copy:
             let range = selectedRange()
             guard let storage = textStorage, NSMaxRange(range) <= storage.length else { return }
-            _ = Self.write(text, html: storage.attributedSubstring(from: range), to: .general)
+            // The app's pasteboard (a scripted run's own), as its Copy items use.
+            _ = Self.write(text, html: storage.attributedSubstring(from: range), to: app.pasteboard)
         }
     }
 

@@ -14,13 +14,35 @@ import ThreadbearCore
 struct DecisionsSection: View {
     @Environment(AppModel.self) private var app
     let project: Project
+    /// In the page's Decisions tab: the tab names it, so no heading, and
+    /// when they've all been answered it says so where it is, with a way to
+    /// the Project tab, rather than the page jumping away under the pointer.
+    var tabbed = false
 
     var body: some View {
-        let section = app.projectSections.sections.first { $0.id == project.id }
-        let threads = ProjectDecisions.threads(section?.threads ?? [])
-        if !threads.isEmpty {
+        let built = app.projectSections
+        let section = built.sections.first { $0.id == project.id }
+        // A parent's page gathers its parts' decisions too, as its row counts them.
+        let threads = ProjectDecisions.threads(section.map(built.threadsWithParts) ?? [])
+        if threads.isEmpty, tabbed {
+            HStack(spacing: zoomed(6)) {
+                Text("Nothing waiting.")
+                    .foregroundStyle(Color(nsColor: Theme.faintText))
+                Button("Show the project") { app.pickProjectTab(project.id, .project) }
+                    .buttonStyle(.link)
+                    .tip("Its goals, state, notes and threads")
+            }
+            .font(.system(size: TypeScale.label))
+            .padding(.top, zoomed(4))
+        } else if !threads.isEmpty {
             VStack(alignment: .leading, spacing: zoomed(12)) {
-                PageHeading(title: "Decisions", detail: ProjectDecisions.heading(decisions: ProjectDecisions.count(threads), threads: threads.count))
+                if tabbed {
+                    Text(ProjectDecisions.heading(decisions: ProjectDecisions.count(threads), threads: threads.count))
+                        .font(.system(size: TypeScale.small))
+                        .foregroundStyle(Color(nsColor: Theme.faintText))
+                } else {
+                    PageHeading(title: "Decisions", detail: ProjectDecisions.heading(decisions: ProjectDecisions.count(threads), threads: threads.count))
+                }
                 ForEach(threads) { thread in
                     DecisionCard(thread: thread)
                         .transition(.opacity.combined(with: .move(edge: .top)))
@@ -72,7 +94,7 @@ private struct DecisionCard: View {
                     Spacer(minLength: zoomed(8))
                     openButton
                 }
-                if let line = ProjectDecisions.recapLine(thread) {
+                if let line = ProjectDecisions.statusLine(thread) {
                     Text(line)
                         .font(.system(size: TypeScale.detail))
                         .foregroundStyle(.secondary)

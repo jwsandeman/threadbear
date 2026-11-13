@@ -65,7 +65,9 @@ function cell(column, row) {
   let seen = false;
   let pending = false;
   for (const s of covering) {
-    if (s.tags.includes(`${column.app}-pending`) || s.tags.includes('manual')) {
+    // @linux-pending and the like: the GPUI app on that system only.
+    const os = column.app === 'gpui' ? column.key.slice('gpui-'.length) : undefined;
+    if (s.tags.includes(`${column.app}-pending`) || (os && s.tags.includes(`${os}-pending`)) || s.tags.includes('manual')) {
       pending = true;
       continue;
     }

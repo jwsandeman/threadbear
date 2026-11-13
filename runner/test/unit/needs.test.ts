@@ -462,3 +462,47 @@ test('a command on an ask has to be what it looks like', () => {
     assert.equal(asks(bad)?.[0].run, undefined);
   }
 });
+
+// Thread dcdc60a3 (11 Nov 2026), and Codex's review of the fix: a notice
+// handed over in a batch with a one-reply end_turn's "Now write your reply",
+// before or after it, leaves the reply that follows as that reply; only a
+// tool call after it is the agent acting on the notice.
+test('WakeRead: a notice handed over with "Now write your reply" opens the turn only at a call', async () => {
+  const { WakeRead, oneReplyAccepted } = await import('../../src/needs.ts');
+  const note = { type: 'system.note', wake: true as const };
+  const endTurn = { type: 'tool.result', itemId: 'e1', ok: true, text: oneReplyAccepted(true) };
+  const other = { type: 'tool.result', itemId: 'b1', ok: true, text: 'ok' };
+  const reply = { type: 'assistant.text', itemId: 'm1' };
+  const call = { type: 'tool.call', itemId: 'c1' };
+  const calls = (w: InstanceType<typeof WakeRead>) => {
+    w.see({ type: 'tool.call', itemId: 'e1', name: END_TURN_FULL_NAME });
+    w.see({ type: 'tool.call', itemId: 'b1', name: 'Bash' });
+  };
+  for (const batch of [[note, endTurn], [note, other, endTurn], [endTurn, note, other], [other, note, endTurn]]) {
+    const w = new WakeRead();
+    calls(w);
+    for (const e of batch) assert.equal(w.see(e), false);
+    assert.equal(w.see({ type: 'reasoning', itemId: 'r1' }), false);
+    assert.equal(w.see(reply), false, JSON.stringify(batch));
+    assert.equal(w.see(call), true);
+  }
+  // Without it, the first step after the batch opens it, as before.
+  const w = new WakeRead();
+  w.see(note);
+  w.see(other);
+  assert.equal(w.see(reply), true);
+  // A command's output that quotes the answer isn't end_turn's.
+  const q = new WakeRead();
+  calls(q);
+  q.see(note);
+  q.see({ ...other, text: endTurn.text });
+  assert.equal(q.see(reply), true);
+  // An end_turn answer from an earlier batch doesn't carry over.
+  const v = new WakeRead();
+  calls(v);
+  v.see(endTurn);
+  v.see(reply);
+  v.see(note);
+  v.see(other);
+  assert.equal(v.see({ type: 'assistant.text', itemId: 'm2' }), true);
+});

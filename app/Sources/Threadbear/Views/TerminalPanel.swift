@@ -61,8 +61,19 @@ final class Terminals {
 
     private func stop(_ key: TerminalKey) {
         guard let s = sessions.removeValue(forKey: key) else { return }
+        noteEnding(s)
         s.stop()
         generation += 1
+    }
+
+    /// Shells let go but maybe not ended yet: SwiftTerm's own SIGTERM and
+    /// SIGKILL come a while after, and go with the app if it quits first, so
+    /// `endAllNow` ends these too (Codex's review, 11 Nov: archive, then quit).
+    @ObservationIgnored private var ending: [(pid: pid_t, born: TerminalSession.Born)] = []
+
+    private func noteEnding(_ session: TerminalSession) {
+        ending.removeAll { TerminalSession.born($0.pid) != $0.born }
+        if let shell = session.runningShell { ending.append(shell) }
     }
 
     /// Called whenever the app's thread list changes: stops the shells of
@@ -78,15 +89,17 @@ final class Terminals {
     /// 10 Nov). The home shell now has a key of its own (TerminalKey.home)
     /// that no thread id can be, and only this Mac's own threads have
     /// shells of their own here, so only their summaries stop one.
-    func stopArchived(in threads: [String: ThreadSummary]) {
-        for key in Self.archived(Array(sessions.keys), in: threads) { stop(key) }
+    func stopArchived(in threads: [String: ThreadSummary], except unconfirmed: Set<String> = []) {
+        for key in Self.archived(Array(sessions.keys), in: threads, except: unconfirmed) { stop(key) }
     }
 
     /// Which of `keys` are shells of this Mac's threads that `threads`
-    /// says are archived. Never the home shell.
-    static func archived(_ keys: [TerminalKey], in threads: [String: ThreadSummary]) -> [TerminalKey] {
+    /// says are archived. Never the home shell, nor one whose archive the
+    /// runner hasn't agreed to yet (`unconfirmed`, AppModel.archivesInFlight).
+    static func archived(_ keys: [TerminalKey], in threads: [String: ThreadSummary],
+                         except unconfirmed: Set<String> = []) -> [TerminalKey] {
         keys.filter { key in
-            guard case .thread(let id) = key, let thread = threads[id] else { return false }
+            guard case .thread(let id) = key, let thread = threads[id], !unconfirmed.contains(id) else { return false }
             return !thread.isRemote && thread.isArchived
         }
     }
@@ -107,7 +120,10 @@ final class Terminals {
         }
     }
 
-    enum PutOutcome { case typed, alreadyThere, busy }
+    /// `busy` and `occupied` are copied instead: another program has the
+    /// terminal or someone's own text is on the prompt, or another command
+    /// put there is waiting for Return.
+    enum PutOutcome { case typed, alreadyThere, busy, occupied }
 
     /// Threads with a command on its way, so a second click while the shell
     /// is still starting doesn't queue another.
@@ -144,10 +160,8 @@ final class Terminals {
                 case .type:
                     session.put(block.command)
                     return done(.typed)
-                case .replaceLast:
-                    guard await session.clearLastPut() else { return done(.busy) }
-                    session.put(block.command)
-                    return done(.typed)
+                case .occupied:
+                    return done(.occupied)
                 case .alreadyThere:
                     return done(.alreadyThere)
                 case .busy:
@@ -157,11 +171,30 @@ final class Terminals {
         }
     }
 
+    /// Every shell as the app quits, as closing Terminal does: SIGHUP, and
+    /// then SIGTERM and SIGKILL for any still there, all within about half a
+    /// second and before the app goes, as nothing it starts outlives it. One
+    /// that ignores SIGHUP and SIGTERM and never reads its terminal (`trap ''
+    /// HUP TERM; while :; do :; done`) would otherwise go on after the app
+    /// (Codex's review, 11 Nov). Each signal only while the pid is still the
+    /// process that was started.
+    func endAllNow() {
+        let shells = sessions.values.compactMap(\.runningShell) + ending
+        let alive = { shells.contains { TerminalSession.born($0.pid) == $0.born } }
+        for (sig, wait) in [(SIGHUP, 0.4), (SIGTERM, 0.2), (SIGKILL, 0.1)] {
+            for shell in shells where TerminalSession.born(shell.pid) == shell.born { kill(shell.pid, sig) }
+            let until = Date().addingTimeInterval(wait)
+            while alive(), Date() < until { usleep(10_000) }
+            if !alive() { return }
+        }
+    }
+
     /// A new shell in place of one that has exited.
     func restart(_ key: TerminalKey) {
         guard let old = sessions[key] else { return }
         let fresh = TerminalSession(target: old.target)
         sessions[key] = fresh
+        noteEnding(old)
         old.stop()
         generation += 1
         focusTick += 1
@@ -216,15 +249,59 @@ final class PromptWatchingTerminalView: LocalProcessTerminalView {
         return nil
     }
 
+    /// ⌘V, the menus' Paste: the clipboard's text by the app's own rules.
     override func paste(_ sender: Any) {
+        pasteChecked(NSPasteboard.general.string(forType: .string) ?? "")
+    }
+
+    /// A paste of `text` (TerminalPut.pasteBytes): in brackets when the
+    /// program asked for them, without control characters when it hasn't,
+    /// and asked about first when a line break would run what's before it.
+    /// What's asked about is what's sent, never the clipboard read again.
+    /// Not SwiftTerm's own paste, which keeps some controls (^A, which
+    /// readline can have bound to accept-line) and, told the text isn't
+    /// safe, sends it anyway (Codex's review, 11 Nov).
+    func pasteChecked(_ text: String) {
+        guard !text.isEmpty, !pasteNow(text, asked: false) else { return }
+        #if DEBUG
+        // A scripted app never asks (no one would answer) and takes Cancel.
+        if Automation.instanceId != nil { return }
+        #endif
+        let question = TerminalPut.pasteQuestion(text)
+        let alert = NSAlert()
+        alert.messageText = question.title
+        alert.informativeText = question.detail
+        alert.addButton(withTitle: "Paste")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        _ = pasteNow(text, asked: true)
+    }
+
+    /// Sends `text` for the mode the program's in now, read once for both
+    /// the check and the bytes, unless it would run lines and that hasn't
+    /// been said yes to: false then, with nothing sent.
+    private func pasteNow(_ text: String, asked: Bool) -> Bool {
+        let bracketed = terminalStateSnapshot().bracketedPasteMode
+        if !bracketed, !asked, TerminalPut.pasteRuns(text) { return false }
         onText?()
-        super.paste(sender)
+        // To the bottom, as Terminal goes when you paste.
+        if canScroll { scroll(toPosition: 1) }
+        send(data: TerminalPut.pasteBytes(text, bracketed: bracketed)[...])
+        return true
     }
 
     /// Dictation and input methods. A key that lands here has been seen
     /// already (Terminals.watchKeys), and Return mustn't count as text.
+    /// More than one character at once with a control in it (a text
+    /// expander's snippet, dictated paragraphs) is a paste, not keys: each
+    /// line break would be Return and run the line before it.
     override func insertText(_ string: Any, replacementRange: NSRange) {
         let text = (string as? String) ?? (string as? NSAttributedString)?.string
+        if let text, TerminalPut.isBulkText(text) {
+            unmarkText()
+            pasteChecked(text)
+            return
+        }
         if text != "\r", text != "\n" { onText?() }
         super.insertText(string, replacementRange: replacementRange)
     }
@@ -283,6 +360,10 @@ final class TerminalSession: NSObject, LocalProcessTerminalViewDelegate {
     private(set) var exited = false
     private(set) var title = ""
     @ObservationIgnored let startedAt = Date()
+    /// The shell's program, links followed, which has to be what owns the
+    /// terminal before anything's typed there.
+    @ObservationIgnored private var shellProgram: String?
+    @ObservationIgnored private var shellBorn: Born?
     /// How long a new shell may take to reach its first prompt, after
     /// which it's treated as busy and the command is copied.
     static let startingFor: TimeInterval = 10
@@ -311,7 +392,9 @@ final class TerminalSession: NSObject, LocalProcessTerminalViewDelegate {
         // A login shell ("-zsh" as its name), so it reads your profile and
         // has the PATH Terminal gives you, which an app's own doesn't.
         let name = "-" + (shell as NSString).lastPathComponent
+        shellProgram = TerminalPut.realPath(shell)
         view.startProcess(executable: shell, args: [], environment: Self.environment(), execName: name, currentDirectory: target.cwd)
+        shellBorn = (view.process?.shellPid).flatMap { $0 > 0 ? Self.born($0) : nil }
     }
 
     static func environment(from base: [String: String] = ProcessInfo.processInfo.environment) -> [String] {
@@ -344,44 +427,71 @@ final class TerminalSession: NSObject, LocalProcessTerminalViewDelegate {
     /// What putting `block` in this shell should do now (TerminalPut).
     func putStep(for block: ShellBlock, now: Date = Date()) -> TerminalPut.Step {
         let state = view.terminalStateSnapshot()
-        return TerminalPut.step(for: block, shellInFront: shellInFront, bracketedPaste: state.bracketedPasteMode,
+        return TerminalPut.step(for: block, shellInFront: shellAloneInFront, bracketedPaste: state.bracketedPasteMode,
                                 starting: now.timeIntervalSince(startedAt) < Self.startingFor, line: promptLine)
     }
 
     /// Pasted as the terminal's own paste is: bracketed where the shell
     /// asked for that, so a newline in it doesn't run anything.
     func put(_ text: String) {
-        view.pasteText(text)
+        // Only ever typed while the shell has asked for brackets (putStep).
+        if view.canScroll { view.scroll(toPosition: 1) }
+        view.send(data: TerminalPut.pasteBytes(text, bracketed: true)[...])
         promptLine = .put(text)
     }
 
-    /// Deletes the last command put here, which is known to be everything
-    /// on the prompt with the cursor at its end (TerminalPut.Line.put).
-    /// Ctrl-U clears a line in zsh, bash and fish, but zsh and fish take it
-    /// a line of a multi-line paste at a time, and fish needs a second go
-    /// to remove each newline; any extra ones land on an empty prompt and
-    /// do nothing. Says whether it went, so a shell with its keys rebound
-    /// doesn't end up with two commands run together.
-    func clearLastPut() async -> Bool {
-        guard case .put(let text) = promptLine else { return false }
-        let lines = text.split(separator: "\n", omittingEmptySubsequences: false).count
-        view.send(txt: String(repeating: "\u{15}", count: lines * 2))
-        for _ in 0..<30 {
-            try? await Task.sleep(for: .milliseconds(20))
-            let screen = view.terminalStateSnapshot().visibleRows.map(\.text).joined(separator: "\n")
-            if !TerminalPut.endsWith(screen, text) {
-                promptLine = .empty
-                return true
-            }
-        }
-        return false
-    }
-
-    /// The shell owns the terminal, rather than a program it's running.
+    /// The shell owns the terminal, rather than a program it's running: its
+    /// own group has the terminal, and it's still the shell, as `exec ssh`
+    /// and `exec vim` keep both its pid and its group.
     private var shellInFront: Bool {
         let pid = view.process?.shellPid ?? 0
         let fd = view.process?.childfd ?? -1
-        return pid > 0 && fd >= 0 && tcgetpgrp(fd) == pid
+        guard pid > 0, fd >= 0, tcgetpgrp(fd) == pid, let shellProgram, let running = Self.program(of: pid) else { return false }
+        return TerminalPut.isTheShell(started: shellProgram, running: running)
+    }
+
+    /// The shell alone has the terminal, which is what a command is typed
+    /// into: in front, and nothing else in its group. With job control off
+    /// (`unsetopt monitor`) a program the shell runs stays in the shell's
+    /// group, so the group having the terminal doesn't say the shell is the
+    /// one reading it: `ssh -tt elsewhere` would be (Codex's review, 11 Nov).
+    private var shellAloneInFront: Bool {
+        guard shellInFront, let pid = view.process?.shellPid, pid > 0 else { return false }
+        var pids = [pid_t](repeating: 0, count: 64)
+        // Read from what's filled in rather than the count, so a group too
+        // big for the list still has someone else in it.
+        guard proc_listpgrppids(pid, &pids, Int32(pids.count * MemoryLayout<pid_t>.size)) >= 0 else { return false }
+        return pids.contains(pid) && pids.allSatisfy { $0 == 0 || $0 == pid }
+    }
+
+    /// The shell's process and when it started, while it's running.
+    var runningShell: (pid: pid_t, born: Born)? {
+        guard !exited, let shellBorn, let pid = view.process?.shellPid, pid > 0 else { return nil }
+        return (pid, shellBorn)
+    }
+
+    /// When a process started, which tells it from a later one given the
+    /// same pid (its pid is handed on once it's reaped). Nil once it has
+    /// ended, a zombie included.
+    struct Born: Equatable {
+        let seconds: UInt64
+        let micros: UInt64
+    }
+
+    nonisolated static func born(_ pid: pid_t) -> Born? {
+        var info = proc_bsdinfo()
+        let size = Int32(MemoryLayout<proc_bsdinfo>.size)
+        // 5 is SZOMB: it has ended and is waiting to be reaped.
+        guard proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, size) == size, info.pbi_status != 5 else { return nil }
+        return Born(seconds: info.pbi_start_tvsec, micros: info.pbi_start_tvusec)
+    }
+
+    /// The program a process is running now.
+    private static func program(of pid: pid_t) -> String? {
+        // PROC_PIDPATHINFO_MAXSIZE, which Swift doesn't see.
+        var path = [CChar](repeating: 0, count: 4 * Int(MAXPATHLEN))
+        guard proc_pidpath(pid, &path, UInt32(path.count)) > 0 else { return nil }
+        return String(cString: path)
     }
 
     /// A key on its way to this terminal. Keys for a running program (vim's

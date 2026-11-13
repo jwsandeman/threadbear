@@ -1,3 +1,4 @@
+import assert from 'node:assert/strict';
 import { Given, Then, When } from '@cucumber/cucumber';
 import type { Dump } from '../support/driver.ts';
 import type { ThreadbearWorld } from '../support/world.ts';
@@ -45,4 +46,19 @@ When('I sort the Inbox oldest first', async function (this: ThreadbearWorld) {
 
 Then('the Inbox is sorted oldest first', async function (this: ThreadbearWorld) {
   await this.until('the oldest-first sort', (d) => d.sidebar.sort === 'oldest');
+});
+
+// The sort button's menu through a real click on it ("Sort: Needs you
+// first" is its tip), its lines as they read, "[x] " before a ticked one.
+When('I open the Inbox\'s sort menu', async function (this: ThreadbearWorld) {
+  const said = await this.app.do({ cmd: 'realMenu', tipPrefix: 'Sort: ', ticks: true });
+  const at = said.indexOf('[');
+  assert.ok(at >= 0, `no menu in: ${said}`);
+  this.menuTitles = (JSON.parse(said.slice(at)) as string[]).filter((line) => line !== '---');
+});
+
+Then('the sort menu ticks {string} and nothing else', function (this: ThreadbearWorld, title: string) {
+  const sortMenu = this.menuTitles ?? [];
+  assert.deepEqual(sortMenu.filter((line) => line.startsWith('[x] ')), [`[x] ${title}`], `the menu read: ${sortMenu.join(' | ')}`);
+  assert.equal(sortMenu.length, 3, `the menu read: ${sortMenu.join(' | ')}`);
 });

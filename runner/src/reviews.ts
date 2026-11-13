@@ -117,6 +117,59 @@ export function reviewInput(raw: unknown, cwd: string): { title: string; note?: 
   return { title, ...(note ? { note } : {}), ...(recommended ? { recommended } : {}), options };
 }
 
+// A stored review cut to what reviewInput and reviewDraft take, for one this
+// runner didn't make: a moved thread's reviews are the other runner's word
+// (runner/moves.ts fitMovedReviews). Its words are cut rather than refused,
+// so a review that fits is kept exactly. Undefined for something that isn't
+// a review.
+export function fitReview(raw: unknown): DesignReview | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  const r = { ...(raw as Record<string, any>) };
+  if (typeof r.id !== 'string' || !Array.isArray(r.options)) return undefined;
+  const cut = (v: unknown, max: number) => (typeof v === 'string' ? cutText(v, max) : undefined);
+  const set = (o: Record<string, any>, key: string, max: number) => {
+    if (o[key] === undefined) return;
+    const fitted = cut(o[key], max);
+    if (fitted === undefined) delete o[key];
+    else o[key] = fitted;
+  };
+  set(r, 'title', 200);
+  set(r, 'note', 4000);
+  set(r, 'recommended', 200);
+  r.options = r.options.slice(0, 12).flatMap((raw: unknown) => {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return [];
+    const o = { ...(raw as Record<string, any>) };
+    set(o, 'title', 200);
+    set(o, 'note', 4000);
+    set(o, 'url', 2000);
+    if (Array.isArray(o.shots)) o.shots = o.shots.slice(0, maxReviewShots);
+    return [o];
+  });
+  for (const key of ['draft', 'response'] as const) {
+    const d = r[key];
+    if (!d || typeof d !== 'object' || Array.isArray(d)) continue;
+    const draft = { ...d };
+    set(draft, 'reply', 8000);
+    if (draft.notes && typeof draft.notes === 'object' && !Array.isArray(draft.notes)) {
+      const notes: Record<string, string> = Object.create(null);
+      for (const [id, note] of Object.entries(draft.notes).slice(0, 12)) {
+        const fitted = cut(note, 4000);
+        if (fitted !== undefined) notes[id] = fitted;
+      }
+      draft.notes = { ...notes };
+    }
+    r[key] = draft;
+  }
+  return r as DesignReview;
+}
+
+// At most `max` UTF-16 units, never ending on half a surrogate pair.
+function cutText(text: string, max: number): string {
+  if (text.length <= max) return text;
+  const end = /[\uD800-\uDBFF]/.test(text[max - 1] ?? '') ? max - 1 : max;
+  return text.slice(0, end);
+}
+
 export function reviewDraft(review: DesignReview, raw: unknown, answer = false): ReviewDraft {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return bad('draft must contain notes and optional picks.');
   const d = raw as Record<string, unknown>;

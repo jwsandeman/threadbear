@@ -38,3 +38,23 @@ Feature: Section headings in the sidebar
     When I sort the Inbox oldest first
     Then the Inbox is sorted oldest first
     And "Add dark mode to the dashboard" comes before "Ship the beta to TestFlight" in the "Inbox" section
+
+  # A tick beside the order it's in, in its own column beside the line's
+  # icon, as a macOS menu has it (Mike, 12 Nov: the GPUI app's had none).
+  @sidebar.sort
+  Scenario: The sort menu ticks the order the Inbox is in
+    Given the Inbox is sorted by what needs me first
+    When I open the Inbox's sort menu
+    Then the sort menu ticks "Needs you first" and nothing else
+    When I sort the Inbox oldest first
+    Then the Inbox is sorted oldest first
+    When I open the Inbox's sort menu
+    Then the sort menu ticks "Oldest first" and nothing else
+
+  @sidebar.sections
+  Scenario: A quiet thread with a check-in booked waits under Hibernating
+    Given the "Inbox" section lists "Add dark mode to the dashboard"
+    When a check-in is booked on "Add dark mode to the dashboard"
+    And the "hibernating" section is unfolded
+    Then the "Hibernating" section lists "Add dark mode to the dashboard"
+    And the row "Add dark mode to the dashboard" says when its schedule messages it

@@ -11,7 +11,6 @@
 // its own file up once, keeps a live copy of the whole table (and a copy on
 // disk for when the backend can't be reached), and sends only its own,
 // each run taken with a claim first so it's sent once.
-import { experimentOn } from './experiments.ts';
 import type { CheckCard } from './patch-trust.ts';
 import { type KeptCheck, CHECK_TIMEOUT_MS, checkLimitMs, checkOutcome, checkRunningElsewhere, clearCheckRunning, dropKeptCheck, HELD_EXTRA, HELD_SKIP, heldToldAbout, keepCheck, markCheckRunning, MAX_CHECK_CHARS, MAX_CHECK_TIMEOUT_SECS, noteHeldTold, readKeptCheck, runCheck, type CheckResult } from './schedule-check.ts';
 import { forbiddenText } from './sync.ts';
@@ -149,6 +148,10 @@ export type CreateScheduleParams = {
 
 export type UpdateScheduleParams = {
   scheduleId: string;
+  // The check it must still have, compared as it saves (update_schedule
+  // carrying a check to a new folder, whose card showed this one). Not
+  // from a client.
+  ifCheck?: string;
   title?: string;
   text?: string;
   at?: string;
@@ -212,9 +215,8 @@ export class Scheduler {
   // Threads a draining runner still has (docs/protocol.md, "Handovers"):
   // they're real threads, just not loaded here yet.
   private elsewhere: (threadId: string) => boolean;
-  // Schedule checks (experiment scheduleChecks, schedule-check.ts).
+  // Schedule checks (schedule-check.ts).
   private home: string;
-  private checksOn: () => boolean;
   private check: (p: { command: string; cwd: string; home: string; scheduleId: string; timeoutMs?: number }) => Promise<CheckResult>;
   // Local mode's runs waiting on their check, so a tick doesn't start another.
   private checking = new Set<string>();
@@ -252,12 +254,10 @@ export class Scheduler {
     elsewhere?: (threadId: string) => boolean;
     self?: SelfRunner;
     syncOn?: boolean;
-    checksOn?: () => boolean;
     runCheck?: (p: { command: string; cwd: string; home: string; scheduleId: string; timeoutMs?: number }) => Promise<CheckResult>;
   }) {
     this.runner = deps.runner;
     this.home = deps.home;
-    this.checksOn = deps.checksOn ?? (() => experimentOn(deps.home, 'scheduleChecks'));
     this.check = deps.runCheck ?? runCheck;
     this.self = deps.self ?? { id: 'runner', name: 'this Mac' };
     this.syncOn = deps.syncOn ?? false;
@@ -652,6 +652,7 @@ export class Scheduler {
   private async updateNow(p: UpdateScheduleParams): Promise<Schedule> {
     // A copy, so a write the backend turns down changes nothing here.
     const rec: ScheduleRecord = structuredClone(this.mustGet(p.scheduleId));
+    if (p.ifCheck !== undefined && rec.check !== p.ifCheck) throw bad("The schedule's check changed while the approval card was up, so nothing changed. Look at it again and ask again.");
     const away = !this.mine(rec);
     let replan = false;
     if (p.title !== undefined) rec.title = p.title.trim() ? cutSafely(p.title.trim(), 200) : firstLine(rec.text);
@@ -692,7 +693,6 @@ export class Scheduler {
       if (p.checkTimeoutSecs === null) delete rec.checkTimeoutSecs;
       else rec.checkTimeoutSecs = checkedTimeout(p.checkTimeoutSecs);
     }
-    const moved = !rec.threadId && p.cwd !== undefined;
     if (!rec.threadId) {
       if (p.cwd !== undefined) rec.cwd = away ? p.cwd.trim() || undefined : this.checkedFolder(p.cwd);
       if (rec.cwd === undefined) delete rec.cwd;
@@ -716,9 +716,14 @@ export class Scheduler {
     }
     rec.updatedAt = this.iso();
     if (replan) this.plan(rec);
-    // Passing the check again, or moving it, approves it as it is now. Any
-    // other change leaves its approval alone.
-    if (!away && (p.check !== undefined || moved)) this.approveCheck(rec, p.checkCard);
+    // Passing the check again approves it as it is now. Nothing else does,
+    // a new folder included: approval is bound to the folder, so one moved
+    // is held there until the check is passed again (from a thread that
+    // asks first, a card). The apps' editors send the folder with every
+    // save and show no check, so a save meant to change the title once
+    // approved whatever a pull had changed the check's scripts to
+    // (security review, 11 Nov 2026).
+    if (!away && p.check !== undefined) this.approveCheck(rec, p.checkCard);
     await this.put(rec);
     this.tick();
     return this.view(rec);
@@ -935,7 +940,7 @@ export class Scheduler {
     for (const rec of [...this.items.values()]) {
       if (rec.paused || !rec.nextRunAt || Date.parse(rec.nextRunAt) > now) continue;
       if (this.checking.has(rec.id)) continue;
-      if (rec.check && this.checksOn()) {
+      if (rec.check) {
         // Its check first, then the run (or a skip) as below.
         this.checking.add(rec.id);
         void this.checked(rec).then((checked) => {
@@ -1111,7 +1116,7 @@ export class Scheduler {
   // 'later': not now, leave it due (its check is running in another runner
   // process, or the check was changed while it ran).
   private async checked(rec: ScheduleRecord): Promise<{ skip: string } | Carried | 'later' | undefined> {
-    if (!rec.check || !this.checksOn()) return undefined;
+    if (!rec.check) return undefined;
     const cwd = this.checkFolder(rec);
     // What it printed last time and no run has carried yet (a restart
     // refused the send, or the runner stopped mid-check): send that rather
@@ -1223,7 +1228,7 @@ export class Scheduler {
   // Run now doesn't run the check, but sends what it kept and no thread
   // has seen, rather than leaving it to a next run a one-off won't have.
   private keptFor(rec: ScheduleRecord): Carried | undefined {
-    if (!rec.check || !this.checksOn()) return undefined;
+    if (!rec.check) return undefined;
     const kept = this.memKept.get(`${rec.id}\n${rec.check}`) ?? readKeptCheck(this.home, rec.id, rec.check);
     if (!kept || this.delivered.has(`${rec.id}\n${kept.check}\n${kept.at}`)) return undefined;
     return { extra: kept.extra, kept: kept.at, check: kept.check };
@@ -1233,7 +1238,7 @@ export class Scheduler {
   // handover): sent now, it would go without what the check is about to
   // print, and finish a one-off before that has a run to carry it.
   private notMidCheck(rec: ScheduleRecord): void {
-    if (!rec.check || !this.checksOn()) return;
+    if (!rec.check) return;
     if (this.checkingNow.has(rec.id) || checkRunningElsewhere(this.home, rec.id, this.clock.now())) {
       throw new RpcError(ErrorCode.busy, 'Its check is running; try again in a moment.');
     }
@@ -1545,6 +1550,8 @@ export function scheduleMethods(s: Scheduler): Record<string, (p: Record<string,
       if (p.paused !== undefined) upd.paused = bool(p, 'paused');
       if (p.check !== undefined) upd.check = p.check === null ? null : str(p, 'check');
       Object.assign(upd, checkCardOf(p));
+      // Like the card, it can only refuse.
+      if (p.ifCheck !== undefined) upd.ifCheck = reqStr(p, 'ifCheck');
       if (p.checkTimeoutSecs !== undefined) upd.checkTimeoutSecs = p.checkTimeoutSecs === null ? null : num(p, 'checkTimeoutSecs');
       return { schedule: await s.update(upd) };
     },

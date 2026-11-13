@@ -80,3 +80,40 @@ Then('the move sheet stayed closed', async function (this: ThreadbearWorld) {
   const d = await this.app.dump();
   assert.ok(!d.moveSheet, 'the sheet came up');
 });
+
+// Both apps' `tiles`: what each picture of the message says when it isn't
+// drawn ("Couldn't get it from bruce"), "picture" when it is.
+Then('pressing the picture chip in my message opens nothing', async function (this: ThreadbearWorld) {
+  const row = await this.until('my message', (d) => d.transcript.rows.find((r) => r.kind === 'user'));
+  const said = await this.app.do({ cmd: 'peek', row: row.id, words: 'Picture 1', press: true }).then((r) => `ok ${r}`, (e) => String(e));
+  assert.ok(!said.includes('quicklook'), `the chip opened something: ${said}`);
+});
+
+Then('the pictures of my message say {string}', async function (this: ThreadbearWorld, words: string) {
+  await this.until('a message with pictures', (d) => d.transcript.rows.some((r) => r.kind === 'user'));
+  let said = '';
+  for (let tries = 0; tries < 60; tries += 1) {
+    said = await this.app.do({ cmd: 'tiles', count: 1 }).catch((e) => String(e));
+    // The Swift app's answer starts with the command's name.
+    if (said.replace(/^tiles /, '') === `ok ${words}`) return;
+    await sleep(150);
+  }
+  assert.fail(`the pictures say "${said}", not "${words}"`);
+});
+
+// The row's Cancel Move (`move` with `cancel`).
+When('I cancel the move of {string}', async function (this: ThreadbearWorld, title: string) {
+  const t = await this.until(`a thread called "${title}"`, (d) => this.thread(d, title));
+  await this.app.do({ cmd: 'move', id: t.id, cancel: true });
+});
+
+// What the box says in place of its words while its thread moves, and so
+// it and its card take nothing (the dump's composer.moving).
+type WithMoving = { moving?: string | null };
+Then('the box is locked, saying {string}', async function (this: ThreadbearWorld, line: string) {
+  await this.until(`the box locked with "${line}"`, (d) => (d.composer as WithMoving).moving === line);
+});
+
+Then("the box isn't locked", async function (this: ThreadbearWorld) {
+  await this.until('the box unlocked', (d) => !(d.composer as WithMoving).moving);
+});

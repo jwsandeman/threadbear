@@ -246,3 +246,24 @@ test("a move whose uncommitted work brings files under node_modules doesn't unpa
   assert.match(!r.ok ? r.reason : '', /node_modules\/p\/index\.js, under node_modules/);
   assert.equal(fs.existsSync(path.join(tw, 'node_modules', 'p', 'index.js')), false);
 });
+
+// Muse's review, 11 Nov 2026: the old runner's head and wip went to git as
+// arguments, so "--ext-diff" for one turned a diff's external program on.
+test('a move whose commits are named as anything but commit ids is refused before any git', async () => {
+  const { root, s, t } = repos();
+  const sw = path.join(root, 's-threads/slot-1');
+  git(s, 'worktree', 'add', '-q', '-b', 'thread/abcd1234', sw, 'main');
+  const tw = path.join(root, 't-threads/slot-1');
+  git(t, 'worktree', 'add', '-q', '-b', 'thread/abcd1234', tw, 'main');
+  write(sw, 'plain.txt', 'changed\n');
+  const packed = await packGit(sw, sw, path.join(root, 'move.bundle'));
+  assert.ok(packed.ok, !packed.ok ? packed.reason : '');
+  if (!packed.ok) return;
+  const tip = git(tw, 'rev-parse', 'HEAD').trim();
+  for (const bad of [{ wip: '--ext-diff' }, { head: '--ignore-submodules=none' }, { head: 'HEAD' }, { wip: tip.slice(0, 12) }]) {
+    const r = await unpackGit(tw, { ...packed.meta, ...bad }, packed.bundle);
+    assert.equal(r.ok, false, JSON.stringify(bad));
+    assert.equal(git(tw, 'rev-parse', 'HEAD').trim(), tip, 'nothing changed');
+  }
+  assert.ok((await unpackGit(tw, packed.meta, packed.bundle)).ok, 'the real names still come in');
+});

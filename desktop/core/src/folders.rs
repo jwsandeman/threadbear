@@ -193,12 +193,17 @@ fn trimmed(path: &str) -> &str {
 /// (the Finder's long run up from the disk says nothing Mike wants to click),
 /// else from the top of the disk (`FolderListing.crumbs`).
 pub fn crumbs(path: &str, home: &str) -> Vec<Crumb> {
-    let home = trimmed(home);
-    let path = trimmed(path);
+    let home = separators(home);
+    let path = separators(path);
+    let home = trimmed(&home);
+    let path = trimmed(&path);
     let mut out = Vec::new();
     let (mut at, rest) = if !home.is_empty() && home != "/" && (path == home || path.starts_with(&format!("{home}/"))) {
         out.push(Crumb { name: name_of(home).to_owned(), path: home.to_owned() });
         (home.to_owned(), &path[home.len()..])
+    } else if crate::reducer::text::is_windows_path(path) || (path.len() == 2 && path.as_bytes()[0].is_ascii_alphabetic() && path.ends_with(':')) {
+        out.push(Crumb { name: path[..2].to_owned(), path: format!("{}/", &path[..2]) });
+        (path[..2].to_owned(), &path[2..])
     } else {
         out.push(Crumb { name: "/".into(), path: "/".into() });
         (String::new(), path)
@@ -217,12 +222,18 @@ fn name_of(path: &str) -> &str {
 
 /// The folder above, or none at the top of the disk (`FolderListing.parent`).
 pub fn parent(path: &str) -> Option<String> {
-    let path = trimmed(path);
-    if path == "/" || path.is_empty() {
+    let path = separators(path);
+    let path = trimmed(&path);
+    if path == "/" || path.is_empty() || (path.len() == 2 && path.ends_with(':')) {
         return None;
     }
     let up = path.rsplit_once('/').map_or("", |(up, _)| up);
-    Some(if up.is_empty() { "/".to_owned() } else { up.to_owned() })
+    Some(if up.is_empty() { "/".to_owned() } else if up.len() == 2 && up.ends_with(':') { format!("{up}/") } else { up.to_owned() })
+}
+
+// A runner's Windows paths can be browsed from another system too.
+fn separators(path: &str) -> String {
+    if crate::reducer::text::is_windows_path(path) { path.replace('\\', "/") } else { path.to_owned() }
 }
 
 pub fn join(folder: &str, name: &str) -> String {
@@ -246,8 +257,266 @@ pub fn size_words(bytes: i64) -> String {
     format!("{:.2} GB", b / (KB * KB * KB))
 }
 
+// ---------------------------------------------------------------- the view's rules
+
+/// List or icons, the same for every folder, as the bar's button left it
+/// (`FolderViewMode`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FolderMode {
+    #[default]
+    List,
+    Icons,
+}
+
+impl FolderMode {
+    /// The Swift app's raw value, kept in the settings file.
+    pub fn name(self) -> &'static str {
+        match self {
+            FolderMode::List => "list",
+            FolderMode::Icons => "icons",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<FolderMode> {
+        [FolderMode::List, FolderMode::Icons].into_iter().find(|m| m.name() == name)
+    }
+
+    pub fn other(self) -> FolderMode {
+        match self {
+            FolderMode::List => FolderMode::Icons,
+            FolderMode::Icons => FolderMode::List,
+        }
+    }
+
+    /// The button and the menu item that switch to the other view: their
+    /// words and icon (`FolderModeButton`).
+    pub fn switch_title(self) -> &'static str {
+        match self {
+            FolderMode::List => "Show as icons",
+            FolderMode::Icons => "Show as a list",
+        }
+    }
+
+    pub fn switch_symbol(self) -> &'static str {
+        match self {
+            FolderMode::List => "square.grid.2x2",
+            FolderMode::Icons => "list.bullet",
+        }
+    }
+}
+
+/// How many steps from the start of the path bar go behind its "…" menu for
+/// the rest to fit in `room`, each step `widths` wide with `gap` between, and
+/// `more` for the "…" and its arrow. The last always stays
+/// (`FolderPathBar.tuckedCount`).
+pub fn tucked_count(widths: &[f32], gap: f32, more: f32, room: f32) -> usize {
+    if widths.is_empty() {
+        return 0;
+    }
+    let needed = |start: usize| -> f32 { widths[start..].iter().sum::<f32>() + gap * (widths.len() - start - 1) as f32 + if start > 0 { more } else { 0. } };
+    let mut start = 0;
+    while start < widths.len() - 1 && needed(start) > room {
+        start += 1;
+    }
+    start
+}
+
+/// The icon view's tiles: as many as fit at `TILE_MIN` wide, shared out so a
+/// row fills the pane (`sizeForItemAt`).
+pub const TILE_MIN: f32 = 116.;
+pub const TILE_HEIGHT: f32 = 128.;
+/// Around the grid, inside the pane.
+pub const GRID_INSET: f32 = 8.;
+/// The picture in a tile, square.
+pub const TILE_PICTURE: f32 = 84.;
+
+/// The columns of the icon view in a pane `width` wide, and each tile's width.
+pub fn grid_columns(width: f32) -> (usize, f32) {
+    let room = (width - GRID_INSET * 2. - 1.).max(110.);
+    let columns = (room / TILE_MIN).floor().max(1.);
+    (columns as usize, (room / columns).floor())
+}
+
+/// A folder a busy agent writes to fires many times a second: it's read once
+/// it settles, and later for a huge one, which takes a while to sort and draw
+/// (`FolderPaneView.changed`).
+pub fn settle_ms(entries: usize) -> u64 {
+    if entries > 2000 {
+        3000
+    } else {
+        300
+    }
+}
+
+/// Another Mac's folder can't be watched from here: it's read again this often
+/// while it's showing.
+pub const REMOTE_POLL_SECS: u64 = 15;
+
+/// A file whose own picture can stand for its icon: one this app can decode,
+/// and small enough to read for a thumbnail (`FolderThumbnails.isPicture`; the
+/// Swift app also has Quick Look's frames of videos).
+pub fn thumbnails(entry: &FolderEntry) -> bool {
+    const MOST: i64 = 24 * 1024 * 1024;
+    if entry.is_folder || !entry.size.is_some_and(|s| (0..=MOST).contains(&s)) {
+        return false;
+    }
+    let ext = entry.name.rsplit_once('.').map(|(_, e)| e.to_lowercase()).unwrap_or_default();
+    matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "ico")
+}
+
+/// Rows picked in the list or the icons, as NSTableView keeps them: a click
+/// picks one, ⌘-click adds or takes away, ⇧-click picks the run from the
+/// last plain click, and the arrows move from the last one touched.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Selection {
+    /// In the order they were picked; the view draws them wherever they are.
+    pub paths: Vec<String>,
+    /// Where a ⇧-click or ⇧-arrow runs from.
+    anchor: Option<String>,
+    /// The row the arrows move from.
+    lead: Option<String>,
+}
+
+impl Selection {
+    pub fn of(paths: Vec<String>) -> Self {
+        let last = paths.last().cloned();
+        Selection { paths, anchor: last.clone(), lead: last }
+    }
+
+    pub fn contains(&self, path: &str) -> bool {
+        self.paths.iter().any(|p| p == path)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.paths.is_empty()
+    }
+
+    /// The picked rows in the order they're drawn (`rows`, top to bottom).
+    pub fn in_order(&self, rows: &[String]) -> Vec<String> {
+        rows.iter().filter(|r| self.contains(r)).cloned().collect()
+    }
+
+    /// A click on `path`, with ⌘ (`toggle`) or ⇧ (`extend`) held.
+    pub fn click(&mut self, rows: &[String], path: &str, toggle: bool, extend: bool) {
+        if extend {
+            let anchor = self.anchor.clone().unwrap_or_else(|| path.to_owned());
+            self.paths = run(rows, &anchor, path);
+            self.anchor = Some(anchor);
+        } else if toggle {
+            if self.contains(path) {
+                self.paths.retain(|p| p != path);
+            } else {
+                self.paths.push(path.to_owned());
+            }
+            self.anchor = Some(path.to_owned());
+        } else {
+            self.paths = vec![path.to_owned()];
+            self.anchor = Some(path.to_owned());
+        }
+        self.lead = Some(path.to_owned());
+    }
+
+    /// An arrow: `by` rows on (1 down the list, a row of tiles in the icons),
+    /// `extend` with ⇧ held. With nothing picked, down picks the first row
+    /// and up the last.
+    pub fn step(&mut self, rows: &[String], by: isize, extend: bool) {
+        if rows.is_empty() {
+            return;
+        }
+        let at = self.lead.as_ref().and_then(|lead| rows.iter().position(|r| r == lead));
+        let next = match at {
+            None => {
+                if by > 0 {
+                    0
+                } else {
+                    rows.len() - 1
+                }
+            }
+            Some(i) => (i as isize + by).clamp(0, rows.len() as isize - 1) as usize,
+        };
+        let path = rows[next].clone();
+        if extend && at.is_some() {
+            let anchor = self.anchor.clone().unwrap_or_else(|| rows[at.unwrap_or(next)].clone());
+            self.paths = run(rows, &anchor, &path);
+            self.anchor = Some(anchor);
+        } else {
+            self.paths = vec![path.clone()];
+            self.anchor = Some(path.clone());
+        }
+        self.lead = Some(path);
+    }
+
+    /// ⌘A.
+    pub fn select_all(&mut self, rows: &[String]) {
+        self.paths = rows.to_vec();
+        self.anchor = rows.first().cloned();
+        self.lead = rows.last().cloned();
+    }
+
+    /// The rows are read again: what's gone drops out of the selection.
+    pub fn keep_only(&mut self, rows: &[String]) {
+        self.paths.retain(|p| rows.contains(p));
+        if self.anchor.as_ref().is_some_and(|a| !rows.contains(a)) {
+            self.anchor = self.paths.last().cloned();
+        }
+        if self.lead.as_ref().is_some_and(|l| !rows.contains(l)) {
+            self.lead = self.paths.last().cloned();
+        }
+    }
+}
+
+/// The rows from `a` to `b`, either way round, in the order they're drawn.
+fn run(rows: &[String], a: &str, b: &str) -> Vec<String> {
+    match (rows.iter().position(|r| r == a), rows.iter().position(|r| r == b)) {
+        (Some(i), Some(j)) => rows[i.min(j)..=i.max(j)].to_vec(),
+        _ => vec![b.to_owned()],
+    }
+}
+
+/// Letters typed quickly over the list pick the first row whose name starts
+/// with them (NSTableView's type select): from the row picked now, so typing
+/// more of its name keeps it, then round from the top. Case doesn't matter.
+pub fn type_select(names: &[&str], typed: &str, picked: Option<usize>) -> Option<usize> {
+    if typed.is_empty() || names.is_empty() {
+        return None;
+    }
+    let typed = typed.to_lowercase();
+    let starts = |i: &usize| names[*i].to_lowercase().starts_with(&typed);
+    let from = picked.unwrap_or(0).min(names.len() - 1);
+    (from..names.len()).chain(0..from).find(starts)
+}
+
+/// How long a pause ends the letters typed for `type_select`.
+pub const TYPE_SELECT_PAUSE_MS: u64 = 1000;
+
+/// What an empty folder says.
+pub const EMPTY_WORDS: &str = "Nothing in this folder";
+
+/// What the browser says when the runner couldn't list a folder (`code` and
+/// `message` its error), `away` naming another Mac's runner
+/// (`FolderPaneView.words`).
+pub fn failure_words(code: i64, message: &str, away: Option<&str>) -> String {
+    if code == -32601 {
+        return format!("{}'s runner needs updating to show folders.", away.unwrap_or("That Mac"));
+    }
+    if away.is_none() && message.starts_with("No such folder") {
+        return "This folder isn't there any more.".to_owned();
+    }
+    format!("Couldn't read this folder{}.", away.map(|a| format!(" on {a}")).unwrap_or_default())
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn windows_breadcrumbs_start_at_the_drive_and_keep_each_folder() {
+        let got = super::crumbs(r"C:\work\site\logs", r"C:\Users\mike");
+        assert_eq!(got.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["C:", "work", "site", "logs"]);
+        assert_eq!(got.last().unwrap().path, "C:/work/site/logs");
+        assert_eq!(super::parent(r"C:\work\site\logs").as_deref(), Some("C:/work/site"));
+        assert_eq!(super::parent("C:/"), None);
+        let home = super::crumbs(r"C:\Users\mike\site\logs", "C:/Users/mike");
+        assert_eq!(home.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["mike", "site", "logs"]);
+    }
     use super::*;
     use serde_json::json;
 
@@ -358,6 +627,128 @@ mod tests {
         assert!(same.data.is_empty());
         // Neither bytes nor "unchanged" is no answer at all.
         assert!(FileRead::decode(&json!({ "path": "/w/a.md" })).is_none());
+    }
+
+    #[test]
+    fn the_path_bar_keeps_the_nearest_names() {
+        let widths = [40., 40., 40., 40.];
+        assert_eq!(tucked_count(&widths, 10., 20., 500.), 0);
+        assert_eq!(tucked_count(&widths, 10., 20., 190.), 0, "exactly fits");
+        assert_eq!(tucked_count(&widths, 10., 20., 189.), 1);
+        assert_eq!(tucked_count(&widths, 10., 20., 100.), 3, "the last always stays");
+        assert_eq!(tucked_count(&widths, 10., 20., 10.), 3);
+        assert_eq!(tucked_count(&[], 10., 20., 10.), 0);
+    }
+
+    #[test]
+    fn the_icons_fill_the_pane() {
+        // 300 wide: 283 of room, two tiles of 141.
+        assert_eq!(grid_columns(300.), (2, 141.));
+        // Narrower than a tile still shows one.
+        assert_eq!(grid_columns(60.), (1, 110.));
+        assert_eq!(grid_columns(600.), (5, 116.));
+    }
+
+    #[test]
+    fn the_view_mode_switches_and_says_so() {
+        assert_eq!(FolderMode::default(), FolderMode::List);
+        assert_eq!(FolderMode::List.switch_title(), "Show as icons");
+        assert_eq!(FolderMode::Icons.switch_title(), "Show as a list");
+        assert_eq!(FolderMode::from_name("icons"), Some(FolderMode::Icons));
+        assert_eq!(FolderMode::List.other(), FolderMode::Icons);
+    }
+
+    fn paths(names: &[&str]) -> Vec<String> {
+        names.iter().map(|n| format!("/f/{n}")).collect()
+    }
+
+    #[test]
+    fn clicks_pick_add_and_run() {
+        let rows = paths(&["a", "b", "c", "d", "e"]);
+        let mut picked = Selection::default();
+        picked.click(&rows, "/f/b", false, false);
+        assert_eq!(picked.paths, paths(&["b"]));
+        // ⌘-click adds, and takes away again.
+        picked.click(&rows, "/f/d", true, false);
+        assert_eq!(picked.in_order(&rows), paths(&["b", "d"]));
+        picked.click(&rows, "/f/b", true, false);
+        assert_eq!(picked.in_order(&rows), paths(&["d"]));
+        // ⇧-click runs from the last click, either way.
+        picked.click(&rows, "/f/b", false, false);
+        picked.click(&rows, "/f/e", false, true);
+        assert_eq!(picked.in_order(&rows), paths(&["b", "c", "d", "e"]));
+        picked.click(&rows, "/f/a", false, true);
+        assert_eq!(picked.in_order(&rows), paths(&["a", "b"]));
+    }
+
+    #[test]
+    fn arrows_move_and_extend() {
+        let rows = paths(&["a", "b", "c", "d"]);
+        let mut picked = Selection::default();
+        picked.step(&rows, 1, false);
+        assert_eq!(picked.paths, paths(&["a"]), "down with nothing picked is the first");
+        picked.step(&rows, 1, false);
+        assert_eq!(picked.paths, paths(&["b"]));
+        picked.step(&rows, 1, true);
+        picked.step(&rows, 1, true);
+        assert_eq!(picked.in_order(&rows), paths(&["b", "c", "d"]));
+        picked.step(&rows, 1, true);
+        assert_eq!(picked.in_order(&rows), paths(&["b", "c", "d"]), "stops at the end");
+        picked.step(&rows, -1, false);
+        assert_eq!(picked.paths, paths(&["c"]));
+        // A row of tiles at a time in the icons.
+        picked.step(&rows, -2, false);
+        assert_eq!(picked.paths, paths(&["a"]));
+        let mut none = Selection::default();
+        none.step(&rows, -1, false);
+        assert_eq!(none.paths, paths(&["d"]), "up with nothing picked is the last");
+        none.select_all(&rows);
+        assert_eq!(none.in_order(&rows), rows);
+    }
+
+    #[test]
+    fn a_row_thats_gone_leaves_the_selection() {
+        let rows = paths(&["a", "b", "c"]);
+        let mut picked = Selection::of(paths(&["b", "c"]));
+        picked.keep_only(&paths(&["a", "c"]));
+        assert_eq!(picked.paths, paths(&["c"]));
+        picked.step(&paths(&["a", "c"]), -1, false);
+        assert_eq!(picked.paths, paths(&["a"]));
+        let _ = rows;
+    }
+
+    #[test]
+    fn typing_picks_the_row_its_name_starts_with() {
+        let names = ["docs", "logs", "mockups", "screens", "src"];
+        assert_eq!(type_select(&names, "s", None), Some(3));
+        assert_eq!(type_select(&names, "Sr", None), Some(4), "case doesn't matter");
+        // More of the picked row's name keeps it; another letter goes on from it.
+        assert_eq!(type_select(&names, "lo", Some(1)), Some(1));
+        assert_eq!(type_select(&names, "s", Some(4)), Some(4));
+        assert_eq!(type_select(&names, "d", Some(4)), Some(0), "round from the top");
+        assert_eq!(type_select(&names, "z", Some(1)), None);
+        assert_eq!(type_select(&names, "", Some(1)), None);
+    }
+
+    #[test]
+    fn a_folder_that_cant_be_read_says_why() {
+        assert_eq!(failure_words(-32602, "No such folder: /a/b", None), "This folder isn't there any more.");
+        assert_eq!(failure_words(-32602, "Not a folder: /a/b", None), "Couldn't read this folder.");
+        assert_eq!(failure_words(-32601, "Method not found", Some("bruce")), "bruce's runner needs updating to show folders.");
+        assert_eq!(failure_words(-32602, "No such folder: /a/b", Some("bruce")), "Couldn't read this folder on bruce.");
+    }
+
+    #[test]
+    fn thumbnails_are_for_pictures_this_app_can_draw() {
+        let picture = |name: &str, size: i64| FolderEntry { name: name.into(), path: format!("/f/{name}"), size: Some(size), ..Default::default() };
+        assert!(thumbnails(&picture("pricing-before.png", 6000)));
+        assert!(thumbnails(&picture("Photo.JPG", 6000)));
+        assert!(!thumbnails(&picture("clip.mov", 6000)));
+        assert!(!thumbnails(&picture("huge.png", 200 * 1024 * 1024)));
+        assert!(!thumbnails(&FolderEntry { name: "x.png".into(), is_folder: true, ..Default::default() }));
+        assert!(!thumbnails(&FolderEntry { name: "refused-link.png".into(), size: None, ..Default::default() }));
+        assert_eq!(settle_ms(10), 300);
+        assert_eq!(settle_ms(5000), 3000);
     }
 
     #[test]

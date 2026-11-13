@@ -7,7 +7,10 @@ import type { Ask, AskLink, NeedsWho, PersistedEvent, Provider } from './protoco
 import { hasLineBreak, replaceLinks } from './linear-text.ts';
 import { cutSafely, safeEnd } from './safe-cut.ts';
 
-export type Needs = { needs: NeedsWho; asks?: Ask[]; next?: string[] };
+// open: with needs "nothing", what the agent says is still open that the
+// runner can't see for itself (experiment looseEnds, docs/protocol.md
+// "Loose ends"); [] is its word that nothing is.
+export type Needs = { needs: NeedsWho; asks?: Ask[]; next?: string[]; open?: string[] };
 
 export const END_TURN_TOOL = 'end_turn';
 // As the CLIs name it: under threadbear-mcp.ts's SERVER_NAME, which lives
@@ -26,6 +29,9 @@ const MAX_URL = 2000;
 // Follow-ups on the done card: a few buttons, each a short message.
 const MAX_NEXT = 3;
 const MAX_NEXT_CHARS = 120;
+// What's still open, on the done card: a few short lines, as next.
+const MAX_OPEN = 3;
+const MAX_OPEN_CHARS = 160;
 // Web pages, paths on this Mac, and review:<id>, which opens one of the
 // thread's show_options reviews (Mike, 30 Oct: "Watch A" opened the video
 // but nothing opened the stills to compare). Anything else (javascript:,
@@ -70,7 +76,7 @@ export function needsFromTool(input: unknown): Needs | undefined {
   // Left out, it comes from the asks: agents filling in a summary forgot
   // it 2 times in 9 (29 Oct 2026). Anything else is a call to ignore.
   if (o.needs !== undefined && o.needs !== 'you' && o.needs !== 'nothing') return undefined;
-  if (o.needs === 'nothing') return done(o.next);
+  if (o.needs === 'nothing') return done(o.next, o.open);
   const asks: Ask[] = [];
   for (const a of Array.isArray(o.asks) ? o.asks : []) {
     if (!a || typeof a !== 'object') continue;
@@ -106,16 +112,21 @@ export function needsFromTool(input: unknown): Needs | undefined {
     asks.push(ask);
     if (asks.length === MAX_ASKS) break;
   }
-  if (o.needs === undefined) return asks.length ? { needs: 'you', asks } : done(o.next);
+  if (o.needs === undefined) return asks.length ? { needs: 'you', asks } : done(o.next, o.open);
   return asks.length ? { needs: 'you', asks } : { needs: 'you' };
 }
 
 // A turn that needs nothing, with any follow-ups it suggested: the done
 // card's buttons (docs/protocol.md, "Next steps"). Only here, as a card
 // of asks already has its own buttons.
-function done(v: unknown): Needs {
-  const next = [...new Set((Array.isArray(v) ? v : []).map((n) => clipText(n, MAX_NEXT_CHARS)).filter((n): n is string => !!n))].slice(0, MAX_NEXT);
-  return next.length ? { needs: 'nothing', next } : { needs: 'nothing' };
+function done(v: unknown, left?: unknown): Needs {
+  const lines = (w: unknown, chars: number, max: number) => [...new Set((Array.isArray(w) ? w : []).map((n) => clipText(n, chars)).filter((n): n is string => !!n))].slice(0, max);
+  const next = lines(v, MAX_NEXT_CHARS, MAX_NEXT);
+  const out: Needs = next.length ? { needs: 'nothing', next } : { needs: 'nothing' };
+  // Kept even when empty: [] is the agent saying nothing's left, which a
+  // call without it (an older session's form) can't say.
+  if (Array.isArray(left)) out.open = lines(left, MAX_OPEN_CHARS, MAX_OPEN);
+  return out;
 }
 
 // Big enough for any turn's story; past this it's the working again.
@@ -453,7 +464,7 @@ const NEXT_ROW =
 
 // Hibernating itself, in every form's description (snoozeFromTool).
 const END_TURN_SNOOZE =
-  'snooze hibernates this thread once the turn is over, with needs "nothing" only, until a time ("2h", "1d", "tomorrow", an ISO time with its offset, "restart", or "release" for a new release) or words saying when ("when the phone arrives"). Use it when the user asks for this thread to be snoozed or hibernated, or when the rest waits on a message (one wakes it), until it should have come; waitFor names threads it waits on, which wake it when they finish. ';
+  'snooze hibernates this thread once the turn is over, with needs "nothing" only, until a time ("2h", "1d", "tomorrow", an ISO time with its offset, "restart", or "release" for a new release) or words saying when ("when the phone arrives"). Use it when the user asks for this thread to be snoozed or hibernated, or when the rest waits on a message (one wakes it), until it should have come; it only brings the thread back, so a step of your own later is a schedule_message. waitFor names threads it waits on, which wake it when they finish. ';
 
 // Handing a step over, in every form's description. This used to say to offer
 // "Can you do it?" when the agent could plausibly do the step itself, which told
@@ -920,18 +931,39 @@ export class WakeRead {
   // to the model before it, so it waits for results of its own (from Codex's
   // review). At worst that opens the turn once more than needed.
   private next = false;
+  // A result in the batch that hands it over (before or after the note) was
+  // an end_turn saying "Now write your reply": the text the agent writes next
+  // is that reply, not something it did about the notice, so only a tool call
+  // after it opens the turn. Cleared at each of the agent's steps otherwise. On 11 Nov 2026 an
+  // ffmpeg job's exit came with that answer; the reply counted as reading it,
+  // the Stop hook asked for end_turn again, and the "Done." written after the
+  // second one took the reply's place (thread dcdc60a3).
+  private batchReply = false;
   get handed(): boolean {
     return this.state === 'handed';
   }
-  see(e: { type: string; itemId?: string; wake?: true }): boolean {
+  // The agent's own end_turn calls, so only their results count for
+  // batchReply, not a command's output that quotes one (from Codex's review).
+  private endTurns = new Set<string>();
+  see(e: { type: string; itemId?: string; name?: string; wake?: true; ok?: boolean; text?: string }): boolean {
+    if (e.type === 'tool.call' && e.itemId && e.name?.endsWith(`__${END_TURN_TOOL}`) && !e.itemId.includes('/')) this.endTurns.add(e.itemId);
     if (e.type === 'system.note' && e.wake) {
       if (this.state === 'handed') this.next = true;
       else this.state = 'unread';
       return false;
     }
+    // Any result in the batch, before the note as well as after it (from
+    // Codex's review).
+    if (e.type === 'tool.result' && e.itemId && this.endTurns.has(e.itemId) && typeof e.text === 'string' && endTurnWantsReply({ ok: e.ok === true, text: e.text })) this.batchReply = true;
     if (e.type === 'tool.result' && this.state === 'unread') this.state = 'handed';
     // A Codex child's items (<child>/<id>) aren't the agent's own steps.
-    else if (this.state === 'handed' && (e.type === 'assistant.text' || e.type === 'reasoning' || e.type === 'tool.call') && !e.itemId?.includes('/')) {
+    else if ((e.type === 'assistant.text' || e.type === 'reasoning' || e.type === 'tool.call') && !e.itemId?.includes('/')) {
+      if (this.state !== 'handed') {
+        this.batchReply = false;
+        return false;
+      }
+      if (this.batchReply && e.type !== 'tool.call') return false;
+      this.batchReply = false;
       this.state = this.next ? 'unread' : 'none';
       this.next = false;
       return true;
@@ -941,6 +973,8 @@ export class WakeRead {
   reset(): void {
     this.state = 'none';
     this.next = false;
+    this.batchReply = false;
+    this.endTurns.clear();
   }
 }
 

@@ -121,10 +121,24 @@ Then('the limit line starts {string}', async function (this: ThreadbearWorld, wo
   await this.until(`a limit line starting "${words}"`, (d) => d.limit?.text?.startsWith(words));
 });
 
+Then('the limit box carries on by itself', async function (this: ThreadbearWorld) {
+  await this.until('the limit box offering to carry on by itself, set to Yes', (d) => d.limit?.carryOn === 'Yes');
+});
+
 Then("the limit line's button says {string}", async function (this: ThreadbearWorld, title: string) {
   await this.until(`the limit line's button "${title}"`, (d) => d.limit?.button === title);
 });
 
 Then('the model chip is marked {string}', async function (this: ThreadbearWorld, badge: string) {
   await this.until(`the model chip marked "${badge}"`, (d) => d.composer.chipBadge === badge);
+});
+
+When("I click the header's Scheduled chip for {string}", async function (this: ThreadbearWorld, title: string) {
+  // Its tip names the schedule, and says when it runs (`StartedBySchedule.tip`).
+  await this.app.do({ cmd: 'click', tipPrefix: `Started by a schedule: ${title} (` });
+});
+
+// What sits on the box just above it (the dump's composer.offerAbove).
+Then('the box has {string} just above it', async function (this: ThreadbearWorld, words: string) {
+  await this.until(`"${words}" over the box`, (d) => (d.composer as { offerAbove?: string | null }).offerAbove === words, 10_000);
 });

@@ -91,7 +91,7 @@ GPUI has no Quick Look or equivalent (grep empty). **[inferred]** Windows and Li
 - [ ] Security (7 Nov review): only real decodable images, never a file whose default app runs code (`quickLooks`, `LinkPolicy.isCodeRunner`).
 - [ ] A remote runner's pictures: fetch, "Loading…", "Couldn't get it from X", click retries, truncated means "On X".
 - [ ] Drag out as the file (`FileDrag`, 4 pt threshold). Copy Image puts original bytes plus TIFF, never a path.
-- [ ] Video letterbox fit, controls keep their presses, animated GIFs, refresh on reopen, pause on close.
+- [ ] Video letterbox fit, controls keep their presses, animated GIFs, refresh on reopen, pause on close. (GPUI on a Mac, 12 Nov: all but the GIFs, in `media_view.rs`.)
 - [ ] Clicks count when the app isn't in front.
 
 ## 4. Self-update and restart handover
@@ -266,7 +266,7 @@ GPUI: `show_system_notification` (tag, title, body, buttons) and a response call
 | **Transcript engine** (`NSTableView`, TextKit, `NSAttributedString`) | 11/3, 49/11, 338/21 | `TranscriptController`, `Cells` (2,449), `TextKit`, `MarkdownRenderer` | Biggest rewrite. I didn't study its behaviours here. |
 | `NSTextView` composer, IME | 24/9 | `ComposerView` (1,580) | Inline picture chips. Mike dictates, so test Voice Type against it [inferred] |
 | **WKWebView** | 35/5 + 13/3 related | `PanelsView` (1,253), `RichRenderer`, `LocalPreviewSchemeHandler`, `PreviewSandbox`, `FirstClick` | GPUI has no web view seen; patch panels and html/mermaid blocks depend on one. The lockdown is security work that needs re-proving (`SECURITY.md`). |
-| AVKit | 13/2 | `ReviewWindow`, `HighlightsView` | No video player seen in GPUI |
+| AVKit | 13/2 | `ReviewWindow`, `HighlightsView` | The GPUI app uses it too on a Mac, through `desktop/gpui/native/media_views.m` (12 Nov) |
 | SwiftTerm | 13/2 | `TerminalPanel` | Needs another terminal |
 | Highlightr, Charts, CoreImage (QR) | 7/1, 3/1, 2/1 | `TextFileView`, `UsagePanel`, `DevicesSettings` | gpui-component has highlighter and chart folders; QR needs a crate |
 | `NSMenu`, `NSPopover`, `NSPanel` | 121/14, 5/3, 4/4 | `MenuItems`, `Tips`, palette | In-window menus also avoid section 2 |

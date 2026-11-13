@@ -836,11 +836,13 @@ test("R5: a repo's filter drivers don't run: its own are refused, and your own d
   const e = { ...env, ...liveCommandEnv(env) } as NodeJS.ProcessEnv;
   for (const cmd of ['git merge-base --is-ancestor HEAD HEAD', 'git rev-list --count HEAD', "git branch -a --no-merged HEAD --format='%(refname:short)'"]) {
     assert.equal(live(repo, cmd).problem, undefined, cmd);
-    spawnSync('/bin/sh', ['-c', cmd], { cwd: repo, env: e, timeout: 20_000 });
+    // 2 minutes: a busy Mac's git outlived 20 s before the filter ran (Gerson
+    // Goulart's fork, 10 Nov 2026), which read as the filter not running.
+    spawnSync('/bin/sh', ['-c', cmd], { cwd: repo, env: e, timeout: 120_000 });
     assert.equal(fs.existsSync(marker), false, cmd);
   }
   // (The same global filter does run for git status, which isn't on the list.)
-  spawnSync('/bin/sh', ['-c', 'git status --porcelain'], { cwd: repo, env: e, timeout: 20_000 });
+  spawnSync('/bin/sh', ['-c', 'git status --porcelain'], { cwd: repo, env: e, timeout: 120_000 });
   assert.equal(fs.existsSync(marker), true, 'the test plays it right');
 });
 

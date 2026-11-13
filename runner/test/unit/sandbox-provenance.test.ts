@@ -42,7 +42,7 @@ function setup(opts: { callerIn?: 'box' | 'host'; mode?: PermissionMode } = {}) 
   // As the router has it: another runner's start (cross-runner.ts) answers for itself.
   const updates: Record<string, unknown>[] = [];
   const control = new Proxy(h.runner, { get: (t, k) => (k === 'update' ? (u: Record<string, unknown>) => (updates.push(u), t.update(u as never)) : k === 'startOn' ? async () => 'Asked bruce to start it.' : typeof (t as any)[k] === 'function' ? (t as any)[k].bind(t) : (t as any)[k]) });
-  const list = buildThreadbearTools(control as never, me.id, () => h.clock.now(), sched, undefined, undefined, { scheduleChecks: () => true, sleep: async () => {} });
+  const list = buildThreadbearTools(control as never, me.id, () => h.clock.now(), sched, undefined, undefined, { sleep: async () => {} });
   const call = async (name: string, args: Record<string, unknown>) => {
     const t = list.find((x) => x.name === name)!;
     const r = (await t.handler(args as never, {})) as { content: { text: string }[]; isError?: boolean };
@@ -166,8 +166,8 @@ test('messages, moves, schedules, checks and pins from a sandboxed thread ask on
   assert.match(sched.card.title, /^Schedule new threads with Full access outside the sandbox/);
   const check = await s.withCard('deny', 'schedule_message', { text: 'x', when: '1h', check: 'echo news' });
   assert.match(check.card.title, /shell command as you before each run, outside the sandbox/);
-  // A button's brief runs outside at Mike's press (the replyButtons experiment).
-  const list = buildThreadbearTools(s.h.runner, s.me.id, () => s.h.clock.now(), s.sched, undefined, undefined, { sleep: async () => {}, replyButtons: () => true } as never);
+  // A button's brief runs outside at Mike's press.
+  const list = buildThreadbearTools(s.h.runner, s.me.id, () => s.h.clock.now(), s.sched, undefined, undefined, { sleep: async () => {} } as never);
   const button = list.find((x) => x.name === 'add_button')!;
   {
     const before = s.h.events(s.me.id).filter((e) => e.type === 'approval.requested').length;

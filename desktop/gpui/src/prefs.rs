@@ -15,6 +15,9 @@ pub struct Prefs {
     pub remembered: Remembered,
     /// The commands picked from the slash palette lately, newest first.
     pub recent_slash: Vec<String>,
+    /// The size the slash palette and its columns were dragged to
+    /// (slash_resize.rs).
+    pub slash_layout: threadbear_core::slash::PaletteLayout,
 }
 
 fn path() -> PathBuf {
@@ -25,8 +28,10 @@ pub fn load() -> Prefs {
     std::fs::read(path()).ok().and_then(|data| serde_json::from_slice(&data).ok()).unwrap_or_default()
 }
 
+/// Written whole, and only this user's: the recent slash commands say what
+/// they've been doing (`private_file`).
 pub fn save(prefs: &Prefs) {
     if let Ok(data) = serde_json::to_vec_pretty(prefs) {
-        let _ = std::fs::write(path(), data);
+        let _ = threadbear_core::private_file::write(&path(), &data);
     }
 }

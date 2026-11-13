@@ -529,3 +529,17 @@ test("a patch's icon can be a picture or an app, relative to the patch file; act
   assert.equal(err(''), 'icon should be an SF Symbol name like "film", or a path to a picture or an app.');
   assert.equal(err('film'), undefined);
 });
+
+test("a url panel's {threadId} is the thread it's beside", async () => {
+  const { withThreadId } = await import('../../src/patches.ts');
+  const panels = [
+    { id: 'yt.videos', title: 'Videos', kind: 'url' as const, url: 'http://127.0.0.1:6427/?thread={threadId}', patch: 'yt' },
+    { id: 'yt.docs', title: 'Docs', kind: 'url' as const, url: 'https://x.dev', patch: 'yt' },
+  ];
+  const shown = withThreadId(panels, 'ab12 cd');
+  assert.equal(shown[0].url, 'http://127.0.0.1:6427/?thread=ab12%20cd');
+  assert.equal(shown[1], panels[1]);
+  assert.equal(panels[0].url, 'http://127.0.0.1:6427/?thread={threadId}', "the folder's shared set is left as it was");
+  const plain = panels.slice(1);
+  assert.equal(withThreadId(plain, 'x'), plain, 'nothing to fill in: the same list');
+});

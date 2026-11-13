@@ -81,19 +81,23 @@ Feature: Reading a thread
     Then the working line shows
     And the streaming reply grows
 
+  # A real thread's wait lines (a92fcf9a) wrapped onto several lines in the
+  # GPUI app and were drawn over the replies either side.
+  @transcript.gap
+  Scenario: Wait lines sit between the replies, not over them
+    Given a thread the agent picked up twice as background jobs finished, called "Land the folder it runs in"
+    When I open the thread "Land the folder it runs in"
+    Then the transcript shows a wait line starting "44s later · /Users/mike/.delegate/runs/"
+    And the transcript shows a wait line starting "3 min later · cd /Users/mike/dev/me/threadbear-threads/slot-5"
+    And each wait line's words are one line inside its own row
+
   @transcript.rowmenu
   Scenario: A reply's words can be copied from its menu
     When I open the thread "Make uploads resume after a crash"
     And I choose "Copy message" from the menu of the reply starting "Uploads now pick up"
     Then the clipboard holds "Uploads now pick up where they stopped"
 
-  @manual @gpui-pending @terminal.putcommand
-  Scenario: A shell block's play icon puts the command at the Terminal's prompt
-    When I open a thread whose reply has a bash block with "npm test"
-    And I press the block's play icon
-    Then the Terminal shows "npm test" at its prompt
-    And nothing has run until I press Return
-
+  # A block's play icon putting its command at the prompt is in terminal.feature.
   @manual @gpui-pending @terminal.putcommand
   Scenario: Only the thread in the main panel puts its commands in the Terminal
     When I open a thread whose reply has a bash block with "npm test"

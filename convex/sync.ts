@@ -12,7 +12,7 @@ import { actAs, checkRunnerId, forbidden, hasLiveKey, pageLimit, readRunnerOrder
 import { scrubDoc, scrubEveryString, SCRUB_RULES_VERSION, HELD_BACK } from './redaction';
 import { dropHead, seedHeads, syncHead, syncHeads } from './projectHeads';
 import { dropNotes, putNotes, syncNotes } from './projectNotes';
-import { badRunnerStats, cutBytes, docBytes, fitUsage, impossibleUsage, isIsoTime, LOGIN_EMAIL, LOGIN_PROVIDER, loginKey, mayClaim, NAME_CHARS, mayFinish, mayTake, mayTouch, mayUseStorage, mayWrite, nameSkeleton, normalName, ownsCard, SCHEDULE_ID, utf8Bytes, wholeIn, type Caller, type UsageDoc } from './runnerAccess';
+import { badRunnerStats, cutBytes, docBytes, fitUsage, holdThreadTimes, impossibleUsage, isIsoTime, LOGIN_EMAIL, LOGIN_PROVIDER, loginKey, isThreadId, mayClaim, NAME_CHARS, mayFinish, mayTake, mayTouch, mayUseStorage, mayWrite, nameSkeleton, normalName, ownsCard, SCHEDULE_ID, utf8Bytes, wholeIn, type Caller, type UsageDoc } from './runnerAccess';
 import { dropWake, seedWakes, syncWake } from './wakes';
 import { pushFailing, pushOff } from './pushHealth';
 import { issueToken as makeToken, listTokens as allTokens, revokeToken as revokeOne, tokenInfo, tokenKind, MAX_DAYS } from './tokens';
@@ -79,6 +79,8 @@ async function ownThread(ctx: QueryCtx | MutationCtx, caller: Caller, threadId: 
 // (runnerAccess.ts mayClaim).
 async function claimable(ctx: QueryCtx | MutationCtx, caller: Caller, threadId: string): Promise<boolean> {
   if (caller.owner) return true;
+  // Only an id of a thread id's shape (runnerAccess.ts isThreadId).
+  if (!isThreadId(threadId)) return false;
   const row = await threadRow(ctx, threadId);
   if (row) return row.runnerId === caller.runnerId;
   const claimedBy: string[] = [];
@@ -358,12 +360,18 @@ export const RUNNER_KEY_CAPS = {
   threadDoc: 8_192,
   recap: 1_000, // the librarian's 200 + 600, with room for multi-byte text
   threadText: 1_000, // title, preview, cwd, working line, each
+  keywords: 400, // the runner's 200 characters (keywords.ts), with room for multi-byte text
   threadsInView: 300, // per view the phone reads whole (inbox, hibernating)
   // A runner key's threads in all, every view (the M5 had 714 on 5 Nov,
   // Bruce 7): past it a new one waits (left out, sent again later).
   threads: 3_000,
   message: 10_000,
   messageDoc: 12_288,
+  // A Plan first plan (`plan`, API 72) goes whole up to the runner's 24,000
+  // characters (PLAN_CHARS), as it's read through before Go ahead: room for
+  // that many three-byte characters, and the rest of the row.
+  planMessage: 80_000,
+  planDoc: 84_000,
   // A runner key's messages' bytes in all: past it its oldest anywhere give
   // way before a new one goes in. The M5's whole history, about 83,000
   // messages, is about 21 MB.
@@ -445,15 +453,33 @@ function tooMany(what: string, max: number): ConvexError<{ kind: string; message
 }
 
 // A runner key's thread row cut to fit, or undefined: its text fields cut,
-// then the open card, follow-ups, links and projects dropped if it's still
-// too big (the phone shows the thread without them).
+// then the done card's loose ends, the open card, follow-ups, links and
+// projects dropped if it's still too big (the phone shows the thread without them).
 function fitThread<T extends Record<string, any>>(t: T): T | undefined {
   const out: Record<string, any> = { ...t };
   // Never in the future: lists are by activity, and a far-off time would
   // push every other Mac's threads off them.
   if (typeof out.lastActivityMs === 'number') out.lastActivityMs = Math.min(out.lastActivityMs, Date.now());
+  holdThreadTimes(out);
   for (const f of ['title', 'preview', 'cwd', 'working', 'asked']) if (typeof out[f] === 'string') out[f] = cutBytes(out[f], f === 'title' ? 300 : CAP.threadText);
   if (typeof out.recap === 'string') out.recap = cutBytes(out.recap, CAP.recap);
+  if (Array.isArray(out.looseEnds)) out.looseEnds = out.looseEnds.slice(0, 10).map((e: any) => ({ ...e, text: cutBytes(String(e.text ?? ''), 300) }));
+  if (out.review && Array.isArray(out.review.findings)) {
+    const cut = (s: unknown, n: number) => (typeof s === 'string' ? cutBytes(s, n) : undefined);
+    out.review = {
+      ...out.review,
+      reviewer: cutBytes(String(out.review.reviewer ?? ''), 100),
+      findings: out.review.findings.slice(0, 20).map((f: any) => {
+        const o: Record<string, unknown> = { ...f, claim: cutBytes(String(f.claim ?? ''), 300) };
+        for (const [k, n] of [['where', 200], ['case', 300], ['note', 300]] as const) {
+          if (o[k] === undefined) continue;
+          o[k] = cut(o[k], n);
+        }
+        return o;
+      }),
+    };
+  }
+  if (typeof out.keywords === 'string') out.keywords = cutBytes(out.keywords, CAP.keywords);
   if (out.startedBy) out.startedBy = { ...out.startedBy, label: cutBytes(String(out.startedBy.label ?? ''), 100), ...(out.startedBy.why !== undefined ? { why: cutBytes(String(out.startedBy.why), 300) } : {}) };
   // The card waiting on Mike is cut, never dropped: the phone shows the
   // thread waiting, and its push goes, with shorter text.
@@ -464,7 +490,9 @@ function fitThread<T extends Record<string, any>>(t: T): T | undefined {
   if (docBytes(out) > CAP.threadDoc && Array.isArray(out.asks) && out.asks.some((a: any) => a?.optionNotes)) {
     out.asks = out.asks.map(({ optionNotes: _notes, ...a }: any) => a);
   }
-  for (const f of ['asks', 'next', 'links', 'projects']) {
+  // Another lab's review goes first, then the done card's loose ends: the
+  // Mac has both, and the card still says Done without them.
+  for (const f of ['review', 'looseEnds', 'asks', 'next', 'links', 'projects']) {
     if (docBytes(out) <= CAP.threadDoc) break;
     delete out[f];
   }
@@ -491,14 +519,21 @@ function onTheMac(p: Record<string, any>): Record<string, any> {
   return { approvalId: p.approvalId, kind: 'approval', name: String(p.name ?? p.kind ?? 'question').slice(0, 60), title: p.kind === 'question' ? 'A question is waiting. Answer it on the Mac.' : 'This is waiting for you. Answer it on the Mac.', options: [] };
 }
 
+// A row with the room of a plan (CAP.planDoc): one the agent wrote, marked plan.
+function isPlanRow(m: Record<string, any>): boolean {
+  return m.plan === true && m.role === 'assistant';
+}
+
 // A runner key's message cut to fit whole (CAP.messageDoc): its text, and
 // every other field too.
 function fitMessage<T extends Record<string, any>>(m: T): T | undefined {
-  const out: Record<string, any> = { ...m, text: cutBytes(String(m.text ?? ''), CAP.message), at: cutBytes(String(m.at ?? ''), 64) };
+  // Only an agent's text can be a plan: a tool row's line never gets the room.
+  const plan = isPlanRow(m);
+  const out: Record<string, any> = { ...m, text: cutBytes(String(m.text ?? ''), plan ? CAP.planMessage : CAP.message), at: cutBytes(String(m.at ?? ''), 64) };
   for (const f of ['origin', 'toolKind', 'turn']) if (typeof out[f] === 'string') out[f] = cutBytes(out[f], 100);
   if (Array.isArray(out.wokeBy)) out.wokeBy = out.wokeBy.slice(0, 5).map((w: any) => ({ kind: cutBytes(String(w?.kind ?? ''), 40), description: cutBytes(String(w?.description ?? ''), 200) }));
   if (Array.isArray(out.buttons)) out.buttons = out.buttons.slice(0, MESSAGE_BUTTONS).map((b: any) => fitButton(b));
-  return docBytes(out) <= CAP.messageDoc ? (out as T) : undefined;
+  return docBytes(out) <= (plan ? CAP.planDoc : CAP.messageDoc) ? (out as T) : undefined;
 }
 
 // A message links at most this many buttons that the mirror keeps.
@@ -520,6 +555,7 @@ function fitIndexRow<T extends Record<string, any>>(r: T): T | undefined {
   const out: Record<string, any> = { ...r };
   for (const f of ['title', 'preview', 'cwd', 'asked']) if (typeof out[f] === 'string') out[f] = cutBytes(out[f], 300);
   if (typeof out.recap === 'string') out.recap = cutBytes(out.recap, CAP.recap);
+  if (typeof out.keywords === 'string') out.keywords = cutBytes(out.keywords, CAP.keywords);
   if (out.startedBy) out.startedBy = { ...out.startedBy, label: cutBytes(String(out.startedBy.label ?? ''), 100), ...(out.startedBy.why !== undefined ? { why: cutBytes(String(out.startedBy.why), 300) } : {}), ...(out.startedBy.threadTitle !== undefined ? { threadTitle: cutBytes(String(out.startedBy.threadTitle), 200) } : {}) };
   return docBytes(out) <= CAP.indexRow ? (out as T) : undefined;
 }
@@ -1299,6 +1335,8 @@ const messageDoc = v.object({
   origin: v.optional(v.string()),
   toolKind: v.optional(v.string()),
   summary: v.optional(v.boolean()), // API 14
+  plan: v.optional(v.boolean()), // API 72
+  planDecision: v.optional(v.union(v.literal('go'), v.literal('revise'))), // API 76
   turn: v.optional(v.string()), // API 26
   wokeBy: v.optional(v.array(v.object({ kind: v.string(), description: v.string() }))), // API 33
   buttons: v.optional(v.array(messageButton)), // API 59
@@ -1369,6 +1407,8 @@ export const appendMessages = mutation({
         if (m.pagedAt && !existing.pagedAt) patch.pagedAt = m.pagedAt;
         const buttons = keepPresses(existing.buttons, m.buttons);
         if (!sameButtons(existing.buttons, buttons)) patch.buttons = buttons;
+        // A plan's row sent again once it's resolved (API 76): only on a plan.
+        if (m.planDecision && existing.plan && existing.planDecision !== m.planDecision) patch.planDecision = m.planDecision;
         if (!Object.keys(patch).length) continue;
         // A runner key's row growing (bigger buttons sent again) is counted
         // against its budget like a new one, and waits when there's no room;
@@ -1378,7 +1418,7 @@ export const appendMessages = mutation({
         if (!caller.owner) {
           // Whole, as it would be stored, within a row's cap: its old text
           // with new buttons can be over it though each fit as sent.
-          if (storedBytes({ ...existing, ...patch, runnerId: undefined }) > CAP.messageDoc) {
+          if (storedBytes({ ...existing, ...patch, runnerId: undefined }) > (isPlanRow(existing) ? CAP.planDoc : CAP.messageDoc)) {
             skipped.push(`${m.threadId}:${m.seq}`);
             continue;
           }
@@ -2235,11 +2275,15 @@ export const pools = query({
     const caller = await runnerAuth(ctx, key, 'pools');
     const rows = await ctx.db.query('pools').collect();
     rows.sort((a, b) => a.order - b.order);
-    // A member named by runner id (a login with no email known) only counts
-    // on that runner, so a runner key has no use for another runner's, and
-    // its id is the owner's to know (runnersList).
-    const seen = (m: { runnerId?: string }) => caller.owner || m.runnerId === undefined || m.runnerId === caller.runnerId;
-    return rows.map(({ id, title, members, folders, icon }) => ({ id, title, members: members.filter(seen), ...(folders ? { folders } : {}), ...(icon ? { icon } : {}) }));
+    // A member named by runner id alone (a login with no email known) only
+    // counts on that runner, so a runner key has no use for another
+    // runner's, and its id is the owner's to know (runnersList). One with an
+    // email too (API 75: two logins on its runner share that email) goes to
+    // every runner, without the id for another runner's key.
+    const mine = (m: { runnerId?: string }) => caller.owner || m.runnerId === undefined || m.runnerId === caller.runnerId;
+    const forCaller = (members: { provider: string; email?: string; runnerId?: string; accountId?: string }[]) =>
+      members.flatMap((m) => (mine(m) ? [m] : m.email ? [{ provider: m.provider, email: m.email }] : []));
+    return rows.map(({ id, title, members, folders, icon }) => ({ id, title, members: forCaller(members), ...(folders ? { folders } : {}), ...(icon ? { icon } : {}) }));
   },
 });
 
@@ -3117,6 +3161,7 @@ const indexDoc = v.object({
   startedBy: v.optional(v.object({ kind: v.string(), label: v.string(), icon: v.optional(v.string()), threadTitle: v.optional(v.string()), why: v.optional(v.string()) })),
   asked: v.optional(v.string()), // since API 32
   recap: v.optional(v.string()), // since API 70
+  keywords: v.optional(v.string()), // since API 74
 });
 
 // Rows made or changed, and threads gone. With `keep`, every row of the

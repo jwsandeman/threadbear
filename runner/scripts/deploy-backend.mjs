@@ -305,7 +305,11 @@ function main(argv) {
   }
   if (todo.functions) {
     try {
-      step(`Deploying the Convex functions at ${short}`, npx, ['convex', 'deploy', '--typecheck', 'enable'], opts);
+      // --skip-large-indexes-check: there's no terminal to say yes in, so
+      // without it a new index on a big table (messages.search_text, 140k
+      // rows, 11 Nov 2026) stops every deploy. With it the push waits for the
+      // backfill, and the old functions serve until then.
+      step(`Deploying the Convex functions at ${short}`, npx, ['convex', 'deploy', '--typecheck', 'enable', '--skip-large-indexes-check'], opts);
     } catch (e) {
       failed('functions', e);
     }

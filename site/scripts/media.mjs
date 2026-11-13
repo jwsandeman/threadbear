@@ -28,15 +28,17 @@ function named() {
   return readReleases(join(root, "changelog")).flatMap((r) => r.highlights.flatMap((h) => {
     const m = h.media;
     if (!m) return [];
-    const names = m.type === "compare" ? [m.before, m.after] : m.type === "clip" ? [m.src, m.poster] : [m.src];
+    const names = m.type === "clip" ? [m.src, m.poster] : [m.src];
     return names.map((n) => ({ release: r.release, name: n }));
   }));
 }
 
-async function isUp(release, name) {
+/** The size of the file the live site has under that name, or undefined when it has none. */
+async function liveSize(release, name) {
   const r = await fetch(SITE_URL + mediaPath(release, name), { method: "HEAD" });
-  return r.ok;
+  return r.ok ? Number(r.headers.get("content-length")) : undefined;
 }
+const isUp = async (release, name) => (await liveSize(release, name)) !== undefined;
 
 const [command, only] = process.argv.slice(2);
 if (command === "upload") {
@@ -46,11 +48,16 @@ if (command === "upload") {
     const dir = join(local, release);
     if (!existsSync(dir)) throw new Error(`No ${dir}`);
     for (const name of readdirSync(dir).filter((f) => TYPES[f.split(".").pop()])) {
-      if (await isUp(release, name)) {
+      const file = join(dir, name);
+      const size = await liveSize(release, name);
+      if (size !== undefined) {
+        // Browsers keep a media file for good, so a name that's up can't take a different file:
+        // a reshot picture needs a new name (11 Nov: reshoots under the old names were skipped
+        // here and the page went on showing the old pictures).
+        if (size !== statSync(file).size) throw new Error(`${release}/${name} is already up as a different file: give the new one a new name (and change the JSON)`);
         console.log(`already up: ${release}/${name}`);
         continue;
       }
-      const file = join(dir, name);
       execFileSync("npx", ["-y", "wrangler@4", "r2", "object", "put", `${BUCKET}/changelog/${release}/${name}`,
         "--file", file, "--content-type", TYPES[name.split(".").pop()], "--remote"], { stdio: ["ignore", "ignore", "inherit"], cwd: root });
       console.log(`up: ${release}/${name} (${Math.round(statSync(file).size / 1024)} KB)`);

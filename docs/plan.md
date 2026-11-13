@@ -129,8 +129,11 @@ it works today read the guide and `docs/protocol.md`, "Runner keys".
   - Interrupt with `query.interrupt()`.
   - Idle release: 30 minutes after a turn ends with nothing pending, or
     immediately on snooze/archive, end the input so the CLI exits. The next
-    send starts a new `query()` with `resume`. Never run two live queries on
-    one session. Kill the CLI's process group if the runner exits.
+    send starts a new `query()` with `resume`. A fresh CLI asked for at the
+    end of a turn (another login or folder, `/clear`) waits, like the idle
+    countdown, for background shells and sub-agents to finish; only
+    snoozing, archiving or Mike's next message stops them. Never run two
+    live queries on one session. Kill the CLI's process group if the runner exits.
   - Title: first line of the first message, trimmed to 60 characters,
     then a small model's title, on a Claude login in the small-jobs pool
     (src/models/).

@@ -69,7 +69,14 @@ impl PendingMessage {
                 continue;
             }
             if let Some(index) = list.iter().position(|m| m.is_landed_by(event)) {
-                list.remove(index);
+                let landed = list.remove(index);
+                // That event is spoken for: any other with the same words
+                // can only be landed by a later one, however often the list
+                // is checked again (the app's outbox gives it after every
+                // change, and to a transcript opened later on these events).
+                for other in list.iter_mut().filter(|m| m.text == landed.text && m.images.len() == landed.images.len()) {
+                    other.after_seq = other.after_seq.max(event.seq);
+                }
                 removed = true;
                 if list.is_empty() {
                     break;

@@ -8,8 +8,9 @@ new ones, and threads still get both, for skills written before.
 
 Threadbear is Mike's own agent app: a TypeScript runner daemon (`runner/`)
 that drives the official Claude Code (and later Codex) CLIs, and a native
-SwiftUI + AppKit Mac app (`app/`) that talks to it over the protocol in
-`docs/protocol.md`. Read `docs/plan.md` and `docs/protocol.md` before changing
+desktop app that talks to it over the protocol in `docs/protocol.md`: the GPUI
+one in `desktop/`, which replaces the frozen SwiftUI one in `app/` (see "The
+GPUI port"). Read `docs/plan.md` and `docs/protocol.md` before changing
 anything. The Convex mirror, the iPhone app (`ios/`) and the website (`web/`)
 are in `docs/convex-backend.md` and `docs/website.md`. The public landing
 page (threadbear.mikecann.app) is `site/`, a separate
@@ -67,7 +68,7 @@ and ask the user what they use instead, rather than trying to reach them.
   validators, so a field Convex would refuse fails there too.
   Nightly, `scripts/parity/nightly.sh` plays the same scenarios into a
   throwaway backend on Tinker Desk and has the real website, iPhone app
-  and Mac app read them, with a picture of each side by side in
+  and GPUI Mac app read them, with a picture of each side by side in
   `~/Library/Caches/Threadbear/parity/<time>/index.html` (its first run
   found the website and the iPhone drawing cards without their notes).
   A scenario's `shows` are the words each surface must show.
@@ -126,6 +127,15 @@ and ask the user what they use instead, rather than trying to reach them.
   shot of the build beside the mockup he picked and check the layout
   matches, not just the wording. The done card shipped as a card in the
   transcript when he'd picked one joined to the composer (30 Oct).
+- A feature Mike uses (a card, a button, a panel, a window, a tool that
+  shows him something): once it's live on his app, show it working
+  before you report it done. Make a real example he can try there and
+  then (a show_options with a clip in it, a small new thread that offers
+  the new button, a patch panel with sample rows), plus a clip or shot
+  in the reply. Don't end on "the first thread that uses it will be its
+  first outing". He had to ask "can you show me an example so I can try
+  it?" on 6, 9 and 10 Nov (a602647d, 7c4ec91c, 69683b5d), found by the
+  nightly retro.
 - Animations: hand anything longer than a hover fade to Core Animation
   (keyframes, `animator()`, SwiftUI's own animations), never step it from
   the main thread each frame, and before landing try it with the main
@@ -156,9 +166,10 @@ and ask the user what they use instead, rather than trying to reach them.
   `.help` and `toolTip` never show in this app; TipsTests fails on them.
 - Transcript files and fixtures made from real sessions are private: keep them
   out of git (`.fixtures/` is ignored).
-- Errors go to Sentry (project `threadbear`, tag `component` mac, runner or
-  ios) only from what Mike really runs: the installed release app
-  (`app/Sources/Threadbear/CrashReporting.swift`), the installed runner's
+- Errors go to Sentry (project `threadbear`, tag `component` mac, runner,
+  ios or desktop) only from what Mike really runs: the installed release app
+  (`app/Sources/Threadbear/CrashReporting.swift`), the installed GPUI app
+  (`desktop/gpui/src/crash_reporting.rs`), the installed runner's
   release on the real data dir (`runner/src/sentry.ts`) and App Store
   iPhone builds. Debug builds, dev runners, tests, sandboxes and scripted
   runs never report; keep it that way. `THREADBEAR_SENTRY=off` turns it off.
@@ -168,6 +179,9 @@ and ask the user what they use instead, rather than trying to reach them.
   (`HangWatch.swift`). Each stall of 4 seconds or more has a `sample` of the
   stuck main thread, and one of 15 or more reaches Sentry as "Main thread
   stuck in ...". Fix the frame it names rather than guessing from logs.
+  The GPUI app keeps its own in `hangs/desktop` there
+  (`desktop/gpui/src/hang_watch.rs`), and its panics in
+  `~/Library/Logs/Threadbear/crashes/desktop`.
 - Mike's own repo: work goes to main once tests pass. A thread started in
   this repo has a worktree of its own and lands with `tb land` (below).
   Anywhere several threads share a checkout (the main one, a worktree made
@@ -224,13 +238,22 @@ look at the screen). Wake its screen with `caffeinate -u`, or the events go nowh
 ## The GPUI port
 
 The desktop app is being rewritten as one GPUI app for Mac, Windows and Linux
-(`docs/gpui-port.md`, `desktop/`). Until it replaces `app/`, a change to what the
-Mac app does should get a spec in `features/` (Gherkin, driven against both apps;
+(`docs/gpui-port.md`, `desktop/`). Mike uses it every day since 12 Nov, so the
+Swift app (`app/`, `dock/`) is frozen: changes go in `desktop/`, never in both.
+`scripts/swift-freeze.sh` refuses a Claude edit or a commit there in Mike's copy,
+and `check.sh` no longer builds or tests the Swift app unless it changed (or with
+`--app`). What the GPUI and iPhone apps still use from `app/` stays open (the mock
+runner, test tools, fixtures, art, the files ThreadbearKit links); the script's
+comment lists it, and says how to let a change through when Mike asks for one. In other
+people's copies it will only warn, from the release that gives them the GPUI app.
+A change to what the app does should get a spec in `features/` (Gherkin;
 `features/README.md`), so the two apps' differences stay visible in
 `docs/gpui-port/PARITY.md`. A change to how the transcript folds has to keep both
 languages' golden tests happy (`desktop/core/tests/golden`). Rust builds and spec
 runs go elsewhere: `desktop/scripts/remote.sh cloud -- <command>`, or
-`tinker-desk --desk` for a window on a real Mac.
+`tinker-desk --desk` for a window on a real Mac. The installed GPUI app
+follows main as the Mac app does (`desktop/gpui/src/app_update.rs`, built on a
+check host), so `wait_for_app_restart` hears it restart onto a landed change.
 
 ## Other people's PRs
 
@@ -298,8 +321,10 @@ if `tb` isn't found (an older runner, or outside a thread), use
 `runner/bin/tb`. `tb --help` lists the rest.
 
 - `./check.sh` runs every check (`--quick`: the runner's typecheck and
-  unit tests, about a minute, and the Mac app's release build when `app/`
-  or `dock/` changed; `--app`: the app's build and tests, for a
+  unit tests, about a minute, the Mac app's release build when `app/`
+  or `dock/` changed, and the GPUI port's core and client tests when
+  `desktop/` changed, with the full run adding a `cargo check` of the
+  whole workspace; `--app`: the app's build and tests, for a
   change outside `runner/`). With a check host set it copies the checkout
   there, runs it, brings back failed steps' logs and deletes the copy
   (`scripts/check-remote.sh`); one run at a time, so it may say it's
@@ -322,10 +347,24 @@ if `tb` isn't found (an older runner, or outside a thread), use
   reused with its Swift build caches so the app builds warm. Your system prompt says where. Commit there. When
   the work is done and checked, `tb land` rebases it on main, runs
   `./check.sh --quick` and fast-forwards main in the main checkout
-  (`--dry-run` first if you like; it never pushes). Mike's Land chip does
+  (`--dry-run` first if you like; it never pushes). Landings waiting
+  for the lock are checked together in the next check, and a failed
+  group is halved until the one that broke it is found
+  (docs/thread-worktrees.md, "Landing together"), so run it in the
+  background and expect up to two checks' wait. Mike's Land chip does
   the same. If it refuses, it says why and what to fix: commit your
   changes, sort out the conflicting files, fix the check, or wait for
-  whoever has uncommitted changes in main's checkout. You can carry on
+  whoever has uncommitted changes in main's checkout. It also holds a
+  landing that changes what the Desktop app workflow checks (desktop/,
+  features/ and its other paths) while that workflow's last run on main
+  failed on GitHub, naming the run and what failed: the quick check can't
+  see what only GitHub's Macs, Linux and Windows do (red for two days of
+  GPUI landings, 10 to 12 Nov). Fix that red first; `tb land
+  --despite-red` is for the landing that's the fix
+  (docs/thread-worktrees.md, "Red on GitHub"). To bring GitHub's main
+  into this Mac's, or push it, run `scripts/sync-main.sh`: it holds
+  the landing lock throughout and checks a rebased combination before
+  main moves (docs/thread-worktrees.md, "Syncing main with GitHub"). You can carry on
   after landing; the next `tb land` lands only what's new. Changing a
   `package.json`? Replace the link first: `rm runner/node_modules` (no
   trailing slash, so only the link goes), then `npm ci` there. When the
@@ -348,6 +387,9 @@ if `tb` isn't found (an older runner, or outside a thread), use
   the live runner unless `THREADBEAR_HOME` is set in that same command).
   Its threads start in `<dev home>/work` on claude-main (or
   `TB_E2E_ACCOUNT`) and claude-haiku-5-5 (its `runner.json` defaults), from `tb` or a debug app's composer alike.
+  For real-sized data use `--clone-real`, never `--home` on a copy of the
+  real data dir: a copy's threads are Mike's real sessions and folders
+  (docs/dev-tools.md, section 4).
   Leave `--home` out, or keep it and any extra work folders under
   `$TMPDIR`: Agent Archive skips transcripts from there, but not from
   `/tmp`, so a try-out thread in `/tmp` ends up in Mike's archive.

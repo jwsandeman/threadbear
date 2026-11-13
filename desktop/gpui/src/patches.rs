@@ -1,13 +1,13 @@
 // The Patches list and the panels a patch gives a thread, a port of the Swift
 // app's PatchesList, ListPanel and ImagePanel (PanelsView.swift), with action
 // chips (ActionChips). A panel's rows or picture come from the runner
-// (`panels.render`), asked for when it's shown and every so often while it is;
-// a web panel stays a placeholder with Open in Browser until the embedded web
-// view lands (`panel.web`).
+// (`panels.render`), asked for when it's shown and every so often while it is.
+// A web panel's page is web_panels.rs's (`panel.web`): the side pane only
+// draws one if it's asked to anyway, as a placeholder with Open in browser.
 use crate::call;
 use crate::highlights::{icon, palette, tipped, PaneRow, Palette, SidePane, OUTER_INSET};
 use crate::style;
-use gpui_kit::component::{h_flex, spinner::Spinner, v_flex, Sizable as _, StyledExt as _};
+use gpui_kit::component::{h_flex, spinner::Spinner, v_flex, ActiveTheme as _, Sizable as _, StyledExt as _};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 // Shadows gpui's px, so sizes here follow the app's zoom (style.rs).
@@ -191,7 +191,8 @@ impl SidePane {
                     }
                 }
             }
-            // A web panel: the embedded web view is later work.
+            // A web panel: web_panels.rs draws its page (shell.rs hands the
+            // section to it), so this is only a fallback.
             _ => self.render_web_placeholder(&panel, p, cx),
         }
     }
@@ -277,8 +278,11 @@ impl SidePane {
     pub(crate) fn render_patches(&mut self, thread: &ThreadSummary, cx: &mut Context<Self>) -> AnyElement {
         let p = palette(cx);
         let patches = thread.patches();
+        // On a project's page they're all the project's (projects.rs,
+        // `pane_thread`): one list, and what they are (PanelsView's `project`).
+        let project_page = self.app.upgrade().is_some_and(|app| app.read(cx).projects.open.is_some());
         let project_title = |id: &str| self.projects.get(id).map(|p| p.title.clone());
-        let groups = words::group(thread, &patches, project_title);
+        let groups = if project_page { vec![words::PatchGroup { project_id: None, title: None, patches: patches.clone() }] } else { words::group(thread, &patches, project_title) };
         let (actions, panels, hooks) = (thread.actions(), thread.panels(), thread.hooks());
         let mut list = v_flex().p(px(16.)).gap(px(14.));
         let show_headings = groups.len() > 1;
@@ -300,7 +304,12 @@ impl SidePane {
                 list = list.child(self.patch_row(&patch, gives, thread, p, cx));
             }
         }
-        list = list.child(div().pt(px(6.)).text_size(px(style::size::SMALL)).text_color(p.faint).child("A patch is a file in .threadbear/patches (in the thread's folder, a parent folder, a folder of one of its projects, or ~) whose default export lists actions, panels and hooks. Ask the agent for one."));
+        let footer = if project_page {
+            "These come from the project's folders, and every thread in it gets them. Ask the agent for another."
+        } else {
+            "A patch is a file in .threadbear/patches (in the thread's folder, a parent folder, a folder of one of its projects, or ~) whose default export lists actions, panels and hooks. Ask the agent for one."
+        };
+        list = list.child(div().pt(px(6.)).text_size(px(style::size::SMALL)).text_color(p.faint).child(footer));
         div().id("patches-list").size_full().overflow_y_scroll().child(list).into_any_element()
     }
 
@@ -350,6 +359,10 @@ impl SidePane {
             }
             if let Some(error) = &patch.live_error {
                 row = row.child(div().text_size(px(style::size::DETAIL)).text_color(p.failed).child(error.clone()));
+            }
+            // Why threads in Ask and Auto ask before every edit.
+            if let Some(why) = &patch.edits_ask {
+                row = row.child(div().text_size(px(style::size::DETAIL)).text_color(p.needs_you).child(why.clone()));
             }
         }
         if let Some(matched) = patch.matched.as_ref().filter(|m| !m.is_empty()) {
@@ -454,39 +467,172 @@ impl SidePane {
         .detach();
     }
 
-    /// The chips over the composer for a thread (`ActionChips`): each runs its
-    /// action; a running one shows a spinner and stops taking clicks.
-    pub(crate) fn render_action_chips(&mut self, thread: &ThreadSummary, cx: &mut Context<Self>) -> Option<AnyElement> {
+    /// The thread's actions as shelves on the composer's top edge
+    /// (`ActionChips`): a tab for each place the chips came from, led by its
+    /// badge, the chips grouped by patch with a hairline between, as many as
+    /// fit `room` and the rest under "+N". A press runs the action; a running
+    /// one shows a spinner and stops taking clicks. Inside a row of pills over
+    /// the box they read as part of writing a message, which Mike didn't
+    /// want (30 Oct), and the GPUI app had them that way until 11 Nov.
+    pub(crate) fn render_action_chips(&mut self, thread: &ThreadSummary, room: f32, project_icons: &HashMap<String, crate::sidebar::ProjectIcon>, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let actions = thread.actions();
-        if actions.is_empty() {
+        let patches = thread.patches();
+        let waiting: Vec<PatchInfo> = patches.iter().filter(|p| p.untrusted.is_some()).cloned().collect();
+        if actions.is_empty() && waiting.is_empty() {
             return None;
         }
         let p = palette(cx);
-        let mut row = h_flex().flex_wrap().gap(px(6.)).px(px(28.)).pb(px(8.));
-        for action in actions {
-            let running = self.panels.running.contains(&panel_key(&thread.id, &action.id));
-            let tip = format!("From the {} patch{}", action.patch, action.note.as_ref().map_or(String::new(), |n| format!(". {n}")));
-            let (action2, thread_id) = (action.clone(), thread.id.clone());
-            let symbol = action.icon.clone().unwrap_or_else(|| "bolt".to_owned());
-            let label = action.title.clone();
+        let chip_size = px(style::size::CHIP);
+        let measure = |text: &str, window: &Window| -> f32 {
+            let font = window.text_style().font();
+            let run = TextRun { len: text.len(), font, color: Hsla::default(), background_color: None, underline: None, strikethrough: None };
+            f32::from(window.text_system().shape_line(SharedString::from(text.to_owned()), chip_size, &[run], None).width)
+        };
+        // Each piece's width, as ActionChipsFit adds them up.
+        let z = style::zoomed;
+        let chip_width = |a: &Action, window: &Window| z(8.) + z(13.) + z(5.) + measure(&a.title, window) + a.badge.map_or(0., |n| z(5.) + measure(&badge_text(n), window) + z(10.)) + z(8.);
+        let tab = |inner: f32| z(6.) * 2. + inner;
+        let label = trust_label(&waiting);
+        let waiting_width = (!waiting.is_empty()).then(|| tab(z(8.) + z(11.) + z(5.) + measure(&label, window) + z(8.)));
+        let more_width = |n: usize, window: &Window| tab(z(6.) + measure(&format!("+{n}"), window) + z(6.));
+        let widths: HashMap<String, f32> = actions.iter().map(|a| (a.id.clone(), chip_width(a, window))).collect();
+        let row_width = |shown: usize, window: &Window| -> f32 {
+            let mut parts: Vec<f32> = waiting_width.into_iter().collect();
+            for shelf in core::ActionShelf::shelves(&actions[..shown], &patches) {
+                let mut items = vec![z(18.) + z(2.) * 2., 1. + z(2.) * 2.];
+                for (index, group) in shelf.patches.iter().enumerate() {
+                    if index > 0 {
+                        items.push(1. + z(2.) * 2.);
+                    }
+                    items.extend(group.iter().map(|a| widths.get(&a.id).copied().unwrap_or(0.)));
+                }
+                parts.push(tab(items.iter().sum::<f32>() + z(2.) * (items.len() as f32 - 1.)));
+            }
+            if shown < actions.len() {
+                parts.push(more_width(actions.len() - shown, window));
+            }
+            parts.iter().sum::<f32>() + z(6.) * (parts.len().max(1) as f32 - 1.)
+        };
+        // Half a point for rounding, as Swift's `shown` allows.
+        let shown = (0..=actions.len()).rev().find(|n| row_width(*n, window) <= room + 0.5).unwrap_or(0);
+        let (fill, edge) = (style::primary_opacity(cx, if cx.theme().is_dark() { 0.05 } else { 0.035 }), style::hairline(cx));
+        let shelf_tab = move || {
+            h_flex()
+                .flex_none()
+                .items_center()
+                .gap(px(2.))
+                .px(px(6.))
+                .py(px(4.))
+                .rounded_tl(px(10.))
+                .rounded_tr(px(10.))
+                .bg(fill)
+                .border_t(gpui_kit::px(0.5))
+                .border_l(gpui_kit::px(0.5))
+                .border_r(gpui_kit::px(0.5))
+                .border_color(edge)
+        };
+        let hairline = move || div().flex_none().mx(px(2.)).w(gpui_kit::px(1.)).h(px(14.)).bg(p.card_border);
+        let mut row = h_flex().items_end().gap(px(6.));
+        if !waiting.is_empty() {
+            let tip = trust_tip(&waiting);
             row = row.child(
-                tipped(
-                    div().id(SharedString::from(format!("action-{}", action.id))).h(px(26.)).px(px(9.)).flex().items_center().gap(px(5.)).rounded(px(13.)).bg(p.hover).border_1().border_color(p.card_border).when(!running, |s| s.cursor_pointer()),
-                    tip,
-                )
-                .when(running, |s| s.child(Spinner::new().with_size(px(11.)).color(p.secondary)))
-                .when(!running, |s| s.child(icon(&symbol, 11., p.secondary)))
-                .child(div().text_size(px(style::size::CHIP)).text_color(p.fg).child(label))
-                .when_some(action.badge, |s, n| s.child(div().text_size(px(style::size::SMALL)).text_color(p.secondary).child(n.to_string())))
-                .when(!running, |s| s.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.run_action(&action2, thread_id.clone(), cx)))),
+                shelf_tab().child(
+                    tipped(div().id("action-trust").flex().items_center().gap(px(5.)).px(px(8.)).py(px(4.)).rounded(px(6.)).cursor_pointer().hover(move |s| s.bg(p.hover)), tip)
+                        .child(icon("lock.shield", 11., style::needs_you(cx)))
+                        .child(div().text_size(chip_size).text_color(p.fg).child(label.clone()))
+                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.show_patches(cx))),
+                ),
             );
+        }
+        for (index, shelf) in core::ActionShelf::shelves(&actions[..shown], &patches).into_iter().enumerate() {
+            let project_title = match &shelf.origin {
+                core::PanelOrigin::Project(id) => thread.projects.iter().flatten().find(|p| &p.id == id).map(|p| p.title.clone()),
+                _ => None,
+            };
+            let badge_tip = shelf.origin.tip("These buttons", project_title.as_deref());
+            let badge_face: AnyElement = match &shelf.origin {
+                core::PanelOrigin::Project(_) => match crate::patch_icons::project_mark(&shelf.origin, thread, project_icons) {
+                    Some(mark) => project_badge_face(mark, p),
+                    None => div().into_any_element(),
+                },
+                other => crate::patch_icons::glyph(other.symbol().unwrap_or("folder.fill"), 10., Some(p.secondary)),
+            };
+            let mut tab_el = shelf_tab()
+                .child(tipped(div().id(("action-shelf-badge", index)).flex().flex_none().items_center().justify_center().size(px(18.)).mx(px(2.)), badge_tip).child(badge_face))
+                .child(hairline());
+            for (group_index, group) in shelf.patches.iter().enumerate() {
+                if group_index > 0 {
+                    tab_el = tab_el.child(hairline());
+                }
+                for action in group {
+                    tab_el = tab_el.child(self.action_chip(action, thread, cx));
+                }
+            }
+            row = row.child(tab_el);
+        }
+        if shown < actions.len() {
+            let more: Vec<Action> = actions[shown..].to_vec();
+            row = row.child(shelf_tab().child(self.more_chip(more, thread, cx)));
         }
         Some(row.into_any_element())
     }
 
+    /// One chip on a shelf (`ActionChip`): the patch's own icon in colour, or
+    /// its symbol, the title and its live count. The shelf is the chips'
+    /// frame, so each is only a fill under the pointer.
+    fn action_chip(&mut self, action: &Action, thread: &ThreadSummary, cx: &mut Context<Self>) -> AnyElement {
+        let p = palette(cx);
+        let running = self.panels.running.contains(&panel_key(&thread.id, &action.id));
+        let (action2, thread_id) = (action.clone(), thread.id.clone());
+        let symbol = core::action_glyph(action).to_owned();
+        tipped(
+            div().id(SharedString::from(format!("action-{}", action.id))).flex().flex_none().items_center().gap(px(5.)).px(px(8.)).py(px(4.)).rounded(px(6.)).when(!running, |s| s.cursor_pointer().hover(move |s| s.bg(p.hover))),
+            chip_tip(action),
+        )
+        .when(running, |s| s.child(Spinner::new().with_size(px(11.)).color(p.secondary)))
+        .when(!running, |s| s.child(crate::patch_icons::patch_icon(action.icon_file.as_deref(), &symbol, 11., Some(p.secondary))))
+        .child(div().text_size(px(style::size::CHIP)).text_color(p.fg).whitespace_nowrap().child(action.title.clone()))
+        .when_some(action.badge, |s, n| s.child(div().px(px(5.)).rounded_full().bg(style::primary_opacity(cx, 0.08)).text_size(px(style::size::SMALL)).font_weight(FontWeight::SEMIBOLD).text_color(p.secondary).child(badge_text(n))))
+        .when(!running, |s| s.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.run_action(&action2, thread_id.clone(), cx))))
+        .into_any_element()
+    }
+
+    /// The trust chip's press: Patches, where each can be read and trusted.
+    fn show_patches(&mut self, cx: &mut Context<Self>) {
+        let Some(app) = self.app.upgrade() else { return };
+        // Afterwards: the app may be mid-update when the pane is drawn.
+        cx.defer(move |cx| app.update(cx, |t, cx| t.show_pane(crate::shell::PATCHES, cx)));
+    }
+
+    /// "+N" on a shelf of its own (`ActionChipsMoreTab`): the chips that
+    /// didn't fit, in a menu.
+    fn more_chip(&mut self, more: Vec<Action>, thread: &ThreadSummary, cx: &mut Context<Self>) -> AnyElement {
+        use gpui_kit::component::popover::Popover;
+        let tip = more.iter().map(|a| a.title.clone()).collect::<Vec<_>>().join(", ");
+        let (pane, thread_id) = (cx.entity().downgrade(), thread.id.clone());
+        let count = more.len();
+        style::menu::popover(Popover::new("actions-more"), cx)
+            .anchor(Anchor::BottomLeft)
+            .trigger(MoreTrigger { count, tip })
+            .content(move |_, _, cx| {
+                let popover = cx.entity();
+                // A menu, drawn as the app's are (style::menu).
+                v_flex().min_w(gpui_kit::px(200.)).children(more.iter().enumerate().map(|(i, action)| {
+                    let (pane, thread_id, action, popover) = (pane.clone(), thread_id.clone(), action.clone(), popover.clone());
+                    style::menu::row(("action-more-row", i), Some(crate::icons::symbol("bolt")), cx)
+                        .child(action.title.clone())
+                        .on_click(move |_, window, cx| {
+                            popover.update(cx, |s, cx| s.dismiss(window, cx));
+                            pane.update(cx, |pane, cx| pane.run_action(&action, thread_id.clone(), cx)).ok();
+                        })
+                }))
+            })
+            .into_any_element()
+    }
+
     /// Whether the chip row has any chips, so the host can leave it out.
     pub(crate) fn has_action_chips(thread: &ThreadSummary) -> bool {
-        thread.actions.as_ref().is_some_and(|a| !a.is_empty())
+        thread.actions.as_ref().is_some_and(|a| !a.is_empty()) || thread.patches().iter().any(|p| p.untrusted.is_some())
     }
 
     #[cfg(feature = "automation")]
@@ -590,4 +736,85 @@ pub(crate) fn action_command(side: &Entity<SidePane>, thread: &ThreadSummary, cm
 #[cfg(feature = "automation")]
 pub(crate) fn actions_dump(pane: &SidePane, thread: &ThreadSummary) -> Value {
     Value::Array(thread.actions().iter().map(|a| json!({ "id": a.id, "title": a.title, "kind": a.kind, "running": pane.panels.running.contains(&panel_key(&thread.id, &a.id)) })).collect())
+}
+
+/// A chip's live count as it reads: "99+" past 99.
+fn badge_text(n: i64) -> String {
+    if n > 99 { "99+".to_owned() } else { n.to_string() }
+}
+
+/// What a chip does, then where it's from (`ActionChip.tip`): "From the
+/// checks patch, in threadbear", so a chip's origin is a hover away.
+fn chip_tip(action: &Action) -> String {
+    let what = action.note.clone().or_else(|| action.command.clone()).or_else(|| action.prompt.clone()).or_else(|| action.url.clone()).unwrap_or_else(|| action.title.clone());
+    if action.patch.is_empty() {
+        return what;
+    }
+    let folder = action.folder.as_deref().map(|f| format!(", in {}", threadbear_core::inbox::folder_name(f))).unwrap_or_default();
+    format!("{what}\nFrom the {} patch{folder}", action.patch)
+}
+
+/// "1 patch to trust", or the folder's Claude Code hooks when they're what
+/// waits (`WaitingPatchesChip.label`).
+fn trust_label(waiting: &[PatchInfo]) -> String {
+    let claude = waiting.iter().any(|p| p.source == "claude");
+    let patches = waiting.len() - usize::from(claude);
+    if patches == 0 {
+        "Hooks to trust".to_owned()
+    } else if claude {
+        format!("{} to trust", waiting.len())
+    } else if patches == 1 {
+        "1 patch to trust".to_owned()
+    } else {
+        format!("{patches} patches to trust")
+    }
+}
+
+fn trust_tip(waiting: &[PatchInfo]) -> String {
+    if waiting.iter().any(|p| p.source == "claude") {
+        "This folder has Claude Code hooks, environment settings or patch files that haven't been used, because you haven't trusted them yet. Each can run code on your Mac. Open Patches to read and trust them".to_owned()
+    } else {
+        "This folder has patch files that haven't run, because you haven't trusted them yet. A patch is code that runs on your Mac. Open Patches to read and trust them".to_owned()
+    }
+}
+
+/// A shelf's project badge: the project's picture, its symbol, or its letter.
+fn project_badge_face(mark: crate::patch_icons::ProjectMark, p: Palette) -> AnyElement {
+    match mark.icon {
+        Some(crate::sidebar::ProjectIcon { image_path: Some(path), .. }) => {
+            let letter = mark.letter.clone();
+            img(std::path::PathBuf::from(path))
+                .size(px(14.))
+                .rounded(px(3.))
+                .object_fit(ObjectFit::Contain)
+                .with_fallback(move || div().text_size(px(10.)).font_weight(FontWeight::SEMIBOLD).text_color(p.secondary).child(letter.clone()).into_any_element())
+                .into_any_element()
+        }
+        Some(crate::sidebar::ProjectIcon { symbol: Some(symbol), .. }) => crate::patch_icons::glyph(&symbol, 11., Some(p.secondary)),
+        _ => div().text_size(px(10.)).font_weight(FontWeight::SEMIBOLD).text_color(p.secondary).child(mark.letter).into_any_element(),
+    }
+}
+
+/// "+N" (`ActionChipsMoreTab`'s label), as the popover's trigger.
+#[derive(IntoElement)]
+struct MoreTrigger {
+    count: usize,
+    tip: String,
+}
+
+impl gpui_kit::component::Selectable for MoreTrigger {
+    fn selected(self, _: bool) -> Self {
+        self
+    }
+    fn is_selected(&self) -> bool {
+        false
+    }
+}
+
+impl RenderOnce for MoreTrigger {
+    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let p = palette(cx);
+        tipped(div().id("actions-more-button").px(px(6.)).py(px(4.)).rounded(px(6.)).cursor_pointer().hover(move |s| s.bg(p.hover)), self.tip)
+            .child(div().text_size(px(style::size::CHIP)).text_color(p.secondary).child(format!("+{}", self.count)))
+    }
 }

@@ -137,8 +137,8 @@ async function until(what: () => boolean, label: string) {
 
 function runners(w: Awaited<ReturnType<typeof world>>, s: ReturnType<typeof source>, t: ReturnType<typeof target>, timers: (() => void)[] = []) {
   const common = { runnerName: (id: string) => names[id] ?? id };
-  const ms = new Moves({ self: () => BRUCE, on: () => true, backend: () => w.backendFor(BRUCE_KEY, BRUCE), host: { ...common, ...s.host } as MovesHost, log, setTimer: (fn) => (timers.push(fn), { cancel() {} }) });
-  const mt = new Moves({ self: () => M5, on: () => true, backend: () => w.backendFor(OWNER, M5), host: { ...common, ...t.host } as MovesHost, log, setTimer: (fn) => (timers.push(fn), { cancel() {} }) });
+  const ms = new Moves({ self: () => BRUCE, backend: () => w.backendFor(BRUCE_KEY, BRUCE), host: { ...common, ...s.host } as MovesHost, log, setTimer: (fn) => (timers.push(fn), { cancel() {} }) });
+  const mt = new Moves({ self: () => M5, backend: () => w.backendFor(OWNER, M5), host: { ...common, ...t.host } as MovesHost, log, setTimer: (fn) => (timers.push(fn), { cancel() {} }) });
   ms.start();
   mt.start();
   return { ms, mt };
@@ -229,13 +229,13 @@ test("a thread moved away and back is this runner's again, and the old move's do
   const row = (moveId: string, from: string, to: string, state: MoveRow['state'], createdAt: number): MoveRow => ({ moveId, threadId: 'T1', from, to, state, createdAt, updatedAt: createdAt });
   const away = row('aaaaaaaa0001', M5, BRUCE, 'done', 1);
   const back = row('aaaaaaaa0002', BRUCE, M5, 'done', 2);
-  const ms = new Moves({ self: () => M5, on: () => true, backend: () => undefined, host, log });
+  const ms = new Moves({ self: () => M5, backend: () => undefined, host, log });
   ms.update([away, back]);
   await new Promise((r) => setImmediate(r));
   assert.equal(ms.gone('T1'), false);
   assert.equal(putAway, 0);
   // Only the move away: gone, and put away.
-  const once = new Moves({ self: () => M5, on: () => true, backend: () => undefined, host, log });
+  const once = new Moves({ self: () => M5, backend: () => undefined, host, log });
   once.update([away]);
   await new Promise((r) => setImmediate(r));
   assert.equal(once.gone('T1'), true);

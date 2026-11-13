@@ -2,6 +2,7 @@
 // (app/Sources/ThreadbearCore/Threads/ThreadSections.swift), which the phone's
 // InboxSections and the website's web/src/sections.ts follow too. A summary
 // is what `threads.list` gives; what a row says about it is in `sidebar.rs`.
+use std::collections::HashMap;
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -39,16 +40,28 @@ pub struct ThreadSummary {
     pub starred_at: Option<String>,
     pub archived_at: Option<String>,
     pub waiting_for_room: Option<Value>,
+    /// Whether a turn that hits its login's limit waits for room and carries
+    /// on by itself: on unless Mike turned it off on the limit box, when the
+    /// runner sends `false` (and nothing otherwise).
+    #[serde(default = "carry_on_by_default")]
+    pub carry_on_at_reset: bool,
     pub waiting_for_network: Option<Value>,
     /// Kept as it came: the reducer reads its own `BackgroundTask` from these.
     pub background: Option<Vec<Value>>,
     pub subagents: Option<Vec<Value>>,
+    /// The runner's loose-ends check for the done card (protocol "Loose
+    /// ends"), kept as it came and read with `loose_ends_check`, so one
+    /// the reducer can't read leaves the rest of the summary standing.
+    pub loose_ends: Option<Value>,
     pub projects: Option<Vec<Project>>,
     pub started_by: Option<Value>,
     pub schedule: Option<Value>,
     pub moving: Option<Value>,
     pub asked: Option<String>,
     pub preview: String,
+    /// The librarian's search words, for finding a thread by what it's about
+    /// when its title and preview don't say it (`matches`).
+    pub keywords: Option<String>,
     pub last_seq: u64,
     pub last_seen_seq: u64,
     /// The rail's panel buttons (`ThreadSummary.panels`) and Patches, as they
@@ -67,11 +80,19 @@ pub struct ThreadSummary {
     pub on_old_runner: Option<bool>,
     /// Sharing (protocol "Sharing"): `{ access, slug }`.
     pub share: Option<Value>,
+    /// When it was made (the About window's numbers, den.rs).
+    pub created_at: Option<String>,
+    /// One of the tour's made-up threads (`threads.samples`): left out of
+    /// the About window's numbers.
+    pub sample: Option<bool>,
     /// Which other runner it lives on; none for this Mac's own threads.
     /// Never on the wire: a runner's summaries are all its own (Swift
     /// `ThreadSummary.runnerId`), and `remote::summary` sets it.
     #[serde(skip)]
     pub runner_id: Option<String>,
+    /// A panel the agent asked to show Mike, waiting for him to look at the
+    /// thread (panel_requests.rs).
+    pub panel_request: Option<crate::panel_requests::PanelRequest>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -84,6 +105,13 @@ pub struct OpenAsk {
     pub options: Option<Vec<String>>,
     pub suggested: Option<usize>,
     pub ticked: Option<bool>,
+    /// What each option does, the reply a plain ask wants, and the ask's
+    /// links, as they came: a decision on a project's page draws the thread's
+    /// card from these (`projects::decision_asks`), as its composer draws it
+    /// from the turn.
+    pub option_notes: Option<Vec<String>>,
+    pub reply: Option<String>,
+    pub links: Option<Vec<Value>>,
 }
 
 impl OpenAsk {
@@ -91,6 +119,10 @@ impl OpenAsk {
     pub fn where_text(&self) -> Option<String> {
         self.place.as_deref().filter(|w| !w.is_empty()).map(crate::sidebar::preview_plain)
     }
+}
+
+fn carry_on_by_default() -> bool {
+    true
 }
 
 /// One of a thread's projects (`ThreadProject`): who put it there, and the
@@ -107,6 +139,22 @@ pub struct Project {
 }
 
 impl ThreadSummary {
+    /// While it's on its way to another machine, what its box says in place
+    /// of the words ("Moving to bruce…"): anything typed or answered now
+    /// could land on the wrong side of the move, so the box and the card
+    /// wait. None once it's there, or once the move failed or was called off
+    /// (`ThreadMove.line`, ComposerView's `moving`).
+    pub fn moving_line(&self) -> Option<String> {
+        let moving = self.moving.as_ref()?;
+        let state = moving.get("state").and_then(Value::as_str).unwrap_or("");
+        let name = moving.get("toName").and_then(Value::as_str).unwrap_or("");
+        match state {
+            "failed" | "cancelled" => None,
+            "ready" => Some(format!("Moving to {name} once this turn ends…")),
+            _ => Some(format!("Moving to {name}…")),
+        }
+    }
+
     /// Newer events than Mike has seen.
     pub fn unread(&self) -> bool {
         self.last_seq > self.last_seen_seq
@@ -121,6 +169,11 @@ impl ThreadSummary {
     /// The background list, read leniently: a malformed entry is left out.
     pub fn background_tasks(&self) -> Vec<BackgroundTask> {
         self.background.iter().flatten().filter_map(|v| serde_json::from_value(v.clone()).ok()).collect()
+    }
+    /// What's still open on the done card, as the reducer takes it
+    /// (Swift `ThreadSummary.looseEnds`, which decodes it leniently too).
+    pub fn loose_ends_check(&self) -> Option<crate::reducer::LooseEnds> {
+        self.loose_ends.as_ref().and_then(crate::reducer::LooseEnds::decode)
     }
     /// Sub-agents or a workflow still at work, or just finished with their
     /// result still to be read (Swift `agentsStillWorking`).
@@ -286,15 +339,104 @@ pub struct Section {
     pub rows: Vec<ThreadSummary>,
 }
 
-/// Sections in the Mac app's default order (`ThreadSections.build`).
+/// Sections in the Mac app's default order (`ThreadSections.build`), with no
+/// schedules known.
 pub fn sections<'a>(threads: impl IntoIterator<Item = &'a ThreadSummary>, now_ms: i64) -> Vec<Section> {
-    sections_ordered(threads, now_ms, InboxOrder::NeedsYou)
+    sections_ordered(threads, now_ms, InboxOrder::NeedsYou, &HashMap::new())
+}
+
+/// When a schedule next messages a thread by itself, and its words for when
+/// ("Weekdays at 9:00").
+#[derive(Clone, Debug, PartialEq)]
+pub struct Wake {
+    pub at_ms: i64,
+    pub when_text: String,
+}
+
+/// `ThreadSections.wakes`: for each thread a schedule will message by itself,
+/// the one due soonest. Paused and finished ones don't count, nor ones that
+/// start a new thread.
+pub fn wakes(schedules: &[crate::highlights::Schedule]) -> HashMap<String, Wake> {
+    let mut soonest: HashMap<String, Wake> = HashMap::new();
+    for schedule in schedules.iter().filter(|s| s.is_active()) {
+        let (Some(thread), Some(at_ms)) = (schedule.thread_id.as_ref(), schedule.next_run_at.as_deref().and_then(parse_ms)) else { continue };
+        if soonest.get(thread).is_some_and(|w| w.at_ms <= at_ms) {
+            continue;
+        }
+        soonest.insert(thread.clone(), Wake { at_ms, when_text: schedule.when_text.clone() });
+    }
+    soonest
+}
+
+/// `ThreadSections.needsYouCount`: the threads waiting on Mike, for the Dock
+/// badge, without sorting anything: one in the Inbox, or starred and awake,
+/// that wants him (`wants_you`).
+pub fn needs_you_count<'a>(threads: impl IntoIterator<Item = &'a ThreadSummary>, now_ms: i64) -> usize {
+    threads
+        .into_iter()
+        .filter(|t| {
+            if !t.wants_you() || t.is_archived() {
+                return false;
+            }
+            if t.is_starred() {
+                return t.snoozed_until_ms().is_none();
+            }
+            if t.snoozed(now_ms) {
+                return false;
+            }
+            // In the Inbox: what needs Mike goes there even with work going in
+            // the background; otherwise a running thread is under Running.
+            t.review_waiting() || t.needs_answer() || t.waiting_on_mike() || (t.needs_you && !t.working_in_background()) || !(t.busy() || t.working_in_background())
+        })
+        .count()
+}
+
+/// The Dock badge's words: the count, or none (`DockBadge.label`).
+pub fn dock_badge(count: usize) -> Option<String> {
+    (count > 0).then(|| count.to_string())
+}
+
+/// What a notification for a thread that's come to need Mike says
+/// (`Notifier.post`): its title, and what it asked for, else its last words.
+pub fn notification_words(t: &ThreadSummary) -> (String, String) {
+    let title = if t.title.is_empty() { "Threadbear".to_owned() } else { t.title.clone() };
+    let body = if t.status == "waiting" {
+        "Waiting for you to answer.".to_owned()
+    } else if let Some(action) = t.asks.as_ref().and_then(|asks| asks.iter().find(|a| a.ticked != Some(true))).map(|a| crate::sidebar::preview_plain(&a.action)) {
+        action
+    } else if t.preview.is_empty() {
+        "Finished.".to_owned()
+    } else {
+        crate::sidebar::preview_plain(&t.preview)
+    };
+    (title, body)
+}
+
+/// `AppModel.apply`'s rule for a notification: the thread has just come to
+/// need Mike (it didn't before, or wasn't known) and he isn't looking at it.
+/// Never another runner's thread: notifications are low-key, and that Mac's
+/// app says so there.
+pub fn should_notify(before: Option<&ThreadSummary>, after: &ThreadSummary, looking_at_it: bool) -> bool {
+    after.needs_you && !before.is_some_and(|b| b.needs_you) && !looking_at_it && after.runner_id.is_none()
+}
+
+/// The notification's identifier, as the Swift app's (`Notifier.post`): one
+/// per thread and point in it, so a later one doesn't replace an earlier one
+/// still unread, and the thread comes back out of it when it's clicked.
+pub fn notification_tag(t: &ThreadSummary) -> String {
+    format!("{}-{}", t.id, t.last_seq)
+}
+
+/// The thread a notification's tag names (`notification_tag`).
+pub fn thread_in_tag(tag: &str) -> Option<&str> {
+    tag.rsplit_once('-').map(|(id, _)| id).filter(|id| !id.is_empty())
 }
 
 /// `ThreadSections.build`: where each thread goes and the order within each
-/// heading. A thread with a schedule due to message it (`wakes` in the Swift
-/// app) stays in the Inbox here until this app loads schedules.
-pub fn sections_ordered<'a>(threads: impl IntoIterator<Item = &'a ThreadSummary>, now_ms: i64, order: InboxOrder) -> Vec<Section> {
+/// heading. `wakes` are the threads a schedule is due to message
+/// (`inbox::wakes`): one that's idle with nothing for Mike waits for it under
+/// Hibernating rather than sitting in the Inbox.
+pub fn sections_ordered<'a>(threads: impl IntoIterator<Item = &'a ThreadSummary>, now_ms: i64, order: InboxOrder, wakes: &HashMap<String, Wake>) -> Vec<Section> {
     let (mut starred, mut inbox, mut running, mut hibernating, mut archived) = (vec![], vec![], vec![], vec![], vec![]);
     for t in threads {
         if t.is_archived() {
@@ -307,6 +449,8 @@ pub fn sections_ordered<'a>(threads: impl IntoIterator<Item = &'a ThreadSummary>
             inbox.push(t.clone());
         } else if t.busy() || t.working_in_background() {
             running.push(t.clone());
+        } else if t.status == "idle" && t.needs.as_deref() != Some("you") && t.waiting_for_room.is_none() && wakes.contains_key(&t.id) {
+            hibernating.push(t.clone());
         } else {
             inbox.push(t.clone());
         }
@@ -324,9 +468,10 @@ pub fn sections_ordered<'a>(threads: impl IntoIterator<Item = &'a ThreadSummary>
         InboxOrder::Oldest => inbox.sort_by_cached_key(|t| (t.activity_ms(), Reverse(t.id.clone()))),
     }
     running.sort_by_cached_key(newest_first);
-    // A snooze's time; back on restart has none, so it goes last.
-    let wakes = |t: &ThreadSummary| t.snoozed_until_ms().filter(|_| t.snoozed_until_restart != Some(true)).unwrap_or(i64::MAX);
-    hibernating.sort_by_cached_key(|t| (wakes(t), newest_first(t)));
+    // A snooze's time, or for one waiting on a schedule its next run. Back on
+    // restart has no time, so it goes last.
+    let wakes_at = |t: &ThreadSummary| t.snoozed_until_ms().filter(|_| t.snoozed_until_restart != Some(true)).or_else(|| wakes.get(&t.id).map(|w| w.at_ms)).unwrap_or(i64::MAX);
+    hibernating.sort_by_cached_key(|t| (wakes_at(t), newest_first(t)));
     archived.sort_by_cached_key(|t| (Reverse(t.archived_ms()), t.id.clone()));
     [("starred", "Starred", starred), ("inbox", "Inbox", inbox), ("running", "Running", running), ("hibernating", "Hibernating", hibernating), ("archived", "Archived", archived)]
         .into_iter()
@@ -337,8 +482,56 @@ pub fn sections_ordered<'a>(threads: impl IntoIterator<Item = &'a ThreadSummary>
 
 /// Whether a sidebar search finds this thread: its title or its last reply,
 /// as ThreadSections.matches has it. `query` is already lowercase.
+/// Title, preview or the librarian's search words, case and accent
+/// insensitive (`ThreadSections.matches`). The search words find a thread by
+/// what it's about when neither says it ("dentist" for a wisdom tooth
+/// appointment).
 pub fn matches(t: &ThreadSummary, query: &str) -> bool {
-    t.title.to_lowercase().contains(query) || t.preview.to_lowercase().contains(query)
+    let query = fold(query);
+    [Some(t.title.as_str()), Some(t.preview.as_str()), t.keywords.as_deref()].into_iter().flatten().any(|text| fold(text).contains(&query))
+}
+
+/// Lower case with the accents taken off, for comparing as Swift's
+/// `[.caseInsensitive, .diacriticInsensitive]` does: "Café" and "cafe" are
+/// the same. Combining marks go, and the accented Latin letters become their
+/// plain ones; anything else is only lower-cased.
+pub fn fold(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        if ('\u{300}'..='\u{36f}').contains(&c) {
+            continue;
+        }
+        match plain_letter(c) {
+            Some(plain) => out.push(plain),
+            None => out.extend(c.to_lowercase()),
+        }
+    }
+    out
+}
+
+fn plain_letter(c: char) -> Option<char> {
+    Some(match c {
+        'À'..='Å' | 'à'..='å' | 'Ā'..='ą' => 'a',
+        'Ç' | 'ç' | 'Ć'..='č' => 'c',
+        'Ď'..='đ' => 'd',
+        'È'..='Ë' | 'è'..='ë' | 'Ē'..='ě' => 'e',
+        'Ĝ'..='ģ' => 'g',
+        'Ĥ'..='ħ' => 'h',
+        'Ì'..='Ï' | 'ì'..='ï' | 'Ĩ'..='ı' => 'i',
+        'Ĵ' | 'ĵ' => 'j',
+        'Ķ' | 'ķ' => 'k',
+        'Ĺ'..='ł' => 'l',
+        'Ñ' | 'ñ' | 'Ń'..='ň' => 'n',
+        'Ò'..='Ö' | 'Ø' | 'ò'..='ö' | 'ø' | 'Ō'..='ő' => 'o',
+        'Ŕ'..='ř' => 'r',
+        'Ś'..='š' => 's',
+        'Ţ'..='ŧ' => 't',
+        'Ù'..='Ü' | 'ù'..='ü' | 'Ũ'..='ų' => 'u',
+        'Ŵ' | 'ŵ' => 'w',
+        'Ý' | 'ý' | 'ÿ' | 'Ŷ' | 'ŷ' | 'Ÿ' => 'y',
+        'Ź'..='ž' => 'z',
+        _ => return None,
+    })
 }
 
 /// The last part of a folder's path, on any platform.
@@ -440,6 +633,16 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    #[test]
+    fn a_thread_on_its_way_to_another_machine_says_so_in_its_box() {
+        let moving = |state: &str| thread(1, json!({ "moving": { "moveId": "m1", "to": "r2", "toName": "bruce", "state": state } }));
+        assert_eq!(moving("copying").moving_line().as_deref(), Some("Moving to bruce…"));
+        assert_eq!(moving("ready").moving_line().as_deref(), Some("Moving to bruce once this turn ends…"));
+        assert_eq!(moving("failed").moving_line(), None, "a failed move gives the box back");
+        assert_eq!(moving("cancelled").moving_line(), None);
+        assert_eq!(thread(2, json!({})).moving_line(), None);
+    }
+
     fn thread(n: u32, over: Value) -> ThreadSummary {
         let mut v = json!({
             "id": format!("t{n}"), "title": format!("Thread {n}"), "cwd": "/home/mike/dev/x",
@@ -454,6 +657,74 @@ mod tests {
     }
     fn now() -> i64 {
         parse_ms("2026-11-06T12:00:00Z").unwrap()
+    }
+
+    #[test]
+    fn the_badge_counts_what_waits_on_mike_and_a_notification_says_what_it_asked() {
+        let asks = thread(1, json!({ "needs": "you", "needsYou": true, "asks": [{ "action": "Ship **it**?" }] }));
+        let unread = thread(2, json!({ "needsYou": true, "lastSeenSeq": 3 }));
+        let read = thread(3, json!({}));
+        let asleep = thread(4, json!({ "needsYou": true, "snoozedUntil": "2026-11-07T00:00:00Z" }));
+        let all = [asks.clone(), unread, read, asleep];
+        assert_eq!(needs_you_count(&all, now()), 2);
+        assert_eq!(dock_badge(2).as_deref(), Some("2"));
+        assert_eq!(dock_badge(0), None);
+        let (title, body) = notification_words(&asks);
+        assert_eq!(title, "Thread 1");
+        assert_eq!(body, "Ship it?");
+    }
+
+    #[test]
+    fn search_finds_the_librarians_words_whatever_the_case_and_accents() {
+        let t = thread(1, json!({ "title": "Café plans", "preview": "Booked the RÉSUMÉ review", "keywords": "dentist wisdom tooth" }));
+        assert!(matches(&t, "cafe"), "an accent in the title");
+        assert!(matches(&t, "CAFÉ"));
+        assert!(matches(&t, "resume"), "and in the preview");
+        assert!(matches(&t, "Dentist"), "the librarian's words");
+        assert!(!matches(&t, "dentistry"));
+        assert_eq!(fold("Ångström Łódź Ñandú"), "angstrom lodz nandu");
+        assert_eq!(fold("e\u{301}"), "e", "a combining accent goes too");
+    }
+
+    #[test]
+    fn a_notification_comes_once_when_a_thread_starts_needing_mike_elsewhere() {
+        let quiet = thread(1, json!({}));
+        let needy = thread(1, json!({ "needsYou": true, "lastSeq": 42 }));
+        assert!(should_notify(Some(&quiet), &needy, false));
+        assert!(should_notify(None, &needy, false), "a thread first heard of needing him");
+        assert!(!should_notify(Some(&needy), &needy, false), "only when it starts");
+        assert!(!should_notify(Some(&quiet), &needy, true), "not while he's looking at it");
+        let mut remote = needy.clone();
+        remote.runner_id = Some("other-mac".into());
+        assert!(!should_notify(Some(&quiet), &remote, false), "another runner's says so on that Mac");
+        let tag = notification_tag(&needy);
+        assert_eq!(tag, "t1-42");
+        assert_eq!(thread_in_tag(&tag), Some("t1"));
+        assert_eq!(thread_in_tag("b0e6c5a2-1111-2222-3333-444455556666-7"), Some("b0e6c5a2-1111-2222-3333-444455556666"), "a thread id has dashes of its own");
+        assert_eq!(thread_in_tag("nothing"), None);
+    }
+
+    #[test]
+    fn a_thread_waiting_on_its_schedule_hibernates_until_it() {
+        use crate::highlights::Schedule;
+        let schedule = |id: &str, thread: &str, next: &str, paused: bool| Schedule { id: id.into(), thread_id: Some(thread.into()), next_run_at: Some(next.into()), when_text: "Weekdays at 9:00".into(), paused, ..Default::default() };
+        let quiet = thread(1, json!({}));
+        let later = thread(2, json!({}));
+        let asks = thread(3, json!({ "needs": "you", "needsYou": true, "asks": [{ "action": "Ship it?" }] }));
+        let paused = thread(4, json!({}));
+        let schedules = [
+            schedule("s1", "t1", "2026-11-07T09:00:00Z", false),
+            schedule("s1b", "t1", "2026-11-06T13:00:00Z", false),
+            schedule("s2", "t2", "2026-11-06T12:30:00Z", false),
+            schedule("s3", "t3", "2026-11-06T13:00:00Z", false),
+            schedule("s4", "t4", "2026-11-06T13:00:00Z", true),
+        ];
+        let wakes = wakes(&schedules);
+        assert_eq!(wakes["t1"].at_ms, parse_ms("2026-11-06T13:00:00Z").unwrap(), "the soonest of its schedules");
+        assert!(!wakes.contains_key("t4"), "a paused schedule wakes nothing");
+        let s = sections_ordered(&[quiet, later, asks, paused], now(), InboxOrder::NeedsYou, &wakes);
+        assert_eq!(ids(&s, "hibernating"), ["t2", "t1"], "soonest to wake first");
+        assert_eq!(ids(&s, "inbox"), ["t3", "t4"], "one that needs Mike stays where he'll see it");
     }
 
     #[test]

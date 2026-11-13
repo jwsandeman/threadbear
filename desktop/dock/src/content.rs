@@ -69,6 +69,10 @@ pub type WindowWrapper = Rc<dyn Fn(AnyElement, &mut Window, &mut App) -> AnyElem
 /// Called on a panel's window of its own as it's made, before it shows.
 pub type PrepareWindow = Rc<dyn Fn(&mut Window, &mut App)>;
 
+/// Told when a panel's window of its own comes to the front (true) or goes,
+/// closing included, with that window.
+pub type WindowActivation = Rc<dyn Fn(bool, &mut Window, &mut App)>;
+
 /// How the dock fits the app around it.
 #[derive(Clone)]
 pub struct DockOptions {
@@ -95,6 +99,8 @@ pub struct DockOptions {
     pub window_content: Option<WindowWrapper>,
     /// Called on a panel's window of its own as it's made, before it shows.
     pub prepare_window: Option<PrepareWindow>,
+    /// Called as a panel's window of its own comes to the front or goes.
+    pub window_activation: Option<WindowActivation>,
 }
 
 impl Default for DockOptions {
@@ -108,6 +114,7 @@ impl Default for DockOptions {
             accent: None,
             window_content: None,
             prepare_window: None,
+            window_activation: None,
         }
     }
 }

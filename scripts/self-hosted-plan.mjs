@@ -115,3 +115,71 @@ export function origins(mode, name) {
   const at = (port) => `https://${name}:${port}`;
   return { url: at(PORTS.api[0]), site: at(PORTS.site[0]), dashboard: at(PORTS.dashboard[0]) };
 }
+
+// What `tailscale serve status --json` (its spawnSync result) says is served
+// on one tailnet port: the handlers, [] for nothing, or undefined when it
+// couldn't say (it failed, didn't run, or printed something that isn't its
+// JSON). Undefined is never "nothing": a stopped Tailscale keeps what it
+// serves and puts it back when it starts (Daybreak, 11 Nov 2026).
+export function servedOn(status, tailnetPort) {
+  if (!status || status.error || status.status !== 0) return undefined;
+  let cfg;
+  try {
+    cfg = JSON.parse(status.stdout?.trim() || '{}');
+  } catch {
+    return undefined;
+  }
+  if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg)) return undefined;
+  const web = cfg.Web ?? {};
+  if (!web || typeof web !== 'object') return undefined;
+  const out = [];
+  for (const [hostPort, w] of Object.entries(web)) {
+    if (!hostPort.endsWith(`:${tailnetPort}`)) continue;
+    if (!w || typeof w !== 'object') return undefined;
+    out.push(...Object.values(w.Handlers ?? {}));
+  }
+  return out;
+}
+
+// What a local backend's setup does about one of its tailnet ports:
+//   { do: 'off' }      take it off (`tailscale serve --https=<port> off`)
+//   { do: 'nothing' }  nothing of this backend's is served there
+//   { do: 'note', message }  couldn't tell, said, and carries on
+//   { do: 'fail', message }  stops setup, keeping the tailnet URL in
+//                            runner.json, so the next run is a move again
+//                            and tries again
+// `moving` is a move off the tailnet (plan.from === 'tailnet'): there it has
+// to know the port is off before it says the backend is on this Mac only, so
+// no Tailscale found, or one that can't say, stops it. Otherwise only an
+// earlier failed move could have left anything (and that one stopped), so it
+// says so and goes on. `handlers` is servedOn's answer; `cli` whether a
+// tailscale command was found at all.
+export function offTailnetStep({ cli, handlers, tailnetPort, localPort, moving }) {
+  const target = `http://127.0.0.1:${localPort}`;
+  if (!cli) {
+    // Tailscale keeps what it serves until it's told otherwise, so there's
+    // no telling it's gone without it: setup has to see the ports off once.
+    if (moving) return { do: 'fail', message: `Setup can't find Tailscale (no tailscale command, and no /Applications/Tailscale.app), so it can't check that this backend is off your tailnet, where an earlier setup served it on port ${tailnetPort}. If it's installed, put the tailscale command on your PATH; if you removed it, install it again (https://tailscale.com/download) and open it. Then run setup again: it takes the backend's ports off, and you can remove Tailscale after.` };
+    return { do: 'nothing' };
+  }
+  if (!handlers) {
+    if (moving) return { do: 'fail', message: `Couldn't ask Tailscale what it serves (tailscale serve status failed), so setup can't take this backend off your tailnet. Open Tailscale and run setup again.` };
+    return { do: 'note', message: `couldn't ask Tailscale what it serves on port ${tailnetPort}; if an earlier setup put this backend on your tailnet, check tailscale serve status` };
+  }
+  const ours = handlers.filter((h) => typeof h?.Proxy === 'string' && h.Proxy.replace(/\/$/, '') === target);
+  if (!ours.length) return { do: 'nothing' };
+  if (ours.length !== handlers.length) return { do: 'fail', message: `Tailscale serves this backend on tailnet port ${tailnetPort} alongside something else (tailscale serve status), so it's still on your tailnet. Take the backend's part off by hand, then run setup again.` };
+  return { do: 'off' };
+}
+
+// Whether a local run has to see every tailnet port off before it carries
+// on: a move off the tailnet (the saved URL is a tailnet one), or any run
+// after one that put the backend on the tailnet without the local one since
+// seeing it off. That's the note setup leaves before it first serves
+// (TAILNET_PENDING_FILE in the default data folder, as the backend is the Mac's), as a tailnet run that stopped
+// before saving its URL left a local URL behind, which alone said nothing
+// was served (cross-lab review of the Daybreak fix, 11 Nov 2026).
+export const TAILNET_PENDING_FILE = 'self-hosted-on-tailnet';
+export function mustSeeTailnetOff({ from, pending }) {
+  return from === 'tailnet' || Boolean(pending);
+}

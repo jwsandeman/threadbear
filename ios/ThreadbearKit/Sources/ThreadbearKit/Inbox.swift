@@ -228,17 +228,20 @@ public struct ThreadSearch: Sendable, Equatable {
     public var hibernating: [PhoneThread] = []
     public var archived: [PhoneThread] = []
 
-    /// `olderArchived` is what phone:search found past the den's newest 100:
-    /// matched by Convex on whole words, so kept as it comes, after the
-    /// archived threads the phone has.
+    /// `olderArchived` is what phone:search found: matched by Convex on
+    /// whole words, so kept as it comes. One the phone has stays in its own
+    /// section, as a word said in one of its messages (backend API 74)
+    /// finds it there too; the rest go after the archived threads the phone
+    /// has, as ones past the den's newest 100.
     public init(_ query: String, sections: InboxSections, hibernating: [PhoneThread], archived: [PhoneThread],
                 olderArchived: [PhoneThread] = [], wakes: [String: PhoneSchedule] = [:]) {
         let query = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        let found = Set(olderArchived.map(\.threadId))
         // A thread can sit in two lists for a moment while the runner moves
         // it (snoozed but not yet out of the inbox view): show it once.
         var seen = Set<String>()
         let keep: ([PhoneThread]) -> [PhoneThread] = { threads in
-            threads.filter { Self.matches($0, query) && seen.insert($0.threadId).inserted }
+            threads.filter { (Self.matches($0, query) || found.contains($0.threadId)) && seen.insert($0.threadId).inserted }
         }
         starred = keep(sections.starred)
         inbox = keep(sections.inbox)
@@ -247,12 +250,13 @@ public struct ThreadSearch: Sendable, Equatable {
         self.archived = keep(archived) + olderArchived.filter { seen.insert($0.threadId).inserted }
     }
 
-    /// Part of the title or the last reply, as on the Mac, or the project
-    /// or folder, which on the phone's narrow rows is often all you can
-    /// remember a thread by.
+    /// Part of the title or the last reply, as on the Mac, the librarian's
+    /// search words ("dentist" for a wisdom tooth appointment), or the
+    /// project or folder, which on the phone's narrow rows is often all you
+    /// can remember a thread by.
     public static func matches(_ thread: PhoneThread, _ query: String) -> Bool {
         let options: String.CompareOptions = [.caseInsensitive, .diacriticInsensitive]
-        return [thread.title, thread.preview, thread.placeText].contains { $0.range(of: query, options: options) != nil }
+        return [thread.title, thread.preview, thread.placeText, thread.keywords ?? ""].contains { $0.range(of: query, options: options) != nil }
     }
 
     public var isEmpty: Bool { starred.isEmpty && inbox.isEmpty && running.isEmpty && hibernating.isEmpty && archived.isEmpty }

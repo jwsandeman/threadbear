@@ -40,12 +40,15 @@ function protocols(allowed: readonly string[]): string[] {
   return ['-c', 'protocol.allow=never', ...PROTOCOL_NAMES.flatMap((p) => ['-c', `protocol.${p}.allow=${allowed.includes(p) ? 'always' : 'never'}`])];
 }
 const NO_FETCH: readonly string[] = protocols([]);
+const LISTINGS = new Set(['ls-files', 'rev-parse']);
 export const LISTING_GIT_CONFIG: readonly string[] = [...UNTRUSTED_GIT_CONFIG, ...NO_FETCH, '-c', 'core.hooksPath=/dev/null'];
 
 // A git listing in `dir`, read whole: what claude-trust and tracked-packages
 // use to see what a folder holds before it's trusted. Throws as
 // execFileSync does when git fails.
 export function untrustedGitSync(dir: string, args: readonly string[]): string {
+  // Only listings: nothing here switches filters off (ls-files never runs one).
+  if (!LISTINGS.has(args[0] ?? '')) throw new Error(`untrustedGitSync is for listings, not git ${args[0]}`);
   return execFileSync('git', [...LISTING_GIT_CONFIG, '-C', dir, ...args], {
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'ignore'],
@@ -98,7 +101,9 @@ export type UntrustedGitOptions = {
 };
 
 const TRUSTED_SCOPES = new Set(['system', 'global', 'unknown']); // 'unknown': Apple's own git config
-const ALWAYS: readonly string[] = ['-c', 'safe.bareRepository=explicit', '-c', 'http.saveCookies=false', '-c', 'commit.gpgSign=false', '-c', 'tag.gpgSign=false', '-c', 'submodule.recurse=false', '-c', 'fetch.recurseSubmodules=false', '-c', 'gc.auto=0', '-c', 'maintenance.auto=false'];
+// diff.external too: a blank one is no program, even with --ext-diff (git
+// fails rather than run one).
+const ALWAYS: readonly string[] = ['-c', 'diff.external=', '-c', 'safe.bareRepository=explicit', '-c', 'http.saveCookies=false', '-c', 'commit.gpgSign=false', '-c', 'tag.gpgSign=false', '-c', 'submodule.recurse=false', '-c', 'fetch.recurseSubmodules=false', '-c', 'gc.auto=0', '-c', 'maintenance.auto=false'];
 // Transport programs a fetch or clone may run, with what stands in when the
 // owner's config has none.
 const TRANSPORT: { key: RegExp; fallback: string }[] = [
@@ -181,7 +186,15 @@ export async function untrustedGit(dir: string, args: readonly string[], opts: U
   const env: NodeJS.ProcessEnv = { ...untrustedGitEnv(), GIT_TERMINAL_PROMPT: '0', GIT_ASKPASS: '', GIT_OPTIONAL_LOCKS: '0', GIT_NO_LAZY_FETCH: '1', ...opts.env };
   // A clone or fetch of a big repo can take a while.
   const timeout = opts.timeoutMs ?? (opts.network === 'remote' ? 30 * 60_000 : 5 * 60_000);
-  const listed = await execGit(dir, [...LISTING_GIT_CONFIG, '-C', dir, 'config', '--list', '--show-scope', '-z'], { ...untrustedGitEnv(), GIT_NO_LAZY_FETCH: '1' }, 10_000);
+  const [sub, ...rest] = args;
+  // Only what the runner's callers run (move-git.ts, runner/moves.ts,
+  // loose-ends.ts), each looked at for what a repo's config could make it
+  // run: a new one is added here once it has been (Muse's review, 11 Nov
+  // 2026: log, show, merge, stash and the like reach submodules or diff
+  // programs these settings don't cover).
+  if (!sub || !SUBCOMMANDS.has(sub) || (sub === 'worktree' && rest[0] !== 'list')) return { ok: false, code: 1, stdout: '', stderr: `untrustedGit doesn't run git ${[sub, sub === 'worktree' ? rest[0] : undefined].filter(Boolean).join(' ')}: nobody has looked at what a repo's config could make it run.` };
+  // The same variables as the command, so it reads the config the command will.
+  const listed = await execGit(dir, [...LISTING_GIT_CONFIG, '-C', dir, 'config', '--list', '--show-scope', '-z'], { ...untrustedGitEnv(), GIT_NO_LAZY_FETCH: '1', ...opts.env }, 10_000);
   // Outside a repo it still lists the owner's own config (empty is 0 too);
   // a config git can't parse fails the listing, and so this.
   if (!listed.ok) return { ok: false, code: listed.code || 1, stdout: '', stderr: `couldn't read the repo's git config: ${listed.stderr.trim() || `git config exited ${listed.code}`}` };
@@ -191,7 +204,38 @@ export async function untrustedGit(dir: string, args: readonly string[], opts: U
   } catch (e) {
     return { ok: false, code: 1, stdout: '', stderr: e instanceof Error ? e.message : String(e) };
   }
-  const [sub, ...rest] = args;
   const pack = opts.network === 'remote' && (sub === 'fetch' || sub === 'clone' || sub === 'ls-remote') ? ['--upload-pack=git-upload-pack'] : [];
-  return execGit(dir, [...config, '-C', dir, ...(sub ? [sub, ...pack, ...rest] : [])], env, timeout);
+  const inside = NO_SUBMODULES[sub] ?? [];
+  return execGit(dir, [...config, '-C', dir, sub, ...inside, ...pack, ...rest], env, timeout);
 }
+
+// What untrustedGit runs. `git submodule` isn't one: it runs git in each
+// submodule with that submodule's own config.
+const SUBCOMMANDS = new Set(['add', 'branch', 'bundle', 'cat-file', 'clone', 'commit-tree', 'diff', 'diff-files', 'diff-index', 'fetch', 'for-each-ref', 'ls-files', 'ls-remote', 'merge-base', 'read-tree', 'remote', 'reset', 'rev-list', 'rev-parse', 'status', 'symbolic-ref', 'update-ref', 'worktree', 'write-tree']);
+
+// A submodule is a repo of its own, with its own config (.git/modules/<name>/
+// config, or a .git inside it), and the settings above only switch off what
+// the outer repo's config names. git starts another git inside a submodule to
+// see whether it changed (status, diff) or to fetch or check it out too, and
+// that one runs the filters, fsmonitor or sshCommand the submodule's config
+// names: `git status` ran a submodule's `filter.<name>.clean` through
+// untrustedGit (security review, 11 Nov 2026). So these never look inside
+// one. Only the command line beats a repo's own `submodule.<name>.ignore` or
+// `fetchRecurseSubmodules` (-c diff.ignoreSubmodules doesn't), so it's a flag
+// on each command that would. A submodule shows as its commit, as if clean.
+// And for a diff, git's own diff: diff.external is blank (ALWAYS), which
+// a diff asked for its patch would try to run and fail.
+const IGNORE: readonly string[] = ['--ignore-submodules=all'];
+const DIFF: readonly string[] = [...IGNORE, '--no-ext-diff'];
+const NO_RECURSE: readonly string[] = ['--no-recurse-submodules'];
+const NO_SUBMODULES: Record<string, readonly string[]> = {
+  status: IGNORE,
+  diff: DIFF,
+  'diff-index': DIFF,
+  'diff-files': DIFF,
+  fetch: NO_RECURSE,
+  clone: NO_RECURSE,
+  reset: NO_RECURSE,
+  'read-tree': NO_RECURSE,
+  'ls-files': NO_RECURSE,
+};

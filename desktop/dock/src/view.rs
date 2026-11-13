@@ -93,6 +93,9 @@ pub struct DockView {
     /// Each split's length along its axis, from the last frame, for the
     /// dividers (the 80 pt minimum is in points).
     split_lengths: Rc<RefCell<HashMap<String, f64>>>,
+    /// Each group's tab strip, which scrolls sideways once its tabs don't
+    /// fit, and the tab it last brought into view (`tab_strip`).
+    tab_scrolls: HashMap<String, (ScrollHandle, PanelId)>,
     // The drag's animations: SwiftUI gets these from withAnimation; here they
     // run on GPUI's frames, driven by time, not frame counts.
     pub(crate) lift: Option<SpringRun>,
@@ -100,7 +103,30 @@ pub struct DockView {
     pub(crate) preview: Option<Tween>,
     pub(crate) last_preview: Option<dl::Rect>,
     pub(crate) windows: FloatingWindows,
+    /// The layout as last drawn, to see when it changes.
+    last_layout: Option<DockLayout>,
+    /// The groups gliding to their places after the layout changed (a panel
+    /// opened or closed, moved or dropped).
+    motion: Option<LayoutMotion>,
+    /// What the last glide ran from and to, by each group's panel showing,
+    /// for scripts (`last_motion`).
+    last_motion: Option<(HashMap<PanelId, dl::Rect>, HashMap<PanelId, dl::Rect>)>,
     _subscriptions: Vec<Subscription>,
+}
+
+/// BearDock's `withAnimation(Self.settle)` around a layout change, with
+/// `matchedGeometryEffect` on each group: a group that stays glides and
+/// resizes from where it was to where it now is, one that's new fades in
+/// where it's going, and one that's gone fades out where it was. GPUI can't
+/// animate a flex layout, so while it runs the groups are placed by hand at
+/// the frames `dl::group_frames` works out, sampled from the spring by time,
+/// and the flex layout takes over again once it has settled.
+struct LayoutMotion {
+    /// Where each group that was drawn was, in the dock.
+    from: HashMap<String, dl::Rect>,
+    /// The groups that went, where they were.
+    leaving: Vec<dl::Rect>,
+    spring: SpringRun,
 }
 
 impl DockView {
@@ -129,13 +155,24 @@ impl DockView {
             press_moved: false,
             escape_watch: None,
             split_lengths: Rc::new(RefCell::new(HashMap::new())),
+            tab_scrolls: HashMap::new(),
             lift: None,
             landing: None,
             preview: None,
             last_preview: None,
             windows: FloatingWindows::default(),
+            last_layout: None,
+            motion: None,
+            last_motion: None,
             _subscriptions: vec![observed],
         }
+    }
+
+    /// The last time the layout changed: where each panel's group was drawn
+    /// and where it went, by the panel showing in it, and whether the groups
+    /// are still on their way. For scripts.
+    pub fn last_motion(&self) -> Option<(&HashMap<PanelId, dl::Rect>, &HashMap<PanelId, dl::Rect>, bool)> {
+        self.last_motion.as_ref().map(|(from, to)| (from, to, self.motion.is_some()))
     }
 
     /// Whether the last press on a bar moved the window or picked up a panel.
@@ -438,6 +475,59 @@ impl DockView {
         }
     }
 
+    /// Starts a glide when the layout has changed since the last frame, other
+    /// than by a divider being dragged (which follows the pointer) or under
+    /// Reduce Motion. One already running starts again from where its groups
+    /// are drawn now, as SwiftUI's does.
+    fn start_motion(&mut self, layout: &DockLayout, available: &Rc<HashSet<PanelId>>, cx: &App) {
+        let before = std::mem::replace(&mut self.last_layout, Some(layout.clone()));
+        let Some(before) = before.filter(|b| b.root != layout.root) else { return };
+        let controller = &self.model.read(cx).controller;
+        if self.divider.is_some() || controller.drag.is_some() || cx.reduce_motion() || controller.bounds.width <= 0. || controller.bounds.height <= 0. {
+            return;
+        }
+        let avail = available.clone();
+        let is_available = move |p: &str| avail.contains(p);
+        // Only groups drawn last frame: the frames keep ones long gone. A
+        // panel that's just been closed isn't in the available set any more
+        // (it's made from the new layout), but it was showing.
+        let now_in = layout.clone();
+        let was_available = |p: &str| is_available(p) || !now_in.contains(p);
+        let was: Vec<String> = dl::group_frames(&before.root, controller.bounds, &was_available, GAP as f64).into_iter().map(|(id, _)| id).collect();
+        let from: HashMap<String, dl::Rect> = was.iter().filter_map(|id| controller.frames.get(id).map(|r| (id.clone(), *r))).collect();
+        let to: HashMap<String, dl::Rect> = dl::group_frames(&layout.root, controller.bounds, &is_available, GAP as f64).into_iter().collect();
+        let leaving = from.iter().filter(|(id, _)| !to.contains_key(*id)).map(|(_, r)| *r).collect();
+        let by_panel = |frames: &HashMap<String, dl::Rect>, layout: &DockLayout| -> HashMap<PanelId, dl::Rect> {
+            frames.iter().filter_map(|(id, r)| layout.group(id).map(|g| (dl::visible_group(&g, &was_available).selected, *r))).collect()
+        };
+        self.last_motion = Some((by_panel(&from, &before), by_panel(&to, layout)));
+        self.motion = Some(LayoutMotion { from, leaving, spring: SpringRun::new(dl::SETTLE, 0., 1.) });
+    }
+
+    /// The groups mid-glide, each placed by hand (`LayoutMotion`).
+    fn moving(&mut self, motion: &LayoutMotion, layout: &DockLayout, theme: &DockTheme, available: &Rc<HashSet<PanelId>>, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let p = motion.spring.value(Instant::now()) as f64;
+        let fade = p.clamp(0., 1.) as f32;
+        let avail = available.clone();
+        let is_available = move |p: &str| avail.contains(p);
+        let bounds = self.model.read(cx).controller.bounds;
+        let place = |r: dl::Rect| div().absolute().left(px(r.x as f32)).top(px(r.y as f32)).w(px(r.width as f32)).h(px(r.height as f32));
+        let mut layer = div().absolute().top_0().left_0().size_full();
+        // Under the rest, which take its room as it goes.
+        for r in &motion.leaving {
+            layer = layer.child(place(*r).bg(theme.panel).opacity(1. - fade));
+        }
+        for (id, to) in dl::group_frames(&layout.root, bounds, &is_available, GAP as f64) {
+            let Some(group) = layout.group(&id) else { continue };
+            let element = self.group(&group, layout, theme, available, window, cx);
+            layer = layer.child(match motion.from.get(&id) {
+                Some(from) => place(lerp_rect(*from, to, p)).child(element),
+                None => place(to).opacity(fade).child(element),
+            });
+        }
+        layer.into_any_element()
+    }
+
     fn split(&mut self, split: &DockSplit, layout: &DockLayout, theme: &DockTheme, available: &Rc<HashSet<PanelId>>, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let avail = available.clone();
         let is_available = move |p: &str| avail.contains(p);
@@ -562,7 +652,19 @@ impl DockView {
             // a held press on its background moves the panel.
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(move |this, e: &MouseDownEvent, window, cx| this.begin_press(body_press.clone(), BODY_PRESS, e, window, cx)),
+                cx.listener(move |this, e: &MouseDownEvent, window, cx| {
+                    // A press on words is the start of a selection, which wins
+                    // as an NSTextView's does over Swift's HoldDrag. The kit's
+                    // selection is the window's, not the text's, and never
+                    // stops the press, so it's asked. Without this, resting a
+                    // moment before dragging across a reply picked the thread
+                    // up instead (Mike, 12 Nov: "it only selects if I select
+                    // it very quickly").
+                    if gpui_kit::base::TextSelection::is_selectable_at(e.position, window, cx) {
+                        return;
+                    }
+                    this.begin_press(body_press.clone(), BODY_PRESS, e, window, cx)
+                }),
             )
             .context_menu(menu);
 
@@ -650,10 +752,31 @@ impl DockView {
                     )
                     .context_menu(self.panel_menu(selected.clone(), false)),
             );
+        } else if single {
+            bar = bar.child(self.tab(&selected, true, true, theme, window, cx));
         } else {
-            for panel in &group.panels {
-                bar = bar.child(self.tab(panel, *panel == group.selected, single, theme, window, cx));
+            // Tabs that don't fit scroll, rather than running off the bar's
+            // trailing edge where no one could reach them (Ville, 11 Nov 2026).
+            let (handle, shown) = self.tab_scrolls.entry(group.id.clone()).or_insert_with(|| (ScrollHandle::new(), PanelId::default())).clone();
+            if shown != group.selected {
+                if let Some(i) = group.panels.iter().position(|p| *p == group.selected) {
+                    handle.scroll_to_item(i);
+                }
+                self.tab_scrolls.insert(group.id.clone(), (handle.clone(), group.selected.clone()));
             }
+            let mut strip = h_flex()
+                .id(ElementId::Name(format!("dock-tabs-{}", group.id).into()))
+                .flex_shrink_1()
+                .min_w(px(0.))
+                .h_full()
+                .items_center()
+                .gap(px(2.))
+                .overflow_x_scroll()
+                .track_scroll(&handle);
+            for panel in &group.panels {
+                strip = strip.child(div().flex_none().child(self.tab(panel, *panel == group.selected, false, theme, window, cx)));
+            }
+            bar = bar.child(strip);
         }
         // The empty part of a bar: moves its panel (or the window, HoldDrag).
         let press_panel = selected.clone();
@@ -717,7 +840,11 @@ impl DockView {
             .gap(px(6.))
             .rounded(px(6.))
             .when(single, |d| d.min_w(px(0.)).flex_shrink_1())
-            .when(!single, |d| d.flex_none())
+            // A crowded bar squeezes its tabs, their titles cut short, as
+            // SwiftUI's do, rather than pushing the panel's own buttons past
+            // its end: a web panel's Reload went under the right-hand rail
+            // in a narrow pane with two tabs (11 Nov).
+            .when(!single, |d| d.min_w(px(0.)).flex_shrink_1())
             .when(selected && !single, |d| d.bg(theme.tab_selected))
             .when(!(selected && !single), |d| d.hover(|s| s.bg(theme.tab_hover)));
 
@@ -729,8 +856,8 @@ impl DockView {
                 .text_size(px(title_size))
                 .when(selected, |d| d.font_weight(FontWeight::SEMIBOLD))
                 .text_color(if selected { theme.header_text } else { theme.secondary })
-                .when(single, |d| d.truncate())
-                .when(!single, |d| d.whitespace_nowrap())
+                .min_w(px(0.))
+                .truncate()
                 .child(title),
         );
         if closable {
@@ -940,7 +1067,18 @@ impl Render for DockView {
             });
         });
 
-        let tree = self.node(&layout.root, &layout, &theme, &available, window, cx);
+        self.start_motion(&layout, &available, cx);
+        let tree = match self.motion.take() {
+            Some(motion) => {
+                let tree = self.moving(&motion, &layout, &theme, &available, window, cx);
+                if !motion.spring.settled(Instant::now()) {
+                    self.motion = Some(motion);
+                    window.request_animation_frame();
+                }
+                tree
+            }
+            None => self.node(&layout.root, &layout, &theme, &available, window, cx),
+        };
         let divider_axis = self.divider.as_ref().map(|d| d.axis);
         let dragging_panel = self.model.read(cx).controller.drag.is_some();
         if !dragging_panel && self.escape_watch.is_some() {
@@ -1020,6 +1158,11 @@ fn measure(on_bounds: impl FnOnce(Bounds<Pixels>, &mut Window, &mut App) + 'stat
     // With explicit insets: an absolute child with none sits where it would
     // have been in the flow, after whatever comes before it.
     canvas(move |bounds, window, cx| on_bounds(bounds, window, cx), |_, _, _, _| {}).absolute().top_0().left_0().size_full()
+}
+
+fn lerp_rect(a: dl::Rect, b: dl::Rect, t: f64) -> dl::Rect {
+    let at = |x: f64, y: f64| x + (y - x) * t;
+    dl::Rect::new(at(a.x, b.x), at(a.y, b.y), at(a.width, b.width).max(0.), at(a.height, b.height).max(0.))
 }
 
 fn bounds_to_rect(bounds: Bounds<Pixels>, origin: Point<Pixels>) -> dl::Rect {

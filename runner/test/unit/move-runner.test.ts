@@ -176,3 +176,92 @@ test('a preview says what the thread would leave behind on this machine', async 
   assert.equal(said.length, 1);
   assert.match(said[0], /uncommitted changes in .*share that checkout: a\.txt/);
 });
+
+// Security review, 11 Nov 2026 (finding 96): a moved thread.json with
+// `"presses": {}` came through placing and adopting as it was, and the
+// runner it moved to then exited at every start, as recover went through
+// it with no boundary per thread.
+test('a moved record with bad press notes is cleaned, and never stops the runner it moves to', async () => {
+  const work = tmpDir('tb-move-work-');
+  const s = machine([{ id: 'claude-main', provider: 'claude', title: 'S', configDir: tmpDir() }]);
+  const tHome = tmpDir('tb-move-home-');
+  const accounts = [{ id: 'claude-1', provider: 'claude' as const, title: 'T', configDir: tmpDir() }];
+  const t = makeHarness(tHome, {}, { accounts: new FakeAccounts(accounts) });
+  const id = s.runner.create({ text: 'hello', accountId: 'claude-main', cwd: work }).thread.id;
+  s.adapter.last.init();
+  s.adapter.last.result('completed');
+  await tick();
+  const r = row(id, { info: (await s.runner.describeForMove(id, 0))! });
+  const plan = await t.runner.planMove(r);
+  assert.ok(!('problem' in plan));
+  r.plan = plan as Exclude<typeof plan, { problem: string }>;
+  const forged = [
+    {},
+    { not: 'a list' },
+    'nonsense',
+    [null, 3, { id: 'b1' }, { id: 'b2', line: 'kept', told: 'yes' }, { id: 'b3', line: 'x'.repeat(10_000), told: { seq: 4, inFlight: 'no' } }],
+  ];
+  for (const presses of forged) {
+    const entries = (await s.runner.packForMove(id, r)).entries.map((e) => {
+      if (e.path !== 'thread/thread.json') return e;
+      const rec = JSON.parse(e.data.toString('utf8'));
+      rec.presses = presses;
+      return { ...e, data: Buffer.from(JSON.stringify(rec)) };
+    });
+    await t.runner.placeMove(r, entries);
+    const staged = JSON.parse(fs.readFileSync(path.join(tHome, 'moves', r.moveId, 'thread', 'thread.json'), 'utf8'));
+    assert.ok(staged.presses === undefined || Array.isArray(staged.presses), `placed: ${JSON.stringify(presses)}`);
+    await t.runner.discardMove(r);
+  }
+  await t.runner.placeMove(r, (await s.runner.packForMove(id, r)).entries.map((e) => {
+    if (e.path !== 'thread/thread.json') return e;
+    const rec = JSON.parse(e.data.toString('utf8'));
+    rec.presses = forged[3];
+    return { ...e, data: Buffer.from(JSON.stringify(rec)) };
+  }));
+  assert.equal((await t.runner.adoptMoved(r)).adopted, true);
+  const live = JSON.parse(fs.readFileSync(path.join(tHome, 'threads', id, 'thread.json'), 'utf8'));
+  assert.deepEqual(live.presses, [{ id: 'b2', line: 'kept' }, { id: 'b3', line: 'x'.repeat(2000), told: { seq: 4 } }]);
+  // Written as the finding had it, after adoption, and its neighbours as
+  // Muse's review found them: the next starts still work.
+  live.presses = {};
+  live.queue = {};
+  live.waitingOn = 'x';
+  live.labReview = {};
+  live.labReviewOwed = { turnId: 'x' };
+  live.highlights = { items: {}, edited: [] };
+  live.stoppedMidTurn = 'yes';
+  live.needs = { seq: 1, needs: 'nothing', asks: {} };
+  live.looseEnds = { seq: 1, ends: 3 };
+  live.subagents = [null, 4];
+  fs.writeFileSync(path.join(tHome, 'threads', id, 'thread.json'), JSON.stringify(live));
+  const again = makeHarness(tHome, {}, { accounts: new FakeAccounts(accounts) });
+  const back = again.runner.threads.get(id)!.rec as any;
+  assert.equal(back.presses, undefined);
+  assert.deepEqual(back.queue, []);
+  assert.equal(back.waitingOn, undefined);
+  assert.equal(back.labReview, undefined);
+  assert.equal(back.highlights, undefined);
+  assert.equal(back.stoppedMidTurn, undefined);
+  // A wait whose thread isn't named by an id, done, on a hibernating
+  // thread: reconcileWaits at start delivered it and threw (Muse's second look).
+  live.waitingOn = [{ threadId: 123, title: 'x', done: { at: new Date().toISOString(), how: 'finished' } }, { threadId: 'abc', title: 7 }, { threadId: 'def', title: 'y', review: true, done: { at: new Date().toISOString(), how: 'finished', reply: 123 } }];
+  live.reviewVerdict = {};
+  live.finished = { at: new Date().toISOString(), reply: 5 };
+  live.snoozedUntil = new Date(Date.now() + 86_400_000).toISOString();
+  fs.writeFileSync(path.join(tHome, 'threads', id, 'thread.json'), JSON.stringify(live));
+  const fourth = makeHarness(tHome, {}, { accounts: new FakeAccounts(accounts) });
+  const fourthRec = fourth.runner.threads.get(id)!.rec as any;
+  assert.equal(fourthRec.waitingOn.length, 0);
+  assert.equal(fourthRec.reviewVerdict, undefined);
+  assert.equal(fourthRec.finished.reply, undefined);
+  fourth.runner.holdWaits = false;
+  fourth.runner.reconcileWaits();
+  fourth.runner.startOwedReviews();
+  assert.equal(back.needs.asks, undefined);
+  assert.equal(back.looseEnds, undefined);
+  assert.deepEqual(back.subagents, []);
+  again.runner.summary(again.runner.threads.get(id)!);
+  const third = makeHarness(tHome, {}, { accounts: new FakeAccounts(accounts) });
+  assert.ok(third.runner.threads.has(id));
+});

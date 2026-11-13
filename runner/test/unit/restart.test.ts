@@ -691,7 +691,8 @@ test("cancelling a deploy's restart points current back at the running release",
   assert.equal(JSON.parse(fs.readFileSync(path.join(dir, 'state.json'), 'utf8')).lastGood, 'A', 'the rest is kept');
 
   // A restart that wasn't a deploy's leaves current alone.
-  fs.rmSync(path.join(dir, 'current'));
+  // A symlink to a directory: unlink it, rmSync refuses it (Node 24.12).
+  fs.unlinkSync(path.join(dir, 'current'));
   fs.symlinkSync(path.join('releases', 'B'), path.join(dir, 'current'));
   r.request({});
   assert.deepEqual(r.request({ cancel: true }), { scheduled: false, waitingFor: [] });

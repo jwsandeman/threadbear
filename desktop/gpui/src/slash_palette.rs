@@ -9,7 +9,7 @@ use crate::composer::Composer;
 use crate::prefs;
 use crate::style::{self, size};
 use gpui_kit::base::TestSupportExt as _;
-use gpui_kit::component::tooltip::Tooltip;
+use gpui_kit::component::menu::ContextMenuExt as _;
 use gpui_kit::component::{h_flex, v_flex, ActiveTheme as _};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
@@ -22,6 +22,7 @@ use std::collections::{HashMap, HashSet};
 use threadbear_core::composer::effort_title;
 use threadbear_core::logins::model_title_with;
 use threadbear_core::slash::{self, PaletteKey, PaletteState, SlashCommand};
+use crate::tips::Tip as _;
 
 /// The commands each thread has offered (`AppModel.slashCommands`); the app
 /// holds one. Asked for each time a thread's palette opens, as the runner
@@ -60,6 +61,59 @@ impl Threadbear {
     }
 }
 
+impl Threadbear {
+    /// `newThreadCommandsKey`: where a new thread's palette keeps its list,
+    /// per runner, login and folder, so changing any of them in the box's
+    /// chips asks again.
+    pub(crate) fn new_thread_commands_key(&self) -> String {
+        let logins = self.draft_logins();
+        let (account, cwd) = self.with_draft(&logins, |d| (d.account_id(), d.cwd()));
+        format!("new\0{}\0{account}\0{cwd}", self.new_thread.picks.runner.as_deref().unwrap_or(""))
+    }
+
+    /// `loadNewThreadSlashCommands`: the same list for the new-thread page's
+    /// box, before there's a thread (`folders.commands`), for the login,
+    /// folder and mode it would start with. Another runner's draft isn't
+    /// asked yet, as in the Swift app: its palette lists none.
+    pub(crate) fn load_new_thread_slash_commands(&mut self, cx: &mut Context<Self>) {
+        let key = self.new_thread_commands_key();
+        if self.slash.fetching.contains(&key) {
+            return;
+        }
+        if self.new_thread.picks.runner.is_some() {
+            self.slash.commands.entry(key).or_default();
+            cx.notify();
+            return;
+        }
+        let logins = self.draft_logins();
+        let (account, cwd, permission) = self.with_draft(&logins, |d| (d.account_id(), d.cwd(), d.permission()));
+        let mut params = json!({ "cwd": cwd, "permissionMode": permission });
+        if !account.is_empty() {
+            params["accountId"] = json!(account);
+        }
+        self.slash.fetching.insert(key.clone());
+        let client = self.client.clone();
+        cx.spawn(async move |this, cx| {
+            let res = crate::call(client, "folders.commands", params).await;
+            this.update(cx, |this, cx| {
+                this.slash.fetching.remove(&key);
+                match res {
+                    Ok(value) => {
+                        this.slash.commands.insert(key.clone(), slash::decode_commands(&value));
+                    }
+                    // An older runner (-32601): none, as for a thread.
+                    Err(_) => {
+                        this.slash.commands.entry(key.clone()).or_default();
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+}
+
 /// What a palette shows for what's typed: read each time it's drawn.
 struct PaletteView {
     all: Vec<SlashCommand>,
@@ -73,37 +127,67 @@ struct PaletteView {
     /// Its command files are this Mac's to open only on this Mac's threads.
     can_open_files: bool,
     home: String,
+    /// Typed partway through a message: only the skills the agent can run
+    /// there are listed, and a pick goes into the words (Insert), never sent.
+    mid_message: bool,
 }
 
 impl Composer {
-    /// `paletteQuery`: what's typed while the palette is open, the command
-    /// so far. Not in a new thread (it has no CLI yet), and not once Esc
+    /// `paletteTyped`: the command being typed as the message's last word,
+    /// at its start or partway through it (skills named mid-message, 9 Nov
+    /// 2026), in a new thread too (`folders.commands`), and not once Esc
     /// closed it at this text.
-    pub(crate) fn palette_query(&self, text: &str) -> Option<String> {
-        self.thread_id.as_ref()?;
+    pub(crate) fn palette_typed(&self, text: &str) -> Option<slash::Typed> {
         if self.palette.closed_at.as_deref() == Some(text) {
             return None;
         }
-        slash::query(text).map(str::to_owned)
+        slash::typed(text)
+    }
+
+    /// The palette while it's open. Partway through a message it only opens
+    /// on a match, so a slash in other words ("the /tmp folder") doesn't get
+    /// in the way.
+    fn palette_open(&self, text: &str, cx: &App) -> Option<PaletteView> {
+        let typed = self.palette_typed(text)?;
+        let view = self.palette_view(&typed, cx);
+        if view.mid_message && slash::matches(&view.all, &view.query, slash::Category::All, &[]).is_empty() {
+            return None;
+        }
+        Some(view)
+    }
+
+    /// Where the palette's list is kept: the thread's id, or for a new
+    /// thread its runner, login and folder's (`paletteListKey`).
+    fn palette_list_key(&self, cx: &App) -> String {
+        match (&self.thread_id, self.app.upgrade()) {
+            (Some(id), _) => id.clone(),
+            (None, Some(app)) => app.read(cx).new_thread_commands_key(),
+            (None, None) => String::new(),
+        }
     }
 
     /// Esc closed the palette at that text only: any change reopens it, even
-    /// back to the same words later. And each thread's list is asked for
-    /// when its palette opens.
+    /// back to the same words later. And the list is asked for each time a
+    /// command starts being typed, the thread's or the new thread's.
     pub(crate) fn palette_text_changed(&mut self, cx: &mut Context<Self>) {
         let text = self.input.read(cx).value().to_string();
         if self.palette.closed_at.as_deref().is_some_and(|c| c != text) {
             self.palette.closed_at = None;
         }
-        let open = self.palette_query(&text).is_some();
-        if open && !self.palette_asked {
-            self.palette_asked = true;
-            if let (Some(id), Some(app)) = (self.thread_id.clone(), self.app.upgrade()) {
-                app.update(cx, |app, cx| app.load_slash_commands(id, cx));
-            }
+        if self.palette_typed(&text).is_none() {
+            self.palette_asked = None;
+            return;
         }
-        if !open {
-            self.palette_asked = false;
+        let key = self.palette_list_key(cx);
+        if self.palette_asked.as_deref() == Some(key.as_str()) {
+            return;
+        }
+        self.palette_asked = Some(key);
+        if let Some(app) = self.app.upgrade() {
+            match self.thread_id.clone() {
+                Some(id) => app.update(cx, |app, cx| app.load_slash_commands(id, cx)),
+                None => app.update(cx, |app, cx| app.load_new_thread_slash_commands(cx)),
+            }
         }
     }
 
@@ -111,15 +195,16 @@ impl Composer {
     /// palette is open. False lets the box have the key as usual.
     pub(crate) fn palette_key(&mut self, key: PaletteKey, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let text = self.input.read(cx).value().to_string();
-        let Some(query) = self.palette_query(&text) else { return false };
-        let view = self.palette_view(query.clone(), cx);
-        let matches = slash::matches(&view.all, &query, self.palette.category, &view.recent);
+        // Partway through a message, a closed palette leaves the keys alone.
+        let Some(view) = self.palette_open(&text, cx) else { return false };
+        let matches = slash::matches(&view.all, &view.query, self.palette.category, &view.recent);
         // Return with nothing to pick sends what's typed, as words.
         if key == PaletteKey::Enter && matches.is_empty() {
             return false;
         }
         if let Some((command, run)) = slash::handle_key(key, &matches, &mut self.palette, &text) {
-            self.palette_pick(command, run, window, cx);
+            // A skill named partway through a message isn't sent on its own.
+            self.palette_pick(command, run && !view.mid_message, window, cx);
         }
         // Keep the pick in sight as the arrows move it (the list scrolls).
         if matches!(key, PaletteKey::Up | PaletteKey::Down) {
@@ -131,8 +216,10 @@ impl Composer {
         true
     }
 
-    /// `ComposerView.pick`: puts the command in the box, to send now or with
-    /// a space after it for its arguments.
+    /// `ComposerView.pick`: puts the command in the box in place of what was
+    /// typed for it, to send now, or with a space after it for its arguments
+    /// (or, partway through a message, the words after it). Only the typed
+    /// word is replaced, so the words and chips before it stay, as one undo.
     pub(crate) fn palette_pick(&mut self, command: SlashCommand, run: bool, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(app) = self.app.upgrade() {
             app.update(cx, |app, _| {
@@ -142,11 +229,14 @@ impl Composer {
         }
         self.palette = PaletteState::default();
         let text = slash::fill(&command, !run);
-        let end = text.len();
+        let current = self.input.read(cx).value().to_string();
+        let start = slash::typed(&current).map_or(0, |t| t.start);
+        let end = current.len();
         self.input.update(cx, |s, cx| {
-            s.set_value(text, window, cx);
-            s.set_selected_range(end..end, cx);
+            s.set_selected_range(start..end, cx);
+            s.replace(text, window, cx);
             s.focus(window, cx);
+            crate::web_panels::keyboard_to_app(window);
         });
         if run {
             self.send(window, cx);
@@ -154,13 +244,18 @@ impl Composer {
         cx.notify();
     }
 
-    fn palette_view(&self, query: String, cx: &App) -> PaletteView {
-        let id = self.thread_id.clone().unwrap_or_default();
+    fn palette_view(&self, typed: &slash::Typed, cx: &App) -> PaletteView {
+        let key = self.palette_list_key(cx);
         let app = self.app.upgrade();
-        let (all, loading, recent) = app.as_ref().map_or((Vec::new(), false, Vec::new()), |app| {
+        let (mut all, loading, recent) = app.as_ref().map_or((Vec::new(), false, Vec::new()), |app| {
             let t = app.read(cx);
-            (t.slash.commands.get(&id).cloned().unwrap_or_default(), !t.slash.commands.contains_key(&id), t.new_thread.prefs.recent_slash.clone())
+            (t.slash.commands.get(&key).cloned().unwrap_or_default(), !t.slash.commands.contains_key(&key), t.new_thread.prefs.recent_slash.clone())
         });
+        let mid_message = typed.mid_message();
+        if mid_message {
+            all = slash::mid_message(&all);
+        }
+        let query = typed.query.clone();
         let data = self.chip_data(cx);
         let provider = data.summary.as_ref().map(|t| t.provider.clone()).unwrap_or_default();
         let mut current = HashMap::new();
@@ -176,30 +271,56 @@ impl Composer {
             }
         }
         let can_open_files = data.away.is_none();
-        PaletteView { all, loading, query, recent, provider, current, can_open_files, home: std::env::var("HOME").unwrap_or_default() }
+        PaletteView { all, loading, query, recent, provider, current, can_open_files, home: std::env::var("HOME").unwrap_or_default(), mid_message }
     }
 
     /// The palette's layer over the box, or None while it's closed.
     pub(crate) fn render_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let text = self.input.read(cx).value().to_string();
-        let query = self.palette_query(&text)?;
-        let view = self.palette_view(query, cx);
+        // A new thread's login or folder changed in its chips while a
+        // command was being typed: ask for that one's list (the Swift
+        // palette's `.task(id: paletteListKey)`).
+        if self.palette_typed(&text).is_some() && self.palette_asked.as_deref() != Some(self.palette_list_key(cx).as_str()) {
+            let me = cx.entity().downgrade();
+            cx.defer(move |cx| {
+                me.update(cx, |this, cx| this.palette_text_changed(cx)).ok();
+            });
+        }
+        let view = self.palette_open(&text, cx)?;
         let matches = slash::matches(&view.all, &view.query, self.palette.category, &view.recent);
         let picked = slash::picked(&matches, &self.palette).cloned();
         let categories = self.render_palette_categories(&view, cx);
         let list = self.render_palette_list(&view, &matches, picked.as_ref(), cx);
         let detail = self.render_palette_detail(&view, picked.as_ref(), cx);
-        // Each column as wide as its longest entry needs, the description the
-        // rest; measured over every command, not just the matches, so the
-        // columns hold still while typing (SlashPalette.columnWidths).
-        let (categories_width, list_width) = slash::column_widths(f64::from(self.card_width.get()), categories_natural_width(&view), list_natural_width(&view.all), false, 200., 120., 110.);
-        let height = slash::palette_height(f64::from(window.viewport_size().height), 300., 560.) as f32;
+        // Its size: what it was dragged to, kept within the window, else as
+        // wide as the box and about half the window tall (slash_resize.rs).
+        // In points, as kept; the window's are zoomed.
+        let zoom = style::zoomed(1.);
+        let viewport = window.viewport_size();
+        let layout = crate::slash_resize::kept(self, cx);
+        let auto_height = slash::palette_height(f64::from(viewport.height / zoom), 300., 560.);
+        let (width, height) = crate::slash_resize::size(layout, f64::from(self.card_width.get() / zoom), size(viewport.width / zoom, viewport.height / zoom), auto_height);
+        // No taller than the room over the box, so it doesn't run off the
+        // top of the window where the box sits high up (the new-thread page).
+        let room = f64::from(self.box_top.get() / zoom) - 8. - 8.;
+        let height = if room > 0. { height.min(room.max(160.)) } else { height };
+        // Each column as wide as its longest entry needs, or as it was
+        // dragged to, the description the rest; measured over every command,
+        // not just the matches, so the columns hold still while typing
+        // (SlashPalette.columnWidths).
+        let categories_natural = layout.categories.unwrap_or_else(|| categories_natural_width(&view));
+        let list_natural = layout.list.unwrap_or_else(|| list_natural_width(&view.all));
+        let (categories_width, list_width) = slash::column_widths(width, categories_natural, list_natural, layout.list.is_some(), 200., 120., 110.);
+        crate::slash_resize::drawn_as((width, height), (categories_width, list_width));
         let hairline = style::hairline(cx);
+        let composer = cx.entity().downgrade();
+        let menu_composer = composer.clone();
         let panel = h_flex()
             .id("slash-palette")
+            .relative()
             .size_full()
             .items_start()
-            .rounded(px(14.))
+            .rounded(px(crate::slash_resize::RADIUS))
             .overflow_hidden()
             .bg(cx.theme().background)
             .border_1()
@@ -208,11 +329,31 @@ impl Composer {
             // Keep clicks out of the transcript under it.
             .occlude()
             .child(div().flex_none().w(px(categories_width as f32)).h_full().child(categories))
-            .child(palette_column_rule(cx))
+            .child(crate::slash_resize::column_rule(0, categories_width, list_width + 200., width, cx))
             .child(div().flex_none().w(px(list_width as f32)).h_full().child(list))
-            .child(palette_column_rule(cx))
-            .child(div().flex_1().min_w_0().h_full().child(detail));
-        Some(deferred(div().absolute().left_0().right_0().bottom_full().mb(px(8.)).h(px(height)).on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()).child(panel)).with_priority(2).into_any_element())
+            .child(crate::slash_resize::column_rule(1, list_width, categories_width + 200., width, cx))
+            .child(div().flex_1().min_w_0().h_full().child(detail))
+            // Its edges drag it bigger; a right-click anywhere on it puts it back.
+            .children(crate::slash_resize::edges((width, height), cx))
+            .context_menu(move |menu, _, _| crate::slash_resize::menu(menu_composer.clone(), menu));
+        // Centred over the box, kept inside the window.
+        let left = crate::slash_resize::left_offset(width as f32 * zoom, f32::from(viewport.width));
+        Some(
+            deferred(
+                div()
+                    .absolute()
+                    .left_0()
+                    .right_0()
+                    .bottom_full()
+                    .mb(px(8.))
+                    .h(px(height as f32))
+                    .child(crate::slash_resize::measure_box())
+                    .child(div().absolute().top_0().bottom_0().left(gpui_kit::px(left)).w(px(width as f32)).on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()).child(panel))
+                    .children(crate::slash_resize::drag_watch(composer)),
+            )
+            .with_priority(2)
+            .into_any_element(),
+        )
     }
 
     /// The categories down the left, with their counts.
@@ -240,11 +381,12 @@ impl Composer {
                     .when(on, |s| s.bg(style::primary_opacity(cx, 0.1)))
                     .when(!on, |s| s.hover(move |s| s.bg(hover)))
                     .text_color(if on { fg } else { muted })
-                    .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
+                    .tip(tip.clone())
                     .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                         this.palette.category = category;
                         this.palette.selected = None;
                         this.focus(window, cx);
+                        crate::web_panels::keyboard_to_app(window);
                         cx.notify();
                     }))
                     .child(div().truncate().child(title))
@@ -267,7 +409,7 @@ impl Composer {
         let mut rows = v_flex().w_full();
         for command in matches {
             let on = selected_name.as_deref() == Some(command.name.as_str());
-            rows = rows.child(self.render_palette_row(command, on, cx));
+            rows = rows.child(self.render_palette_row(command, on, view.mid_message, cx));
         }
         div()
             .id("slash-list")
@@ -279,10 +421,10 @@ impl Composer {
             .into_any_element()
     }
 
-    fn render_palette_row(&mut self, command: &SlashCommand, on: bool, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_palette_row(&mut self, command: &SlashCommand, on: bool, mid_message: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let name = command.name.clone();
         let title = format!("/{name}");
-        let tip: SharedString = format!("/{name}: double-click to run it").into();
+        let tip: SharedString = if mid_message { format!("/{name}: double-click to put it in the message") } else { format!("/{name}: double-click to run it") }.into();
         let (fg, accent, hover) = (cx.theme().foreground, style::accent(cx).opacity(0.75), style::primary_opacity(cx, 0.05));
         let picked = command.clone();
         div()
@@ -297,15 +439,17 @@ impl Composer {
             .truncate()
             .when(on, |s| s.bg(accent).text_color(gpui_kit::white()))
             .when(!on, |s| s.text_color(fg).hover(move |s| s.bg(hover)))
-            .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
+            .tip(tip.clone())
             // Picked on the first click, at once; a second click on the
             // picked row runs it (read from the click itself).
             .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                 if event.click_count() >= 2 && this.palette.selected.as_deref() == Some(picked.name.as_str()) {
-                    this.palette_pick(picked.clone(), true, window, cx);
+                    // Partway through a message it goes into the words.
+                    this.palette_pick(picked.clone(), !mid_message, window, cx);
                 } else {
                     this.palette.selected = Some(picked.name.clone());
                     this.focus(window, cx);
+                    crate::web_panels::keyboard_to_app(window);
                     cx.notify();
                 }
             }))
@@ -340,9 +484,13 @@ impl Composer {
     fn render_palette_buttons(&mut self, view: &PaletteView, command: &SlashCommand, cx: &mut Context<Self>) -> impl IntoElement {
         let (run, fill) = (command.clone(), command.clone());
         let mut row = h_flex().flex_none().gap(px(8.)).px(px(16.)).py(px(12.));
-        row = row
+        if view.mid_message {
+            row = row.child(palette_button("Insert", format!("Put /{} in the message, for the agent to run (Return or Tab)", command.name), cx, cx.listener(move |this, _: &ClickEvent, window, cx| this.palette_pick(fill.clone(), false, window, cx))));
+        } else {
+            row = row
             .child(palette_button("Run", format!("Send /{} now (Return)", command.name), cx, cx.listener(move |this, _: &ClickEvent, window, cx| this.palette_pick(run.clone(), true, window, cx))))
             .child(palette_button("Add details", format!("Put /{} in the box to type more after it (Tab)", command.name), cx, cx.listener(move |this, _: &ClickEvent, window, cx| this.palette_pick(fill.clone(), false, window, cx))));
+        }
         if let Some(path) = command.path.clone().filter(|_| view.can_open_files) {
             let tip = format!("Open {} beside the thread", slash::short_path(&path, &view.home));
             row = row.child(palette_button("Open file", tip, cx, cx.listener(move |this, _: &ClickEvent, _, cx| this.palette_open_file(path.clone(), cx))));
@@ -378,14 +526,14 @@ impl Composer {
     #[cfg(feature = "automation")]
     pub(crate) fn palette_dump(&self, cx: &App) -> Value {
         let text = self.input.read(cx).value().to_string();
-        let Some(query) = self.palette_query(&text) else { return Value::Null };
-        let view = self.palette_view(query.clone(), cx);
+        let Some(view) = self.palette_open(&text, cx) else { return Value::Null };
+        let query = view.query.clone();
         let matches = slash::matches(&view.all, &query, self.palette.category, &view.recent);
         let picked = slash::picked(&matches, &self.palette).cloned();
         let categories: Vec<Value> = slash::counts(&view.all, &query, &view.recent).into_iter().map(|(c, n)| json!({ "title": c.title(&view.provider), "count": n })).collect();
         let note = if view.loading { Some("Getting this thread's commands…".to_owned()) } else if matches.is_empty() { Some(if query.is_empty() { "Nothing here yet.".to_owned() } else { format!("No command matches /{query}. Send it and it goes to the agent as words.") }) } else { None };
         let detail = picked.as_ref().map(|c| {
-            let mut buttons = vec!["Run", "Add details"];
+            let mut buttons = if view.mid_message { vec!["Insert"] } else { vec!["Run", "Add details"] };
             if c.path.is_some() && view.can_open_files {
                 buttons.push("Open file");
             }
@@ -408,17 +556,16 @@ impl Composer {
             "picked": picked.map(|c| format!("/{}", c.name)),
             "detail": detail,
             "note": note,
+            // As last drawn, in points (slash_resize.rs): its width and
+            // height, and its categories' and list's widths.
+            "size": crate::slash_resize::drawn().map(|d| [d[0], d[1]]),
+            "columns": crate::slash_resize::drawn().map(|d| [d[2], d[3]]),
         })
     }
 }
 
 fn palette_placeholder(text: String, cx: &App) -> impl IntoElement {
     div().p(px(16.)).size_full().text_size(px(size::LABEL + 1.)).text_color(style::secondary_text(cx)).child(text)
-}
-
-/// A line between the palette's columns.
-fn palette_column_rule(cx: &App) -> impl IntoElement {
-    div().flex_none().mx(px(3.)).w(px(1.)).h_full().bg(style::hairline(cx))
 }
 
 fn palette_button(title: &'static str, tip: String, cx: &App, on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) -> impl IntoElement {
@@ -436,7 +583,7 @@ fn palette_button(title: &'static str, tip: String, cx: &App, on_click: impl Fn(
         .hover(|s| s.bg(style::primary_opacity(cx, 0.14)))
         .cursor_pointer()
         .child(title)
-        .tooltip(move |window, cx| Tooltip::new(shown.clone()).build(window, cx))
+        .tip(shown.clone())
         .on_click(on_click)
 }
 

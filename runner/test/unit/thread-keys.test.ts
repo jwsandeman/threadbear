@@ -328,7 +328,15 @@ test('reading the runner token file: Claude tools are denied it outside Full acc
     assert.equal(deny('Bash', { command: 'tb status' }), undefined);
     assert.ok(deny('Bash', { command: 'cat "$THREADBEAR_HOME"/secr*/*token*' }), 'a wildcard after the data dir');
     assert.ok(deny('Grep', { path: home, pattern: '^[a-z]{40}$' }), 'from the data dir, whatever the pattern');
-    assert.equal(deny('Grep', { path: os.homedir(), pattern: 'hello' }), undefined, 'from higher up, a pattern that does not name it');
+    // From higher up, a Grep reads every file under it whatever its pattern
+    // says (cross-lab review of #54, 11 Nov 2026); one beside it is fine.
+    assert.ok(deny('Grep', { path: path.dirname(home), pattern: 'hello' }), 'from higher up, whatever the pattern');
+    const beside = fs.realpathSync(fs.mkdtempSync(path.join(process.env.TMPDIR ?? '/tmp', 'tb-beside-')));
+    try {
+      assert.equal(deny('Grep', { path: beside, pattern: 'hello' }), undefined, 'a folder beside it');
+    } finally {
+      fs.rmSync(beside, { recursive: true, force: true });
+    }
     assert.ok(denySecrets('Read', { file_path: 'runner-token' }, home, path.join(home, 'secrets')), 'a relative path, against the call\'s cwd');
   } finally {
     fs.rmSync(home, { recursive: true, force: true });

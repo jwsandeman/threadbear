@@ -14,6 +14,9 @@ pub struct RemoteRunner {
     pub name: String,
     pub icon: Option<String>,
     pub online: bool,
+    /// Where this Mac keeps that runner's token, once one's been copied in
+    /// (`tb pair`): what a direct connection to it needs (Settings › Runners).
+    pub token_file: Option<String>,
 }
 
 /// `RemoteThreads`: what the sidebar shows of the other runners.
@@ -21,13 +24,17 @@ pub struct RemoteRunner {
 pub struct RemoteThreads {
     pub runners: Vec<RemoteRunner>,
     pub threads: Vec<ThreadSummary>,
+    /// Mike's runner order (backend API 58), every runner's id: what the
+    /// phone and the Runners panel list them in. None from a backend without one.
+    pub order: Option<Vec<String>>,
 }
 
 impl RemoteRunner {
     fn decode(v: &Value) -> Option<RemoteRunner> {
         let id = v["id"].as_str().filter(|s| !s.is_empty())?.to_owned();
         let name = v["name"].as_str().filter(|s| !s.is_empty()).unwrap_or(&id).to_owned();
-        Some(RemoteRunner { name, icon: v["icon"].as_str().filter(|s| !s.is_empty()).map(str::to_owned), online: v["online"].as_bool().unwrap_or(false), id })
+        let token_file = v["tokenFile"].as_str().filter(|s| !s.is_empty()).map(str::to_owned);
+        Some(RemoteRunner { name, icon: v["icon"].as_str().filter(|s| !s.is_empty()).map(str::to_owned), online: v["online"].as_bool().unwrap_or(false), token_file, id })
     }
 }
 
@@ -36,7 +43,10 @@ impl RemoteRunner {
 /// unread one gets 1 and 0, which is all the rows look at.
 fn summary(row: &Value) -> Option<ThreadSummary> {
     let runner_id = row["runnerId"].as_str().filter(|s| !s.is_empty())?.to_owned();
-    let id = row["threadId"].as_str().filter(|s| !s.is_empty())?.to_owned();
+    // The backend takes any string a runner writes, and an extra Mac may be
+    // compromised: a row whose id isn't a thread id's shape is left out, as
+    // the id goes into shell lines and links (thread_link::is_thread_id).
+    let id = row["threadId"].as_str().filter(|s| crate::thread_link::is_thread_id(s))?.to_owned();
     let text = |key: &str| row[key].as_str().unwrap_or("").to_owned();
     let unread = row["unread"].as_bool().unwrap_or(false);
     let created = row["createdAt"].as_str().and_then(parse_ms).unwrap_or(0);
@@ -68,6 +78,10 @@ fn summary(row: &Value) -> Option<ThreadSummary> {
         last_seen_seq: 0,
         runner_id: Some(runner_id),
         permission_mode: "full".to_owned(),
+        // The done card's loose ends, which this Mac's runner adds to the row
+        // of a thread it's watching (relay.ts `overlay`): the sidebar's own
+        // rows don't carry them, and this summary replaces the last one.
+        loose_ends: row.get("looseEnds").filter(|v| v.is_object()).cloned(),
         ..Default::default()
     })
 }
@@ -78,6 +92,7 @@ pub fn decode_remote_threads(value: &Value) -> RemoteThreads {
     RemoteThreads {
         runners: value["runners"].as_array().into_iter().flatten().filter_map(RemoteRunner::decode).collect(),
         threads: value["threads"].as_array().into_iter().flatten().filter_map(summary).collect(),
+        order: value["order"].as_array().map(|ids| ids.iter().filter_map(|id| id.as_str().map(str::to_owned)).collect()),
     }
 }
 
@@ -95,6 +110,14 @@ pub struct RunnerInfo {
     pub icon: Option<String>,
     pub online: bool,
     pub is_self: bool,
+    pub last_seen_ms: Option<i64>,
+    /// What its last heartbeat said, for the Runners panel (runners.rs).
+    /// None from a runner before they were passed on (5 Nov).
+    pub version: Option<String>,
+    pub release: Option<String>,
+    pub started_ms: Option<i64>,
+    /// An old release finishing its threads in a handover.
+    pub draining: bool,
 }
 
 /// `runners.list`'s answer, this runner first and then the rest by name.
@@ -104,12 +127,21 @@ pub fn decode_runners(value: &Value) -> Vec<RunnerInfo> {
         .into_iter()
         .flatten()
         .filter_map(|r| {
+            let id = r["id"].as_str().filter(|s| !s.is_empty())?.to_owned();
+            let text = |key: &str| r[key].as_str().filter(|s| !s.is_empty()).map(str::to_owned);
+            let is_self = r["self"].as_bool().unwrap_or(false);
             Some(RunnerInfo {
-                id: r["id"].as_str().filter(|s| !s.is_empty())?.to_owned(),
-                name: r["name"].as_str().unwrap_or("").to_owned(),
-                icon: r["icon"].as_str().filter(|s| !s.is_empty()).map(str::to_owned),
-                online: r["online"].as_bool().unwrap_or(false),
-                is_self: r["self"].as_bool().unwrap_or(false),
+                name: text("name").unwrap_or_else(|| id.clone()),
+                icon: text("icon"),
+                // The answering runner is plainly up; anything else unsaid is offline.
+                online: r["online"].as_bool().unwrap_or(is_self),
+                is_self,
+                last_seen_ms: r["lastSeenAt"].as_str().and_then(parse_ms),
+                version: text("version"),
+                release: text("release"),
+                started_ms: r["startedAt"].as_str().and_then(parse_ms),
+                draining: r["draining"].as_bool().unwrap_or(false),
+                id,
             })
         })
         .collect()
@@ -210,6 +242,24 @@ mod tests {
         assert!(list.threads[1].busy());
     }
 
+    // The relay puts a watched thread's done-card loose ends on its row
+    // (relay.ts `overlay`): they reach the done card, for the seq it's on.
+    #[test]
+    fn a_rows_loose_ends_reach_the_summary() {
+        let list = decode_remote_threads(&json!({
+            "runners": [{ "id": "r", "name": "bruce" }],
+            "threads": [
+                { "runnerId": "r", "threadId": "t1", "status": "idle", "createdAt": "2026-11-09T01:00:00.000Z",
+                  "looseEnds": { "seq": 47, "ends": [{ "kind": "scheduled", "text": "Look at how the experiment went", "at": "2026-11-15T01:30:00.000Z" }] } },
+                { "runnerId": "r", "threadId": "t2", "status": "idle", "createdAt": "2026-11-09T01:00:00.000Z", "looseEnds": "junk" },
+            ],
+        }));
+        let check = list.threads[0].loose_ends_check().expect("its loose ends");
+        assert_eq!(check.seq, 47);
+        assert_eq!(check.ends[0].text, "Look at how the experiment went");
+        assert!(list.threads[1].loose_ends.is_none(), "one that isn't an object is left off");
+    }
+
     #[test]
     fn a_preview_with_nothing_to_say_can_just_go() {
         let answer = json!({ "cwd": "/Users/bruce/x", "accountId": "claude-main", "accounts": [{ "id": "claude-main", "title": "Claude", "email": "a@b" }], "leftBehind": [], "problems": [], "sourceChecked": true });
@@ -223,10 +273,27 @@ mod tests {
 
     #[test]
     fn runners_list_decodes_itself_and_the_others() {
-        let list = decode_runners(&json!({ "runners": [{ "id": "m", "name": "m5", "icon": "laptopcomputer", "online": true, "self": true }, { "id": "b", "name": "bruce", "online": false }] }));
-        assert_eq!(list.len(), 2);
+        let list = decode_runners(&json!({ "runners": [
+            { "id": "m", "name": "m5", "icon": "laptopcomputer", "self": true, "version": "0.1.0+20261105T064853Z-c4d90ca", "release": "20261105T064853Z-c4d90ca", "startedAt": "2026-11-11T01:00:00.000Z" },
+            { "id": "b", "name": "bruce", "online": false, "lastSeenAt": "2026-11-09T01:00:00.000Z", "draining": true },
+            { "id": "c", "name": "" },
+        ] }));
+        assert_eq!(list.len(), 3);
         assert!(list[0].is_self);
+        assert!(list[0].online, "the answering runner is up even if it doesn't say");
+        assert_eq!(list[0].release.as_deref(), Some("20261105T064853Z-c4d90ca"));
+        assert_eq!(list[0].started_ms, parse_ms("2026-11-11T01:00:00.000Z"));
         assert!(!list[1].online);
+        assert!(list[1].draining);
+        assert_eq!(list[1].last_seen_ms, parse_ms("2026-11-09T01:00:00.000Z"));
+        assert_eq!(list[2].name, "c", "no name is its id");
+        assert!(!list[2].online);
+    }
+
+    #[test]
+    fn the_runner_order_comes_with_the_other_runners() {
+        assert_eq!(decode_remote_threads(&json!({ "runners": [], "threads": [], "order": ["m", "b", 3] })).order, Some(vec!["m".to_string(), "b".to_string()]));
+        assert_eq!(decode_remote_threads(&json!({ "runners": [], "threads": [] })).order, None);
     }
 
     #[test]

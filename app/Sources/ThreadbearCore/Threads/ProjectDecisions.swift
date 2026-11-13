@@ -50,16 +50,9 @@ public enum ProjectDecisions {
         decisions == threads ? label(decisions) : label(decisions) + " from " + (threads == 1 ? "1 thread" : "\(threads) threads")
     }
 
-    /// One line on what the thread is doing, from what the runner already
-    /// keeps: the librarian's sentence on what it's for (the first line of
-    /// `recap`, there with the recapBox experiment on), else the last turn's
-    /// headline or first line (`preview`). Nil when there's neither.
-    public static func recapLine(_ thread: ThreadSummary) -> String? {
-        if let recap = thread.recap {
-            let first = recap.split(whereSeparator: \.isNewline).first.map(String.init)?.trimmingCharacters(in: .whitespaces) ?? ""
-            // A note from before purposes has only its bullets.
-            if !first.isEmpty, !first.hasPrefix("- ") { return first }
-        }
+    /// One line on what the thread is doing: the last turn's headline or
+    /// first line (`preview`). Nil when there's none.
+    public static func statusLine(_ thread: ThreadSummary) -> String? {
         let preview = thread.preview.split(whereSeparator: \.isNewline).first.map(String.init)?.trimmingCharacters(in: .whitespaces) ?? ""
         return preview.isEmpty ? nil : preview
     }

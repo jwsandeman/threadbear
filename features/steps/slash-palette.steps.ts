@@ -85,3 +85,75 @@ Then('the palette\'s details say the usage {string}', async function (this: Thre
 Then('the palette\'s details say they\'re from {string}', async function (this: ThreadbearWorld, origin: string) {
   await this.until(`from ${origin}`, (d) => d.palette?.detail?.origin === origin);
 });
+
+// The palette's size and columns as drawn, in points (the GPUI dump's
+// `palette.size` and `palette.columns`), noted to compare after a drag.
+type Geometry = { size: [number, number]; columns: [number, number] };
+const noted = new WeakMap<ThreadbearWorld, Geometry>();
+
+async function geometry(world: ThreadbearWorld): Promise<Geometry> {
+  return world.until('the palette drawn', (d) => {
+    const p = (d as unknown as { palette?: { size?: [number, number]; columns?: [number, number] } }).palette;
+    return p?.size && p.columns ? { size: p.size, columns: p.columns } : undefined;
+  });
+}
+
+When('I note the palette\'s size', async function (this: ThreadbearWorld) {
+  noted.set(this, await geometry(this));
+});
+
+When('I drag the palette\'s top edge {int} points up', async function (this: ThreadbearWorld, points: number) {
+  await this.app.do({ cmd: 'palette-drag', edge: 'top', dx: 0, dy: -points });
+});
+
+When('I drag the palette\'s right edge {int} points right', async function (this: ThreadbearWorld, points: number) {
+  await this.app.do({ cmd: 'palette-drag', edge: 'right', dx: points, dy: 0 });
+});
+
+// A side grows both sides at once, so the palette stays centred on the box.
+Then('the palette is {int} points wider than it was', async function (this: ThreadbearWorld, points: number) {
+  const before = noted.get(this);
+  assert.ok(before, 'note the palette\'s size first');
+  await this.until(`the palette ${points} points wider`, (d) => {
+    const size = (d as unknown as { palette?: { size?: [number, number] } }).palette?.size;
+    return size && near(size[0], before.size[0] + points) && near(size[1], before.size[1]);
+  });
+});
+
+When('I drag the list\'s edge {int} points right', async function (this: ThreadbearWorld, points: number) {
+  await this.app.do({ cmd: 'palette-drag', edge: 'list', dx: points, dy: 0 });
+});
+
+When('I choose {string} from the palette\'s right-click menu', async function (this: ThreadbearWorld, item: string) {
+  await this.app.do({ cmd: 'palette-menu', click: item });
+});
+
+// Within a point: the sizes are kept as dragged, which can be fractional.
+const near = (a: number, b: number) => Math.abs(a - b) < 1.5;
+
+Then(/^the palette is (?:still )?(\d+) points taller than it was$/, async function (this: ThreadbearWorld, points: string) {
+  const before = noted.get(this);
+  assert.ok(before, 'note the palette\'s size first');
+  await this.until(`the palette ${points} points taller`, (d) => {
+    const size = (d as unknown as { palette?: { size?: [number, number] } }).palette?.size;
+    return size && near(size[1], before.size[1] + Number(points)) && near(size[0], before.size[0]);
+  });
+});
+
+Then('the palette is the size it was', async function (this: ThreadbearWorld) {
+  const before = noted.get(this);
+  assert.ok(before, 'note the palette\'s size first');
+  await this.until('the palette back to its size', (d) => {
+    const size = (d as unknown as { palette?: { size?: [number, number] } }).palette?.size;
+    return size && near(size[0], before.size[0]) && near(size[1], before.size[1]);
+  });
+});
+
+Then('the list is {int} points wider than it was', async function (this: ThreadbearWorld, points: number) {
+  const before = noted.get(this);
+  assert.ok(before, 'note the palette\'s size first');
+  await this.until(`the list ${points} points wider`, (d) => {
+    const columns = (d as unknown as { palette?: { columns?: [number, number] } }).palette?.columns;
+    return columns && near(columns[1], before.columns[1] + points);
+  });
+});

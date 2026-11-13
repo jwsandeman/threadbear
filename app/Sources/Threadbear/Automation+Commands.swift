@@ -39,6 +39,15 @@ extension Automation {
             }
             return "ok"
         }
+        // A Scheduled row, by its title: "schedule" clicks it (the editor
+        // opens on it), "scheduleMenu" lists its right-click menu.
+        if let title = (c["schedule"] ?? c["scheduleMenu"]) as? String {
+            let rows = ScheduleRows.rows(for: thread, in: app.schedules, now: app.now, target: app.scheduleTarget)
+            guard let row = rows.first(where: { $0.title == title }) else { return "error no Scheduled row \(title)" }
+            if c["scheduleMenu"] != nil { return "ok Edit | Show all schedules" }
+            app.editSchedule(row.id)
+            return "ok"
+        }
         guard let fetched = app.highlights[thread.id] else { return "error highlights not fetched" }
         let sections = HighlightSections.build(fetched)
         func find(_ title: String) -> Highlight? {
@@ -77,6 +86,15 @@ extension Automation {
         QuickLookCoordinator.shared.debugOpened = { viewerShown = ($0, $1) }
         guard grid.open((c["index"] as? Int) ?? 0) else { return "error that tile doesn't open" }
         return viewer([:])
+    }
+
+    /// `tiles`: what each picture of the last row of at least `count` says,
+    /// "picture" for one that's drawn, else its words, as the GPUI app's.
+    static func tiles(_ c: [String: Any], app: AppModel) -> String {
+        let least = max((c["count"] as? Int) ?? 1, 1)
+        let grids = all(ImageGridView.self, in: app.transcript.tableView).filter { $0.debugPaths.count >= least }
+        guard let grid = grids.last else { return "error no row of \(least) pictures on screen" }
+        return "ok " + grid.debugTileWords.joined(separator: " | ")
     }
 
     /// `viewer`: says what a tile's click would be showing.
@@ -323,6 +341,30 @@ extension Automation {
         return (0..<session.displayCount).lazy.map { session.displayRow($0) }.first { $0.id.hasPrefix(prefix) }
     }
 
+    /// `edit-message` with `click`: the row hovered, so its pencil shows as
+    /// it does under the pointer, then a press and release on the pencil
+    /// through the window, hit-tested as a real click is. Nil once clicked,
+    /// or why it couldn't be.
+    static func clickPencil(_ row: TranscriptRow, app: AppModel) async -> String? {
+        guard let index = app.transcript.session?.displayIndex(of: row.id) else { return "error no such row" }
+        app.transcript.scroll(toRow: index, offset: 120)
+        guard let cell = app.transcript.tableView.view(atColumn: 0, row: index, makeIfNecessary: false) as? TextRowCell, let window = cell.window else { return "error row isn't drawn" }
+        guard cell.debugHover(true), !cell.edit.isHidden else { return "error no pencil by \(row.id)" }
+        defer { _ = cell.debugHover(false) }
+        let at = cell.edit.convert(NSPoint(x: cell.edit.bounds.midX, y: cell.edit.bounds.midY), to: nil)
+        func event(_ type: NSEvent.EventType) -> NSEvent? {
+            NSEvent.mouseEvent(with: type, location: at, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                               windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1)
+        }
+        guard let down = event(.leftMouseDown), let up = event(.leftMouseUp) else { return "error no event" }
+        // A button tracks the press until it pulls the release off the
+        // queue, so the release goes on the queue first.
+        NSApp.postEvent(up, atStart: false)
+        window.sendEvent(down)
+        try? await Task.sleep(for: .milliseconds(100))
+        return nil
+    }
+
     static func scroll(toRow prefix: String?, offset: Double, app: AppModel) -> String {
         guard let row = displayedRow(prefix, app), let index = app.transcript.session?.displayIndex(of: row.id) else { return "error no such row" }
         app.transcript.scroll(toRow: index, offset: offset)
@@ -372,7 +414,8 @@ extension Automation {
     /// draws a transcript row as hovered; neither clears both.
     /// The activity log (ActivityRecorder). `"on": true | false` sets the
     /// Settings switch. `"click": "<tip>"` gives the recorder a click on the
-    /// control with that tooltip (without pressing it), and `"key": "n"`
+    /// control with that tooltip (without pressing it), `"cardAction"` one on
+    /// a transcript card's button (below), and `"key": "n"`
     /// with `"command": true` presses a key through the app's own event
     /// dispatch, so a menu's shortcut comes back as its item. Says whether
     /// it's on, how many lines today has and the last few (`"last": N`).
@@ -387,6 +430,16 @@ extension Automation {
             guard let event = NSEvent.mouseEvent(with: type, location: center, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
                                                  windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1)
             else { return "error no event" }
+            ActivityRecorder.shared.click(event)
+        }
+        // `"cardAction": "archive"`: a click on the transcript's card button
+        // with that action (the done card's Archive), again without pressing it.
+        if let action = c["cardAction"] as? String {
+            guard let window = mainWindow, let content = window.contentView,
+                  let point = all(TranscriptTextView.self, in: content).lazy.compactMap({ $0.windowPoint(ofAction: action) }).first,
+                  let event = NSEvent.mouseEvent(with: .leftMouseDown, location: point, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                                                 windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1)
+            else { return "error no card button \(action)" }
             ActivityRecorder.shared.click(event)
         }
         if let key = c["key"] as? String {
@@ -552,6 +605,27 @@ extension Automation {
         return "ok window \(window)"
     }
 
+    /// A row's ```slack, ```email or ```draft boxes (DraftBlockCell):
+    /// `{"row": id}` says how many; with `"copy": true` presses the
+    /// `index`-th one's Copy (0, the first, by default) through mouseDown,
+    /// as a click does. With no `row`, the newest reply with a draft. The
+    /// copy lands on this instance's pasteboard; read it back with
+    /// `clipboard`.
+    static func draft(_ c: [String: Any], app: AppModel) -> String {
+        let found = (c["row"] as? String).flatMap { displayedRow($0, app) }
+            ?? (c["row"] == nil ? app.transcript.session?.model.rows.last(where: { AppDump.drafts($0) != nil }) : nil)
+        guard let row = found, let index = app.transcript.session?.displayIndex(of: row.id) else { return "error no such row" }
+        app.transcript.scroll(toRow: index, offset: 40)
+        guard let cell = app.transcript.tableView.view(atColumn: 0, row: index, makeIfNecessary: true) as? TextRowCell else {
+            return "error \(row.id) isn't a text row"
+        }
+        let count = cell.textView.debugDraftCount()
+        guard c["copy"] as? Bool == true else { return "ok \(count)" }
+        let n = c["index"] as? Int ?? 0
+        guard cell.textView.debugCopyDraft(n) else { return "error no draft \(n) in \(row.id): it has \(count)" }
+        return "ok copied"
+    }
+
     /// Links with a hover card in a transcript row's text (an asks card's
     /// link buttons too): `{"row": id}` lists them (words, then where they
     /// go); with `"words"` (part of a link's words), shows that link's
@@ -577,9 +651,21 @@ extension Automation {
             guard cell.textView.debugMiddleClick(words) else { return "error no link with \(words) in \(row.id), or no middle-button event" }
             return "ok selection \(app.selection ?? "nothing")"
         }
-        if let words = c["words"] as? String, c["menu"] as? Bool == true || c["click"] != nil {
+        if let words = c["words"] as? String, c["follow"] as? Bool == true {
+            // A click on the link, ⌘ held for `"command": true`; `opened` says
+            // what a scripted app would have handed the Mac.
+            guard cell.textView.debugFollowLink(words, commandKey: c["command"] as? Bool == true) else { return "error no link with \(words) in \(row.id)" }
+            return "ok"
+        }
+        if let words = c["words"] as? String, c["menu"] as? Bool == true || c["click"] != nil || c["default"] != nil {
             guard let menu = cell.textView.debugLinkMenu(words) else { return "error no link with \(words) in \(row.id)" }
             let items = menu.items.filter { !$0.isSeparatorItem }
+            // `"default": title` picks one of Default's choices.
+            if let title = c["default"] as? String {
+                guard let item = items.first(where: { $0.title == "Default" })?.submenu?.items.first(where: { $0.title == title }), let action = item.action else { return "error no Default item \(title)" }
+                NSApp.sendAction(action, to: item.target, from: item)
+                return "ok"
+            }
             guard let title = c["click"] as? String else { return "ok " + json(items.map(\.title)) }
             guard let item = items.first(where: { $0.title == title }), let action = item.action else { return "error no item \(title)" }
             NSApp.sendAction(action, to: item.target, from: item)
@@ -707,12 +793,20 @@ extension Automation {
         let hold = c["hold"] as? Double ?? 0.2
         let sub = c["sub"] as? String
         var submenu: NSMenu?
+        // `pick`: the item to choose once the menu has been read, as a click
+        // on it would; chosen after the menu closes.
+        let pick = c["pick"] as? String
+        var picked: (menu: NSMenu, index: Int)?
         let watch = NotificationCenter.default.addObserver(forName: NSMenu.didBeginTrackingNotification, object: nil, queue: nil) { note in
             guard let menu = note.object as? NSMenu else { return }
             let isSub = menu === submenu
             if !isSub {
-                titles = menu.items.map { $0.isSeparatorItem ? "---" : $0.title + ($0.submenu != nil ? " >" : "") }
+                // `ticks`: a ticked line reads "[x] " first, as the GPUI app's
+                // menus say it (the Inbox's sort, @sidebar.sort).
+                let ticks = c["ticks"] as? Bool == true
+                titles = menu.items.map { $0.isSeparatorItem ? "---" : (ticks && $0.state == .on ? "[x] " : "") + $0.title + ($0.submenu != nil ? " >" : "") }
                 if let sub { submenu = menu.items.first { $0.title == sub }?.submenu }
+                if let pick, let index = menu.items.firstIndex(where: { $0.title == pick }) { picked = (menu, index) }
             }
             // Timers: the main queue can't break into a menu's tracking.
             let opened = Timer(timeInterval: 0.15, repeats: false) { _ in
@@ -763,6 +857,12 @@ extension Automation {
         else if sub != nil { return "error no submenu \(sub ?? "") in " + json(titles) }
         // Menus stuck (MenuWatch): the click opened a popover, no menu to cancel.
         if titles.isEmpty { MenuPopover.close() }
+        if let pick {
+            guard let picked else { return titles.isEmpty ? "error no menu opened" : "error no item \(pick) in " + json(titles) }
+            picked.menu.performActionForItem(at: picked.index)
+            RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+            return "ok"
+        }
         return titles.isEmpty ? "error no menu opened" : "ok " + json(titles)
     }
 
@@ -879,6 +979,21 @@ extension Automation {
             guard show else { return "ok closed" }
             RunLoop.main.run(until: Date().addingTimeInterval(0.5))
             return app.usageShown ? "ok shown" : "error the panel didn't open"
+        }
+        // The chart's Today or 7 days, as its segmented control sets them:
+        // the panel's @AppStorage, which a scripted click can't reach between
+        // the two segments under one tooltip.
+        if let range = c["range"] as? String {
+            guard range == "today" || range == "week" else { return "error range is today or week" }
+            UserDefaults.standard.set(range, forKey: "usage.chartRange")
+            return "ok " + range
+        }
+        // The Settings card's switch for a model's own week, as a click on it
+        // sets it: the panel's @AppStorage. A click by its tip would land on
+        // whatever's there when the card is scrolled out of sight.
+        if let on = c["showModelWeeks"] as? Bool {
+            UserDefaults.standard.set(on, forKey: UsagePanel.showModelWeeksKey)
+            return on ? "ok on" : "ok off"
         }
         if let title = c["click"] as? String {
             if title == "Check now" { app.checkClis(); return "ok" }

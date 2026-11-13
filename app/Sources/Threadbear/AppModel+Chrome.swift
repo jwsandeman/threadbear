@@ -126,10 +126,7 @@ extension AppModel {
     }
 
     /// As a shell would need it typed: the default data folder has a space.
-    static func shellQuoted(_ text: String) -> String {
-        if text.range(of: #"^[A-Za-z0-9_@%+=:,./-]+$"#, options: .regularExpression) != nil { return text }
-        return "'" + text.replacingOccurrences(of: "'", with: #"'\''"#) + "'"
-    }
+    static func shellQuoted(_ text: String) -> String { RowDebug.shellWord(text) }
 
     // MARK: Copying
 

@@ -329,6 +329,16 @@ fn testLabels() {
     assert_eq!(gap(60.0, vec![task("A"), task("B"), task("C")]), "1 min later · A and 2 more finished");
 }
 
+/// A command with a commit message in it shows only its first line, as the
+/// Swift app's one-line label does (thread a92fcf9a).
+#[test]
+fn testALabelIsOneLine() {
+    let line = |description: &str| TurnGap { from: 0.0, to: 180.0, woke_by: vec![BackgroundTask::new(BackgroundKind::Shell, description, true)] }.label_line();
+    assert_eq!(line("git commit -qm \"Fix it\n\nWhy: it broke\""), "3 min later · git commit -qm \"Fix it…");
+    assert_eq!(line("npm test"), "3 min later · npm test finished");
+    assert_eq!(line("npm test\n"), "3 min later · npm test finished");
+}
+
 // ---- WorkLinksTests ----
 
 fn e1_end_turn(seq: i64) -> Event {
