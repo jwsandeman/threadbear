@@ -277,6 +277,20 @@ turn and a Done button, even if the panel was closed; your selected thread
 stays yours. The agent waits for Done or for the page to settle after your step.
 Normal browsing by the agent doesn't open the panel.
 
+With **Annotate browser pages** on in Settings > General > Experiments,
+pages in the agents' own browser have an **Annotate** button. Select elements,
+drag a Region, Draw a mark or Erase one, then write what should change.
+**Attach** puts the comment, element details and a screenshot in that thread's
+message box. Anything you had already typed stays there. Check it and press
+Send when ready; attaching alone doesn't start the agent. Escape or Cancel
+closes the tools. Switching threads while annotating still attaches to the
+thread you started from.
+
+This works on this Mac's threads and the agents' browser. Personal Chrome
+profile tabs and threads on other machines don't offer annotation. Elements
+inside another site's embedded frame can be marked as a region. BrowserBear
+must be running; enabling the experiment does not install it.
+
 An agent can also use a separate Chrome with `--profile agent`. Its pages show in
 the same panel, with its own sign-ins. When that Chrome asks for a passkey or a
 permission, its window comes to the middle of your screen and the panel says so,

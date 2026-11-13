@@ -304,6 +304,7 @@ It comes from reading code, not from running anything, so "(unverified)" means n
 | `browser.show` | Show window | Brings the real window forward | BrowserBear socket: Unix socket on macOS and Linux, named pipe on Windows (inferred). | shim | S | `AgentBrowserPanel` |
 | `browser.handoff` | Your turn and Done | Handoff marks a page | Drawn. | build | S | `AgentBrowserPanel` |
 | `browser.address` | New page by address | Field at the top | `Input`. | kit | S | `AgentBrowserPanel` |
+| `browser.annotate` | Annotate a page | Select, mark or draw, then attach comment and screenshot to the original draft | Port the exact-target CDP connection and draft append; reuse bundled JavaScript. Off by default experiment. | build | M | `BrowserAnnotations`, `AgentBrowserPanel` |
 
 ## 12. File previews and folders
 

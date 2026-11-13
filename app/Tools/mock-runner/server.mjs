@@ -560,7 +560,7 @@ async function dispatch(client, method, p) {
       }
       return {
         runnerVersion, protocol: 1, accounts: publicAccounts(),
-        defaults: oldRunner ? { ...defaults, poolId: undefined } : defaults, ...(oldRunner ? {} : { clis, updates, pools, experiments: process.env.TB_MOCK_DECISIONS ? ['projectDecisions'] : [] }),
+        defaults: oldRunner ? { ...defaults, poolId: undefined } : defaults, ...(oldRunner ? {} : { clis, updates, pools, experiments: [...(process.env.TB_MOCK_DECISIONS ? ['projectDecisions'] : []), ...(process.env.TB_MOCK_BROWSER_ANNOTATIONS ? ['browserAnnotations'] : [])] }),
       };
     // Moving a thread to another runner (docs/protocol.md): a guess from
     // "that runner", and a move that only marks the row, for the app's

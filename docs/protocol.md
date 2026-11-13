@@ -4771,6 +4771,27 @@ message, so a later return to the thread still shows the handoff.
 
 ### The Browser panel
 
+With the `browserAnnotations` experiment enabled, the Mac app offers Annotate
+on a local thread's page in the agents' browser. It connects to that page's
+exact `targetId` on the loopback debugging port in `agent/tabs.json`, after
+checking the page belongs to that thread. Chrome-profile pages are excluded:
+BrowserBear's generic debugging commands resolve numeric tab ids without a
+profile, so two profiles can resolve to the wrong page.
+
+The app injects its bundled, MIT-licensed T3 Code annotation tools into an
+isolated JavaScript world. Select, Region, Draw and Erase collect the user's
+comment, bounded element context and marks. Attach hides the controls for a
+viewport screenshot and adds the context and picture to the originating
+thread's existing local draft. It never sends a message automatically. Switching
+threads does not redirect the result. Navigation, disconnection or cancellation
+ends the session; a failed screenshot is reported without silently discarding
+the annotation. The app removes the overlay when finished.
+
+There is no new runner request or backend field: the draft uses the existing
+text and image representation, `media.import` and, only when the user presses
+Send, `threads.send`. The page receives no runner credential or HTTP callback
+endpoint. Other machines' threads and the phone cannot start an annotation.
+
 The Mac app's Browser panel uses BrowserBear's existing private Unix socket
 (`~/Library/Application Support/BrowserBear/browserbear.sock`). It lists the
 pages a thread is using, each with a still and a Show window button. It doesn't

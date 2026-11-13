@@ -501,6 +501,16 @@ installed, else Google Chrome, with its own profile folder; the panel reads
 `agent/tabs.json` in BrowserBear's folder for its pages. Any program on this Mac
 could reach its local debugging port, so it holds only what you sign it in to.
 
+The optional **Annotate browser pages** experiment connects to that same
+loopback port, using the exact page id owned by the local thread. Its bundled
+selection and drawing tools run in an isolated JavaScript world in the page.
+Attach captures that viewport and the selected elements' HTML, text and styles,
+then imports a temporary PNG through the usual picture importer and appends
+the context to the original thread's draft. The temporary PNG is removed
+after import. The draft is stored like other unsent messages; it reaches an
+agent and the mirror only when you send it. No runner key is exposed to the
+page, no callback server is opened, and no browser or extension is installed.
+
 Nothing else: no analytics, no ads, no tracking.
 
 ## Secrets and your Convex deployment

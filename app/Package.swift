@@ -46,7 +46,7 @@ let package = Package(
             path: "Sources/Threadbear",
             // Big pictures (the Librarian's page). Looked up through Art,
             // never Bundle.module, which stops the app if the bundle's missing.
-            resources: [.copy("Resources/Art"), .copy("Resources/Rich")],
+            resources: [.copy("Resources/Art"), .copy("Resources/Rich"), .copy("Resources/Annotations")],
             // The AppKit side renders and measures text off the main thread
             // with non-Sendable TextKit objects confined to one thread each;
             // Swift 5 mode keeps that from drowning in Sendable errors.

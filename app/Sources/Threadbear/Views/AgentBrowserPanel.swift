@@ -123,6 +123,15 @@ final class AgentBrowserModel: ObservableObject {
 
     func tabs(for threadId: String) -> [AgentTab] { tabs.filter { $0.thread == threadId } }
 
+    /// Re-read ownership before injecting or attaching, even if the panel's poll is stale.
+    func annotationTargetIsCurrent(_ tab: AgentTab, thread: String, port: Int) -> Bool {
+        guard tab.bridge != true, tab.profileId == AgentBrowser.agentsBrowser, tab.thread == thread,
+              let target = tab.targetId, !target.isEmpty,
+              let data = FileManager.default.contents(atPath: (AgentBrowser.home as NSString).appendingPathComponent("agent/tabs.json")),
+              let state = try? JSONDecoder().decode(AgentState.self, from: data), state.port == port else { return false }
+        return state.tabs.contains { $0.tabId == tab.tabId && $0.targetId == target && $0.thread == thread && $0.bridge != true }
+    }
+
     var available: Bool { port != 0 || FileManager.default.fileExists(atPath: BrowserBear.socket) }
 
     private func mergeTabs() {
@@ -235,6 +244,7 @@ final class AgentBrowserModel: ObservableObject {
 struct AgentBrowserPanel: View {
     let thread: ThreadSummary
     @ObservedObject private var model = AgentBrowserModel.shared
+    @ObservedObject private var annotations = BrowserAnnotations.shared
     @State private var address = ""
     @FocusState private var addressFocused: Bool
 
@@ -264,6 +274,9 @@ struct AgentBrowserPanel: View {
                 if let error = model.error {
                     Text(error).font(.system(size: TypeScale.label)).foregroundStyle(.secondary).padding(zoomed(6))
                 }
+            }
+            if annotations.threadID == thread.id, let message = annotations.message {
+                Text(message).font(.system(size: TypeScale.label)).foregroundStyle(.secondary).padding(zoomed(8))
             }
         }
     }
@@ -305,6 +318,8 @@ struct AgentPageRow: View {
     let thread: String
     let browserName: String
     @ObservedObject private var model = AgentBrowserModel.shared
+    @ObservedObject private var annotations = BrowserAnnotations.shared
+    @Environment(AppModel.self) private var app
     @State private var still: AgentStill?
 
     private static let stillWidth: CGFloat = 104
@@ -345,6 +360,23 @@ struct AgentPageRow: View {
                         .fixedSize()
                         .busy(model.pending.contains(AgentBrowserModel.pendingKey("markDone", tab)))
                         .tip("Tell the agent you've finished here")
+                }
+            }
+            if app.experiments.contains("browserAnnotations") {
+                if annotations.activeTabID == tab.id, annotations.threadID == thread {
+                    HStack(spacing: zoomed(6)) {
+                        SpinnerMark(color: .secondaryLabelColor).frame(width: zoomed(11), height: zoomed(11))
+                        Button("Cancel annotation") { annotations.cancel() }
+                            .controlSize(.small)
+                            .tip("Close the annotation tools without adding to the draft")
+                    }
+                } else {
+                    Button("Annotate") { annotations.start(tab: tab, thread: thread, app: app) }
+                        .controlSize(.small)
+                        .disabled(annotations.activeTabID != nil || tab.bridge == true || tab.targetId == nil || app.isRemote(thread))
+                        .tip(tab.bridge == true || app.isRemote(thread)
+                             ? "Open this page in this Mac's agents' browser to annotate it"
+                             : "Select elements, mark regions or draw, then attach a comment and screenshot to this thread's draft")
                 }
             }
         }

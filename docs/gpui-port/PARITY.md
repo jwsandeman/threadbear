@@ -4296,3 +4296,16 @@ Fixes from Codex's review of the slice before:
 - Remaining: the rest of the daily driver.
 - Verification: `TB_APP=swift cucumber-js` on Tinker Desk, 24 of 24 scenarios;
   `TB_APP=gpui cucumber-js` on `cloud` under Xvfb, 17 of 24 at this point.
+
+### 2026-11-13 Browser annotation experiment
+
+- Swift adds Select, Region, Draw and Erase in an owned agent browser page,
+  then attaches the comment, context and screenshot to the original draft.
+  GPUI has not implemented this experiment.
+- `features/browser-annotations.feature` records the two cross-app scenarios.
+  They remain manual/pending in Cucumber because its driver does not own an
+  external browser. The separate Chrome/CDP regression test runs with
+  `node app/Tools/browser-annotation-test.mjs`; native draft and connection
+  checks are in `BrowserAnnotationsTests`.
+- Verified in the Swift debug app against isolated Chrome: attachment after
+  changing threads, existing draft preservation, image import, and Cancel.
