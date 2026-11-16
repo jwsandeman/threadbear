@@ -150,7 +150,11 @@ impl Composer {
     fn pick_model(&self, row: &PickerRow, column: &str, data: &ChipData, cx: &mut App) {
         let Some(settings) = data.settings() else { return };
         let model = (!row.is_default).then(|| row.id.clone());
-        if settings.uses_pools() {
+        // A provider outside every pool: its column picks as a provider's
+        // does without pools, onto its first login.
+        let unpooled = column.strip_prefix(threadbear_core::new_thread::PROVIDER_COLUMN);
+        let column = unpooled.unwrap_or(column);
+        if settings.uses_pools() && unpooled.is_none() {
             if settings.pool().is_some_and(|p| p.id == column) || column == PINNED_COLUMN {
                 return self.set_model(model, cx);
             }
@@ -412,6 +416,7 @@ impl Composer {
         let data = self.chip_data(cx);
         let provider = data.summary.as_ref().map(|t| t.provider.as_str()).unwrap_or_default();
         let has_auto = data.logins.has_auto_mode(provider);
+        let has_plan = threadbear_core::logins::has_plan_mode(provider);
         style::menu::popover(Popover::new("composer-permission"), cx)
             // Its chip's title may shrink to fit a narrow box.
             .trigger_style(StyleRefinement::default().min_w_0())
@@ -420,7 +425,7 @@ impl Composer {
             .content(move |_, window, cx| {
                 let popover = cx.entity();
                 let modes: &[&str] = if has_auto || mode == "auto" { &["full", "auto", "ask", "plan"] } else { &["full", "ask", "plan"] };
-                v_flex().w(gpui_kit::px(320.)).children(modes.iter().map(|m| {
+                v_flex().w(gpui_kit::px(320.)).children(modes.iter().filter(|m| **m != "plan" || has_plan).map(|m| {
                     let m = *m;
                     let (popover, composer) = (popover.clone(), composer.clone());
                     menu_row(m, Some(permission_icon(m)), permission_title(m), Some(permission_help(m)), m == mode, window, cx, move |window, cx| {
@@ -782,7 +787,9 @@ impl ModelPickerView {
         let own_column = if pools { settings.pool().map_or(PINNED_COLUMN.to_owned(), |p| p.id.clone()) } else { settings.provider.clone() };
         let column = self.column.clone().unwrap_or(own_column);
         let query = self.search.read(cx).value().to_string();
-        let provider = if pools {
+        let provider = if let Some(unpooled) = column.strip_prefix(threadbear_core::new_thread::PROVIDER_COLUMN) {
+            unpooled.to_owned()
+        } else if pools {
             data.logins.pool(&column).and_then(|p| p.account_ids.iter().find_map(|id| data.logins.account(id))).map_or(settings.provider.clone(), |a| a.provider_id().to_owned())
         } else {
             column.clone()
@@ -824,6 +831,7 @@ impl Render for ModelPickerView {
                     };
                     (p.id.clone(), p.title.clone(), Some(subtitle), threadbear_core::new_thread::pool_providers(p, &data.logins.accounts))
                 })
+                .chain(threadbear_core::new_thread::unpooled_providers(&data.logins.pools, &data.logins.accounts).into_iter().map(|p| (format!("{}{p}", threadbear_core::new_thread::PROVIDER_COLUMN), data.logins.provider_title(&p), None, vec![p])))
                 .collect()
         } else {
             let mut seen: Vec<String> = Vec::new();
@@ -1283,6 +1291,10 @@ fn picker_lines_with(data: &ChipData, login: Option<(String, (String, Option<Str
             let provider = pool.account_ids.iter().find_map(|id| data.logins.account(id)).map_or("claude".to_owned(), |a| a.provider_id().to_owned());
             add_rows(settings.rows(&provider, ""), &mut lines);
         }
+        for provider in threadbear_core::new_thread::unpooled_providers(&data.logins.pools, &data.logins.accounts) {
+            lines.push(format!("# {}", data.logins.provider_title(&provider)));
+            add_rows(settings.rows(&provider, ""), &mut lines);
+        }
     } else {
         let mut seen: Vec<String> = Vec::new();
         for a in &data.logins.accounts {
@@ -1344,11 +1356,9 @@ pub(crate) fn model_chip_badge_text(data: &ChipData) -> Option<String> {
 /// The modes the permission menu offers, in its order.
 #[cfg(feature = "automation")]
 pub(crate) fn permission_modes(summary: &ThreadSummary, logins: &RunnerLogins) -> Vec<&'static str> {
-    if logins.has_auto_mode(&summary.provider) || summary.permission_mode == "auto" {
-        vec!["full", "auto", "ask", "plan"]
-    } else {
-        vec!["full", "ask", "plan"]
-    }
+    let mut modes = if logins.has_auto_mode(&summary.provider) || summary.permission_mode == "auto" { vec!["full", "auto", "ask", "plan"] } else { vec!["full", "ask", "plan"] };
+    modes.retain(|m| *m != "plan" || threadbear_core::logins::has_plan_mode(&summary.provider));
+    modes
 }
 
 /// The permission menu as text (Automation's describe(menu)).
@@ -1381,7 +1391,11 @@ pub(crate) fn picker_click(composer: &Entity<Composer>, title: &str, cx: &mut Ap
         if let Some(own) = settings.pool() {
             order.sort_by_key(|p| p.id != own.id);
         }
-        order.iter().map(|p| (p.id.clone(), p.account_ids.iter().find_map(|id| data.logins.account(id)).map_or("claude".to_owned(), |a| a.provider_id().to_owned()))).collect()
+        order
+            .iter()
+            .map(|p| (p.id.clone(), p.account_ids.iter().find_map(|id| data.logins.account(id)).map_or("claude".to_owned(), |a| a.provider_id().to_owned())))
+            .chain(threadbear_core::new_thread::unpooled_providers(&data.logins.pools, &data.logins.accounts).into_iter().map(|p| (format!("{}{p}", threadbear_core::new_thread::PROVIDER_COLUMN), p)))
+            .collect()
     } else {
         let mut providers: Vec<String> = Vec::new();
         for a in &data.logins.accounts {

@@ -37,12 +37,17 @@ and opening a subagent's transcript are not supported in this first version.
 
 `runner/src/adapters/omp/`; provider, account, config, pool and startup wiring
 in `runner/src/`; provider names and picker support in the Mac and phone
-clients. The contract is in `docs/protocol.md`, "Oh My Pi harness".
+clients. In the GPUI app: its name, sign-in command and missing Plan first in
+`desktop/core/src/` (`logins.rs`, `sign_in.rs`, `slash.rs`, `updates.rs`), and
+its picker column in `new_thread.rs` (`unpooled_providers`) and
+`desktop/gpui/src/composer_chips.rs`. The contract is in `docs/protocol.md`,
+"Oh My Pi harness".
 
 ## Taking it out
 
 Turn off `ohMyPi` to stop offering OMP accounts. To remove it, delete the
 adapter and its startup wiring, config and discovery fields, its `omp` row
-in `runner/src/providers.ts` and `ProviderInfo.swift`, and provider picker
+in `runner/src/providers.ts` and `ProviderInfo.swift`, the `"omp"` arms in
+`desktop/core/src/` and `desktop/gpui/src/icons.rs`, and provider picker
 entries. Keep decoding existing `omp` thread records and leave
 their saved sessions on disk.

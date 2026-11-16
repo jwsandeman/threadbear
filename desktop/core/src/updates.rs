@@ -778,9 +778,12 @@ pub fn status_line(cli: &CliStatus) -> String {
 }
 
 /// Who keeps it up to date, when that isn't the usual: a path set by hand is
-/// never updated.
+/// never updated, and an older runner never updates Oh My Pi.
 pub fn managed_line(cli: &CliStatus) -> Option<&'static str> {
-    (cli.managed_by == "none").then_some("Set by hand in runner.json, so Threadbear leaves it alone")
+    if cli.managed_by != "none" {
+        return None;
+    }
+    Some(if cli.provider == "omp" { "This runner doesn't update Oh My Pi yet. Update it with omp update." } else { "Set by hand in runner.json, so Threadbear leaves it alone" })
 }
 
 /// The update button's title, or None when there's nothing to install.
@@ -962,7 +965,8 @@ mod tests {
         let current = CliStatus { status: "current".into(), ..clis[0].clone() };
         assert_eq!(status_line(&current), "Claude Code 2.1.311, up to date");
         assert!(!cli_pending(&current));
-        assert_eq!(managed_line(&CliStatus { managed_by: "none".into(), ..current }), Some("Set by hand in runner.json, so Threadbear leaves it alone"));
+        assert_eq!(managed_line(&CliStatus { managed_by: "none".into(), ..current.clone() }), Some("Set by hand in runner.json, so Threadbear leaves it alone"));
+        assert_eq!(managed_line(&CliStatus { managed_by: "none".into(), provider: "omp".into(), ..current }), Some("This runner doesn't update Oh My Pi yet. Update it with omp update."));
     }
 
     #[test]

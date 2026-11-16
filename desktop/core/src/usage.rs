@@ -852,6 +852,7 @@ pub fn pool_symbol(pool: &Pool, accounts: &[Account]) -> String {
     match pool_providers(pool, accounts).first().map(String::as_str) {
         Some("claude") => "sparkle".to_owned(),
         Some("codex") => "chevron.left.forwardslash.chevron.right".to_owned(),
+        Some("omp") => "option".to_owned(),
         Some(_) => "cpu".to_owned(),
         None => "square.stack".to_owned(),
     }

@@ -47,6 +47,7 @@ pub fn login_command(provider: &str) -> &'static str {
         "codex" => "codex login",
         "cursor" => "agent login",
         "opencode" => "opencode auth login",
+        "omp" => "omp login",
         "claude" | "" => "claude auth login",
         _ => "",
     }
@@ -89,6 +90,13 @@ pub fn script_named(account: &SignInAccount, cli_path: &str, command: &str, name
     if codex && !account.config_dir.is_empty() {
         env = format!("CODEX_HOME={} ", quoted(&account.config_dir));
     }
+    // The login's own folder, whatever profile the shell names.
+    if account.provider == "omp" {
+        env = "env -u OMP_PROFILE -u PI_PROFILE ".into();
+        if !account.config_dir.is_empty() {
+            env += &format!("PI_CODING_AGENT_DIR={} ", quoted(&account.config_dir));
+        }
+    }
     if (account.provider == "claude" || account.provider.is_empty()) && account.id != "claude-main" && !account.config_dir.is_empty() {
         env = format!("CLAUDE_CONFIG_DIR={} ", quoted(&account.config_dir));
     }
@@ -125,6 +133,15 @@ mod tests {
     fn another_claude_login_uses_its_folder() {
         let s = script(&account("claude-1", "claude", "two", "/Users/x/Library/Application Support/Threadbear/accounts/claude-1"), "");
         assert!(s.contains("CLAUDE_CONFIG_DIR='/Users/x/Library/Application Support/Threadbear/accounts/claude-1' claude auth login"), "{s}");
+    }
+
+    #[test]
+    fn oh_my_pi_uses_its_folder_and_no_shell_profile() {
+        let s = script(&account("omp-1", "omp", "two", "/Users/x/accounts/omp-1"), "");
+        assert!(s.contains("\nenv -u OMP_PROFILE -u PI_PROFILE PI_CODING_AGENT_DIR='/Users/x/accounts/omp-1' omp login\n"), "{s}");
+        assert!(s.contains("Signing in to Oh My Pi for Threadbear (two)."), "{s}");
+        let main = script(&account("omp-main", "omp", "main", ""), "/opt/omp");
+        assert!(main.contains("\nenv -u OMP_PROFILE -u PI_PROFILE '/opt/omp' login\n"), "{main}");
     }
 
     #[test]

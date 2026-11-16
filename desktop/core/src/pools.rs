@@ -31,6 +31,7 @@ pub fn symbol(pool: &Pool, accounts: &[Account]) -> String {
     match providers(pool, accounts).first().map(String::as_str) {
         Some("claude") => "sparkle".into(),
         Some("codex") => "chevron.left.forwardslash.chevron.right".into(),
+        Some("omp") => "option".into(),
         Some(_) => "cpu".into(),
         None => "square.stack".into(),
     }

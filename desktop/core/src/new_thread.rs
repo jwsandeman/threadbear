@@ -345,6 +345,24 @@ pub fn pool_providers(pool: &Pool, accounts: &[Account]) -> Vec<String> {
     seen
 }
 
+/// The model picker's column for a provider none of whose logins is in a
+/// pool: this before the provider's id.
+pub const PROVIDER_COLUMN: &str = "@provider:";
+
+/// The providers with a login and none in any pool, in the logins' order:
+/// each gets a column of its own beside the pools'.
+pub fn unpooled_providers(pools: &[Pool], accounts: &[Account]) -> Vec<String> {
+    let pooled: Vec<String> = pools.iter().flat_map(|p| pool_providers(p, accounts)).collect();
+    let mut seen: Vec<String> = Vec::new();
+    for account in accounts {
+        let provider = account.provider_id().to_owned();
+        if !pooled.contains(&provider) && !seen.contains(&provider) {
+            seen.push(provider);
+        }
+    }
+    seen
+}
+
 /// `AccountUsageText.ChipBadge`: after a chip's title, "· 12%" in orange
 /// when a login is running out, "Limit reached" in red at its limit.
 #[derive(Clone, Debug, PartialEq)]
@@ -673,13 +691,19 @@ impl Draft<'_> {
     /// `AppModel.newThreadPermission`: picked, else the last one picked for a
     /// new thread, else the runner's default, else full access.
     pub fn permission(&self) -> String {
-        self.picks
+        let mode = self
+            .picks
             .permission
             .clone()
             .or_else(|| self.mem.last_permission.clone())
             .or_else(|| self.logins.defaults.permission_mode.clone())
             .filter(|m| !m.is_empty())
-            .unwrap_or_else(|| "full".to_owned())
+            .unwrap_or_else(|| "full".to_owned());
+        // A draft on Plan first moved to a provider without it asks before edits.
+        if mode == "plan" && !crate::logins::has_plan_mode(&self.provider()) {
+            return "ask".to_owned();
+        }
+        mode
     }
 
     /// What the note names after "on": the pool, or the login.
@@ -1071,6 +1095,26 @@ mod tests {
         assert_eq!(mem.last_permission.as_deref(), Some("full"), "Plan first is for one task");
         let picked = NewThreadPicks { permission: Some("ask".into()), ..Default::default() };
         assert_eq!(draft(&l, &picked, &mem).permission(), "ask");
+    }
+
+    #[test]
+    fn a_provider_outside_every_pool_gets_a_column_and_no_plan_first() {
+        let l = RunnerLogins::from_hello(&json!({
+            "accounts": [
+                { "id": "claude-main", "provider": "claude" },
+                { "id": "omp-main", "provider": "omp", "defaultModel": "pi-large" },
+                { "id": "omp-2", "provider": "omp" },
+                { "id": "codex-main", "provider": "codex" }
+            ],
+            "pools": [{ "id": "claude", "title": "Claude", "accountIds": ["claude-main"] }],
+            "defaults": { "cwd": "/x", "accountId": "claude-main", "poolId": "claude" }
+        }));
+        assert_eq!(unpooled_providers(&l.pools, &l.accounts), ["omp", "codex"]);
+        let mem = Remembered::default();
+        let picks = NewThreadPicks { account: Some("omp-main".into()), permission: Some("plan".into()), ..Default::default() };
+        assert_eq!(draft(&l, &picks, &mem).permission(), "ask", "Oh My Pi has no Plan first");
+        let picks = NewThreadPicks { permission: Some("plan".into()), ..Default::default() };
+        assert_eq!(draft(&l, &picks, &mem).permission(), "plan");
     }
 
     #[test]

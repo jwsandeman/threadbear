@@ -270,11 +270,17 @@ pub fn provider_title(id: &str) -> String {
     match id {
         "claude" | "" => "Claude".to_owned(),
         "codex" => "Codex".to_owned(),
+        "omp" => "Oh My Pi".to_owned(),
         other => {
             let mut chars = other.chars();
             chars.next().map(|c| c.to_uppercase().collect::<String>() + chars.as_str()).unwrap_or_default()
         }
     }
+}
+
+/// Whether a provider has Plan first. Oh My Pi has none.
+pub fn has_plan_mode(provider: &str) -> bool {
+    provider != "omp"
 }
 
 /// Whether a provider's Auto mode is a real judge (Providers autoMode
@@ -530,11 +536,9 @@ impl<'a> ChipSettings<'a> {
     /// The modes the permission menu offers: Auto needs a provider with its
     /// own judge of each action, or a thread already on it.
     pub fn permission_modes(&self) -> Vec<&'static str> {
-        if self.logins.has_auto_mode(&self.provider) || self.permission_mode == "auto" {
-            vec!["full", "auto", "ask", "plan"]
-        } else {
-            vec!["full", "ask", "plan"]
-        }
+        let mut modes = if self.logins.has_auto_mode(&self.provider) || self.permission_mode == "auto" { vec!["full", "auto", "ask", "plan"] } else { vec!["full", "ask", "plan"] };
+        modes.retain(|m| *m != "plan" || has_plan_mode(&self.provider));
+        modes
     }
 
     /// The model rows of a provider's column (ThreadSettings.rows).
@@ -689,6 +693,9 @@ mod tests {
         let mut s = settings(&l);
         s.provider = "codex".into();
         assert_eq!(s.permission_modes(), vec!["full", "ask", "plan"]);
+        s.provider = "omp".into();
+        assert_eq!(s.permission_modes(), vec!["full", "ask"], "Oh My Pi has no Plan first");
+        assert_eq!(provider_title("omp"), "Oh My Pi");
     }
 
     #[test]

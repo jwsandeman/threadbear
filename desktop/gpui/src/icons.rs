@@ -51,6 +51,7 @@ pub fn provider_mark(provider: &str) -> Icon {
     match if provider.is_empty() { "claude" } else { provider } {
         "claude" => Icon::default().data(CLAUDE_LOGO),
         "codex" => Icon::default().data(CODEX_LOGO),
+        "omp" => symbol("option"),
         _ => symbol("cpu"),
     }
 }
@@ -191,6 +192,7 @@ pub fn try_symbol(name: &str) -> Option<Icon> {
         "lock" => IconName::Lock,
         "lock.open" => return Some(Icon::default().data(LOCK_OPEN)),
         "cpu" => IconName::Cpu,
+        "option" => IconName::Option,
         // The trust chip over the composer, and the origin badges' marks.
         "lock.shield" | "lock.shield.fill" => IconName::ShieldLock,
         "shippingbox" | "shippingbox.fill" => IconName::Box,
