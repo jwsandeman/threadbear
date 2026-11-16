@@ -652,10 +652,10 @@ struct PreviewBody: View {
     var body: some View {
         switch preview.target {
         case .page(let url) where url.isFileURL:
-            LocalPagePreview(url: url, opened: preview.opened)
+            LocalPagePreview(url: url, opened: preview.opened, threadID: thread.id)
                 .id(url)
         case .page(let url):
-            WebPanel(url: url)
+            AnnotatedWebPanel(url: url, threadID: thread.id)
         case .remote(_, let failed):
             // Being fetched from that Mac, or why it couldn't be.
             if let failed {
@@ -692,7 +692,7 @@ struct PreviewBody: View {
         if !FileManager.default.fileExists(atPath: path) {
             PaneNote(text: "This file isn't there any more.")
         } else if PreviewRules.viewer(forPath: path) == .web {
-            LocalPagePreview(url: URL(fileURLWithPath: path), opened: preview.opened)
+            LocalPagePreview(url: URL(fileURLWithPath: path), opened: preview.opened, threadID: thread.id)
                 .id(path)
         } else if TextFileView.shows(path) {
             TextFileView(url: URL(fileURLWithPath: path), opened: preview.opened, editing: preview.editing, threadId: thread.id,
@@ -716,6 +716,7 @@ struct PreviewBody: View {
 struct LocalPagePreview: View {
     let url: URL
     let opened: Int
+    var threadID: String? = nil
     /// What the scan found, for the file it was of: the pane keeps this
     /// view (and its state) when another file opens in it, so nothing here
     /// counts unless it's this file's (Codex review: a page allowed first
@@ -749,7 +750,11 @@ struct LocalPagePreview: View {
                 .padding(.vertical, zoomed(6))
                 Divider()
             }
-            WebPanel(url: url, scriptsFor: current.flatMap { $0.allowed ? $0.digest : nil })
+            if let threadID {
+                AnnotatedWebPanel(url: url, threadID: threadID, scriptsFor: current.flatMap { $0.allowed ? $0.digest : nil })
+            } else {
+                WebPanel(url: url, scriptsFor: current.flatMap { $0.allowed ? $0.digest : nil })
+            }
         }
         .task(id: "\(url) \(opened)") {
             let path = url.path

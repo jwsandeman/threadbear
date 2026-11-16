@@ -4309,3 +4309,26 @@ Fixes from Codex's review of the slice before:
   checks are in `BrowserAnnotationsTests`.
 - Verified in the Swift debug app against isolated Chrome: attachment after
   changing threads, existing draft preservation, image import, and Cancel.
+
+### 2026-11-16 Annotations inside Threadbear
+
+- Swift's `AnnotatedWebPanel` adds Annotate above the built-in web and link
+  previews, local HTML previews and URL panels for local threads. The tools
+  run in an isolated `WKContentWorld`; `WKWebView.takeSnapshot` captures the
+  result. This replaces the external-browser annotation workflow described
+  above. BrowserBear and Chrome are not required for built-in annotations.
+- A Browser panel page offers Open here to annotate, loading its address in
+  the embedded view. Show window remains the explicit external-browser action.
+  Page script consent and network restrictions remain unchanged.
+- Attach preserves the original draft's text and pictures and never sends.
+  Navigation or disposal of the page view cancels an unfinished annotation;
+  switching threads cannot redirect a captured result to a different draft.
+- `features/browser-annotations.feature` covers attaching, cancelling,
+  leaving the page and opening a Browser panel page inside Threadbear. These
+  scenarios remain manual and GPUI-pending. Three native WebKit integration
+  tests pass, covering isolated script execution, capture and draft preservation,
+  cancellation/navigation and pooled-view eviction. The Swift debug app was
+  exercised through Select, Draw, Erase, Region, Cancel and Attach, including
+  opening a typed address inside Threadbear. The Chrome/CDP overlay harness is
+  not evidence of WebKit behaviour; its temporal checks did not reproduce the
+  reported flicker. The installed-app flicker is not confirmed resolved.

@@ -4772,20 +4772,30 @@ message, so a later return to the thread still shows the handoff.
 ### The Browser panel
 
 With the `browserAnnotations` experiment enabled, the Mac app offers Annotate
-on a local thread's page in the agents' browser. It connects to that page's
-exact `targetId` on the loopback debugging port in `agent/tabs.json`, after
-checking the page belongs to that thread. Chrome-profile pages are excluded:
-BrowserBear's generic debugging commands resolve numeric tab ids without a
-profile, so two profiles can resolve to the wrong page.
+above pages displayed inside Threadbear for local threads. `AnnotatedWebPanel`
+wraps the built-in web and link previews, local HTML previews and URL panels.
+It uses the existing `WKWebView`; it does not need BrowserBear, Chrome or a
+debugging connection. For a local thread with the experiment enabled, the
+Browser panel's address field says **Open a page here** and loads its URL
+directly in the embedded preview, including when BrowserBear is stopped.
+It does not create an external browser tab. A BrowserBear page's **Open here
+to annotate** action also loads its URL in the embedded view. **Show window**
+remains the explicit action for bringing the external browser forward.
 
 The app injects its bundled, MIT-licensed T3 Code annotation tools into an
-isolated JavaScript world. Select, Region, Draw and Erase collect the user's
-comment, bounded element context and marks. Attach hides the controls for a
-viewport screenshot and adds the context and picture to the originating
-thread's existing local draft. It never sends a message automatically. Switching
-threads does not redirect the result. Navigation, disconnection or cancellation
-ends the session; a failed screenshot is reported without silently discarding
-the annotation. The app removes the overlay when finished.
+isolated `WKContentWorld`. Select, Region, Draw and Erase collect the user's
+comment, bounded element context and marks. Attach hides the controls for
+`WKWebView.takeSnapshot` and adds the context and picture to the originating
+thread's existing local draft. It preserves existing text and pictures and
+never sends a message automatically. Results are bound to the thread that
+started the annotation, so changing the selected thread cannot redirect them.
+Navigation, disposal of the page view or cancellation ends an unfinished
+session. A failed screenshot is reported without silently discarding the
+annotation. The app removes the overlay when finished.
+
+Annotation leaves the page's script and network sandbox unchanged, including
+the existing consent to run a local HTML preview's scripts. The isolated
+annotation script does not grant the page access to native app functions.
 
 There is no new runner request or backend field: the draft uses the existing
 text and image representation, `media.import` and, only when the user presses
@@ -4794,10 +4804,11 @@ endpoint. Other machines' threads and the phone cannot start an annotation.
 
 The Mac app's Browser panel uses BrowserBear's existing private Unix socket
 (`~/Library/Application Support/BrowserBear/browserbear.sock`). It lists the
-pages a thread is using, each with a still and a Show window button. It doesn't
-stream pages or send input to them (since 8 Nov 2026): the page is used in its
-own real window, in the agents' browser (Helium) or in one of the user's Chrome
-profiles.
+pages a thread is using, each with a still and a Show window button. The stills
+do not stream pages or send input to them (since 8 Nov 2026). Show window
+uses the real window in the agents' browser (Helium) or one of the user's
+Chrome profiles; Open here to annotate loads the address separately in
+Threadbear.
 
 - `panelState` reports connected Chrome profiles and the pages in them that
   ordinary BrowserBear commands associated with threads. Pages in the agents'

@@ -243,10 +243,14 @@ final class AgentBrowserModel: ObservableObject {
 
 struct AgentBrowserPanel: View {
     let thread: ThreadSummary
+    @Environment(AppModel.self) private var app
     @ObservedObject private var model = AgentBrowserModel.shared
-    @ObservedObject private var annotations = BrowserAnnotations.shared
     @State private var address = ""
     @FocusState private var addressFocused: Bool
+
+    private var embeddedBrowser: Bool {
+        app.experiments.contains("browserAnnotations") && !app.isRemote(thread.id)
+    }
 
     /// Pages waiting for Mike first, then the newest.
     private var tabs: [AgentTab] {
@@ -261,7 +265,7 @@ struct AgentBrowserPanel: View {
         VStack(spacing: 0) {
             addressBar
             if tabs.isEmpty {
-                PaneNote(text: model.error ?? (model.available ? "No pages open in this thread." : "BrowserBear isn't running."))
+                PaneNote(text: embeddedBrowser ? "Open a page above to view and annotate it here." : model.error ?? (model.available ? "No pages open in this thread." : "BrowserBear isn't running."))
             } else {
                 ScrollView {
                     LazyVStack(spacing: zoomed(8)) {
@@ -275,24 +279,21 @@ struct AgentBrowserPanel: View {
                     Text(error).font(.system(size: TypeScale.label)).foregroundStyle(.secondary).padding(zoomed(6))
                 }
             }
-            if annotations.threadID == thread.id, let message = annotations.message {
-                Text(message).font(.system(size: TypeScale.label)).foregroundStyle(.secondary).padding(zoomed(8))
-            }
         }
     }
 
     private var addressBar: some View {
         HStack(spacing: zoomed(6)) {
-            TextField("Open a page in \(model.browserName)", text: $address)
+            TextField(embeddedBrowser ? "Open a page here" : "Open a page in \(model.browserName)", text: $address)
                 .textFieldStyle(.plain)
                 .font(.system(size: TypeScale.label))
                 .focused($addressFocused)
                 .padding(.horizontal, zoomed(8))
                 .padding(.vertical, zoomed(4))
                 .background(SidebarMetrics.hover, in: RoundedRectangle(cornerRadius: zoomed(6)))
-                .disabled(!model.available || model.pending.contains(AgentBrowserModel.openingKey))
+                .disabled(!embeddedBrowser && (!model.available || model.pending.contains(AgentBrowserModel.openingKey)))
                 .onSubmit(go)
-            if model.pending.contains(AgentBrowserModel.openingKey) {
+            if !embeddedBrowser && model.pending.contains(AgentBrowserModel.openingKey) {
                 SpinnerMark(color: .secondaryLabelColor).frame(width: zoomed(11), height: zoomed(11))
             }
         }
@@ -304,7 +305,13 @@ struct AgentBrowserPanel: View {
         var text = address.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
         if !text.contains("://") { text = (text.contains(".") && !text.contains(" ") ? "https://" : "https://www.google.com/search?q=") + text }
-        model.open(text, thread: thread.id)
+        if embeddedBrowser {
+            guard let url = URL(string: text), url.isFileURL || PreviewRules.isWebPage(url) else { return }
+            if url.isFileURL { app.preview(path: url.path, in: thread) }
+            else { app.preview(page: url, title: HighlightText.address(text), in: thread) }
+        } else {
+            model.open(text, thread: thread.id)
+        }
         address = ""
         addressFocused = false
     }
@@ -318,7 +325,6 @@ struct AgentPageRow: View {
     let thread: String
     let browserName: String
     @ObservedObject private var model = AgentBrowserModel.shared
-    @ObservedObject private var annotations = BrowserAnnotations.shared
     @Environment(AppModel.self) private var app
     @State private var still: AgentStill?
 
@@ -362,22 +368,15 @@ struct AgentPageRow: View {
                         .tip("Tell the agent you've finished here")
                 }
             }
-            if app.experiments.contains("browserAnnotations") {
-                if annotations.activeTabID == tab.id, annotations.threadID == thread {
-                    HStack(spacing: zoomed(6)) {
-                        SpinnerMark(color: .secondaryLabelColor).frame(width: zoomed(11), height: zoomed(11))
-                        Button("Cancel annotation") { annotations.cancel() }
-                            .controlSize(.small)
-                            .tip("Close the annotation tools without adding to the draft")
-                    }
-                } else {
-                    Button("Annotate") { annotations.start(tab: tab, thread: thread, app: app) }
-                        .controlSize(.small)
-                        .disabled(annotations.activeTabID != nil || tab.bridge == true || tab.targetId == nil || app.isRemote(thread))
-                        .tip(tab.bridge == true || app.isRemote(thread)
-                             ? "Open this page in this Mac's agents' browser to annotate it"
-                             : "Select elements, mark regions or draw, then attach a comment and screenshot to this thread's draft")
+            if app.experiments.contains("browserAnnotations"), !app.isRemote(thread),
+               let url = URL(string: tab.url), url.isFileURL || PreviewRules.isWebPage(url) {
+                Button("Open here to annotate") {
+                    guard let origin = app.threads[thread] else { return }
+                    if url.isFileURL { app.preview(path: url.path, title: tab.title, in: origin) }
+                    else { app.preview(page: url, title: tab.title, in: origin) }
                 }
+                .controlSize(.small)
+                .tip("Open this address in Threadbear, then annotate the embedded page")
             }
         }
         .padding(zoomed(8))
