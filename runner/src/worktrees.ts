@@ -465,6 +465,11 @@ async function recoverLandedFor(t: LandTarget, common: string, out: (line: strin
   } catch {
     return;
   }
+  // Already on what landed: nothing to move or say.
+  if (landed === head) {
+    fs.rmSync(file, { force: true });
+    return;
+  }
   if ((await gitOut(t.path, ['rev-parse', '--abbrev-ref', 'HEAD'])) !== t.branch) return;
   if (!(await git(t.path, ['merge-base', '--is-ancestor', landed, `refs/heads/${MAIN}`])).ok) return;
   if ((await git(t.path, ['reset', '-q', '--keep', landed])).ok) {
@@ -1077,8 +1082,10 @@ async function landLocked(
         if (now) writeEntry(common, { ...now, result: { landed: g.tip, commits: g.commits, together: [t.branch, ...together.filter((b) => b !== g.entry.branch)] } });
         // One whose tb has gone never hears: move its branch here, as it
         // would have, or its next tb land would land a commit made empty
-        // on purpose a second time (rebase keeps those).
-        if (!(await ownerWaiting(common, g.entry))) {
+        // on purpose a second time (rebase keeps those). Commits replayed
+        // in the second they were made are the same commits, and the
+        // branch is on them already.
+        if (g.tip !== g.entry.commit && !(await ownerWaiting(common, g.entry))) {
           writeLandedFor(common, g.entry.commit, g.tip);
           await moveGoneBranch(g.entry, g.tip);
         }

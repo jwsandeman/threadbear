@@ -252,8 +252,29 @@ test('the main checkout on a detached HEAD is refused by name', async () => {
 
 // 12 Nov: session restarts killed waiting tb lands, and the group was
 // checked again without each one, so two passing checks landed nothing.
-test('a landing whose tb is killed during the group check still lands, if its branch is where it was', async () => {
+//
+// The check replays c's commits onto main with the time now as their commit
+// time. Made in the same second as c's own, they are the very same commits,
+// and in another second they aren't. Each test fixes which.
+async function killedDuringTheGroupCheck(sameSecond: boolean): Promise<void> {
   const { root, main } = makeRepo();
+  await atCommitTime(() => killedDuringTheGroupCheckAt(root, main, sameSecond));
+}
+
+// Runs `fn` with every commit made at one fixed time, until `fn` deletes
+// GIT_COMMITTER_DATE itself.
+async function atCommitTime<T>(fn: () => T | Promise<T>): Promise<T> {
+  const before = process.env.GIT_COMMITTER_DATE;
+  process.env.GIT_COMMITTER_DATE = '2026-11-12T00:00:00Z';
+  try {
+    return await fn();
+  } finally {
+    if (before === undefined) delete process.env.GIT_COMMITTER_DATE;
+    else process.env.GIT_COMMITTER_DATE = before;
+  }
+}
+
+async function killedDuringTheGroupCheckAt(root: string, main: string, sameSecond: boolean): Promise<void> {
   const [b, c] = branches(main, ['b', 'c']);
   const common = path.join(main, '.git');
   // c's tb, waiting: an entry, and its lock held by a stand-in that goes
@@ -274,10 +295,13 @@ test('a landing whose tb is killed during the group check still lands, if its br
   await until(() => fs.existsSync(path.join(root, 'held')), "c's stand-in holding its lock");
   const check = `if test -f c.txt; then touch '${root}/drop'; while ! test -f '${root}/released'; do sleep 0.05; done; fi`;
   // The entry asks for the same check as b's, for c's commits as they are.
-  fs.writeFileSync(path.join(queueDir(common), `${e.id}.json`), JSON.stringify({ ...e, commit: sh(c.path, 'git rev-parse HEAD'), check }));
+  const asked = sh(c.path, 'git rev-parse HEAD');
+  fs.writeFileSync(path.join(queueDir(common), `${e.id}.json`), JSON.stringify({ ...e, commit: asked, check }));
+  if (!sameSecond) delete process.env.GIT_COMMITTER_DATE;
   const out = capture();
   assert.equal(await land({ ...b, check }, out.opts), 0, out.err.join('\n'));
   await gone;
+  assert.equal(sh(main, `git merge-base --is-ancestor ${asked} main && echo same || echo replayed`), sameSecond ? 'same' : 'replayed');
   assert.ok(fs.existsSync(path.join(main, 'b.txt')) && fs.existsSync(path.join(main, 'c.txt')), out.out.join('\n'));
   assert.ok(out.out.some((l) => /In the same check, and landed with it: thread\/c0000000/.test(l)));
   // c's branch is on what landed, so its next tb land has nothing to land.
@@ -285,6 +309,24 @@ test('a landing whose tb is killed during the group check still lands, if its br
   assert.equal(await land({ ...c, check: 'true' }, again.opts), 0);
   assert.deepEqual(again.out, [`Nothing to land: ${c.branch} has no commits that aren't on main.`]);
   assert.equal(sh(main, 'git log --format=%s main | grep -c "Empty on c"'), '1');
+}
+
+test('a landing whose tb is killed during the group check still lands, if its branch is where it was', () => killedDuringTheGroupCheck(false));
+
+test('a killed landing whose commits land as they were has nothing moved, and its next tb land says nothing of it', () => killedDuringTheGroupCheck(true));
+
+test('a note that a branch landed on the commit it is already on is dropped without a word', async () => {
+  const { main } = makeRepo();
+  const [c] = branches(main, ['c']);
+  const head = sh(c.path, 'git rev-parse HEAD');
+  sh(main, `git merge -q --ff-only ${head}`);
+  const done = path.join(main, '.git', 'threadbear-land-done');
+  fs.mkdirSync(done, { recursive: true });
+  fs.writeFileSync(path.join(done, head), head);
+  const out = capture();
+  assert.equal(await land({ ...c, check: 'true' }, out.opts), 0, out.err.join('\n'));
+  assert.deepEqual(out.out, [`Nothing to land: ${c.branch} has no commits that aren't on main.`]);
+  assert.ok(!fs.existsSync(path.join(done, head)));
 });
 
 test('a cherry-pick of several, stopped and then committed by hand, still holds a landing', async () => {
@@ -301,11 +343,14 @@ test('a cherry-pick of several, stopped and then committed by hand, still holds 
 
 test("a branch that landed while its tb was stopped is moved to what landed by its next tb land, so nothing lands twice", async () => {
   const { main } = makeRepo();
-  const [c] = branches(main, ['c']);
-  sh(c.path, 'git commit -q --allow-empty -m "Empty on c"');
+  const c = await atCommitTime(() => {
+    const [made] = branches(main, ['c']);
+    sh(made.path, 'git commit -q --allow-empty -m "Empty on c"');
+    return made;
+  });
   const asked = sh(c.path, 'git rev-parse HEAD');
   // What a group check landed for it (as a holder that couldn't move its
-  // branch leaves it): its commits on main.
+  // branch leaves it): its commits on main, made again at another time.
   sh(main, `git cherry-pick --allow-empty ${asked}~1 ${asked}`);
   const landed = sh(main, 'git rev-parse main');
   const done = path.join(main, '.git', 'threadbear-land-done');
