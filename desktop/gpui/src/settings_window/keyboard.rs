@@ -338,7 +338,7 @@ impl SettingsWindow {
         let (fg, bg, edge) = match look {
             Look::Key(_) => (style::label_text(cx), style::primary_opacity(cx, 0.09), style::primary_opacity(cx, 0.1)),
             Look::None => (style::secondary_text(cx), hsla(0., 0., 0., 0.), style::primary_opacity(cx, 0.2)),
-            Look::Listening => (white(), style::control_accent(cx), hsla(0., 0., 0., 0.)),
+            Look::Listening => (style::on_accent(cx), style::control_accent(cx), hsla(0., 0., 0., 0.)),
             Look::Taken(_) => (orange, orange.opacity(0.18), orange.opacity(0.6)),
         };
         let tip = rules::cap_tip(command, bindings);

@@ -482,7 +482,7 @@ pub(super) fn prominent_button(id: &'static str, label: &'static str, tip: impl 
             .text_size(px(13.))
             .line_height(px(style::natural_line(13.)))
             .whitespace_nowrap()
-            .text_color(white())
+            .text_color(style::on_accent(cx))
             .cursor_pointer(),
         tip,
     )

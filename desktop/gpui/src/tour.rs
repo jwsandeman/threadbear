@@ -767,7 +767,7 @@ fn prominent_button(id: &'static str, label: &'static str, tip: &'static str, en
         .text_size(px(13.))
         .whitespace_nowrap()
         .bg(accent)
-        .text_color(gpui_kit::white())
+        .text_color(style::on_accent(cx))
         .when(enabled, |b| b.cursor_pointer().active(move |s| s.bg(accent.opacity(0.85))))
         .when(!enabled, |b| b.opacity(0.45))
         .child(label)

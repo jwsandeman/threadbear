@@ -584,7 +584,7 @@ fn switch_thumb(cx: &App) -> Hsla {
 /// a cut-off page's foot (Theme.codeBackgroundOpaque).
 fn box_fill_opaque(cx: &App) -> Hsla {
     if dark(cx) {
-        rgb(0x282828).into()
+        rgb(0x0b0b0b).into()
     } else {
         rgb(0xf7f7f7).into()
     }

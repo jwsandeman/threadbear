@@ -482,7 +482,7 @@ impl Threadbear {
         if let Some(thread) = thread {
             let id = thread.id.clone();
             let busy = thread.busy();
-            let accent = style::control_accent(cx);
+            let accent = style::running(cx);
             meta = meta.child(
                 crate::highlights::tipped(h_flex().id(("task-thread", n)).gap(px(3.)).items_center().px(px(4.)).py(px(1.)).rounded(px(4.)).bg(style::primary_opacity(cx, 0.07)).cursor_pointer(), format!("Open the thread working on it: {}", thread.title))
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())

@@ -167,13 +167,15 @@ pub(crate) fn install_window_colours(cx: &mut App) {
     let hex = |c: Rgba| -> SharedString { format!("#{:02x}{:02x}{:02x}", (c.r * 255.).round() as u8, (c.g * 255.).round() as u8, (c.b * 255.).round() as u8).into() };
     let lift = |c: Rgba, by: f32| Rgba { r: c.r + (1. - c.r) * by, g: c.g + (1. - c.g) * by, b: c.b + (1. - c.b) * by, a: 1. };
     let theme = Theme::global_mut(cx);
-    for (config, background, popover) in [(&mut theme.light_theme, light, light), (&mut theme.dark_theme, dark, lift(dark, 0.06))] {
+    // Dark panels are black (the dark look below); menus keep the system's lifted grey.
+    for (config, background, popover) in [(&mut theme.light_theme, light, light), (&mut theme.dark_theme, rgb(dark_look::PANEL), lift(dark, 0.06))] {
         let mut changed = (**config).clone();
         changed.colors.background = Some(hex(background));
         changed.colors.sidebar = Some(hex(background));
         changed.colors.popover = Some(hex(popover));
         *config = Rc::new(changed);
     }
+    install_dark_accent(cx);
     refresh_system_accent(cx);
     refresh_system_contrast(cx);
     refresh_system_clock();
@@ -339,7 +341,8 @@ pub(crate) fn refresh_system_accent(cx: &mut App) {
     {
         use gpui_kit::component::Theme;
         use std::rc::Rc;
-        let Some((light, dark)) = system_control_accent(false).zip(system_control_accent(true)) else { return };
+        let Some(light) = system_control_accent(false) else { return };
+        let dark = rgb(dark_look::CYAN);
         let accent = SystemAccent { light, dark };
         if cx.try_global::<SystemAccent>() == Some(&accent) { return; }
         cx.set_global(accent);
@@ -358,10 +361,80 @@ pub(crate) fn refresh_system_accent(cx: &mut App) {
             changed.colors.primary_active = Some(shade(0.));
             *config = Rc::new(changed);
         }
+        install_dark_accent(cx);
         Theme::change(mode, None, cx);
     }
     #[cfg(not(target_os = "macos"))]
     let _ = cx;
+}
+
+/// The dark look's colours. Light keeps the system's.
+pub mod dark_look {
+    /// Conversations, panels and their bars.
+    pub const PANEL: u32 = 0x000000;
+    /// The two icon rails.
+    pub const RAIL: u32 = 0x1D1D1F;
+    /// The accent: selection, chips, links, the bubble, picked answers, the send button.
+    pub const CYAN: u32 = 0x37EBF3;
+    /// Needs you, the running spinner, the Working label and busy dots.
+    pub const YELLOW: u32 = 0xFDF500;
+    /// Text or a glyph on a solid accent fill.
+    pub const ON_ACCENT: u32 = 0x0D0F14;
+}
+
+/// The kit's dark theme on the dark look's accent: its primary buttons,
+/// focus rings and the text on them.
+fn install_dark_accent(cx: &mut App) {
+    use gpui_kit::component::Theme;
+    use std::rc::Rc;
+    let hex = |c: u32| -> SharedString { format!("#{c:06x}").into() };
+    let shade = |toward: u32| -> SharedString {
+        let mix = |shift: u32| ((((dark_look::CYAN >> shift) & 0xff) as f32 * 0.9 + toward as f32 * 0.1).round() as u32) << shift;
+        hex(mix(16) | mix(8) | mix(0))
+    };
+    let theme = Theme::global_mut(cx);
+    let mut changed = (*theme.dark_theme).clone();
+    changed.colors.primary = Some(hex(dark_look::CYAN));
+    changed.colors.ring = Some(hex(dark_look::CYAN));
+    changed.colors.primary_hover = Some(shade(255));
+    changed.colors.primary_active = Some(shade(0));
+    changed.colors.primary_foreground = Some(hex(dark_look::ON_ACCENT));
+    theme.dark_theme = Rc::new(changed);
+}
+
+/// The icon rails' fill: a step lighter than the black panels in dark.
+pub fn rail_fill(cx: &App) -> Hsla {
+    pick(cx, rgb_hsla(dark_look::RAIL), cx.theme().background)
+}
+
+/// A thread's spinner and Working label, and the busy dots (Theme.running).
+pub fn running(cx: &App) -> Hsla {
+    pick(cx, rgb_hsla(dark_look::YELLOW), control_accent(cx))
+}
+
+/// The look's named colours as #rrggbb, for the scripted `colours` command.
+#[cfg(feature = "automation")]
+pub(crate) fn colours_dump(cx: &App) -> serde_json::Value {
+    let hex = |c: Hsla| {
+        let c = Rgba::from(c);
+        format!("#{:02x}{:02x}{:02x}", (c.r * 255.).round() as u8, (c.g * 255.).round() as u8, (c.b * 255.).round() as u8)
+    };
+    let diagram = if cx.theme().is_dark() { threadbear_core::rich_block::RichPalette::DARK.bg } else { threadbear_core::rich_block::RichPalette::LIGHT.bg };
+    serde_json::json!({
+        "panel": hex(cx.theme().background),
+        "rail": hex(rail_fill(cx)),
+        "accent": hex(control_accent(cx)),
+        "link": hex(link_text(cx)),
+        "onAccent": hex(on_accent(cx)),
+        "needsYou": hex(needs_you(cx)),
+        "running": hex(running(cx)),
+        "diagram": diagram,
+    })
+}
+
+/// Text or a glyph on a solid accent fill (Theme.onAccent).
+pub fn on_accent(cx: &App) -> Hsla {
+    pick(cx, rgb_hsla(dark_look::ON_ACCENT), white(1.))
 }
 
 #[cfg(target_os = "macos")]
@@ -513,7 +586,7 @@ pub fn answer_box_fill(cx: &App) -> Hsla {
 /// The system's accent (NSColor.controlAccentColor): the outline of a box
 /// that needs Mike, ticks and the agent's own pick.
 pub fn accent(cx: &App) -> Hsla {
-    pick(cx, rgb_hsla(0x0a84ff), rgb_hsla(0x007aff))
+    pick(cx, rgb_hsla(dark_look::CYAN), rgb_hsla(0x007aff))
 }
 
 fn rgb_hsla(hex: u32) -> Hsla {
@@ -577,7 +650,7 @@ pub fn control_accent(cx: &App) -> Hsla {
     if let Some(accent) = cx.try_global::<SystemAccent>() {
         return Hsla::from(if cx.theme().is_dark() { accent.dark } else { accent.light });
     }
-    pick(cx, srgb(0.04, 0.52, 1.0, 1.0), srgb(0.0, 0.48, 1.0, 1.0))
+    pick(cx, rgb_hsla(dark_look::CYAN), srgb(0.0, 0.48, 1.0, 1.0))
 }
 
 /// NSColor.linkColor, as macOS 27 gives it in sRGB: a lighter blue than the
@@ -585,7 +658,7 @@ pub fn control_accent(cx: &App) -> Hsla {
 /// own colour, 12 Nov; this was the accent's blue before and read deeper than
 /// the Swift app's links).
 pub fn link_text(cx: &App) -> Hsla {
-    pick(cx, srgb(0.255, 0.612, 1.0, 1.0), srgb(0.0, 0.408, 0.855, 1.0))
+    pick(cx, rgb_hsla(dark_look::CYAN), srgb(0.0, 0.408, 0.855, 1.0))
 }
 
 /// A little of the accent over the faint fill behind Mike's own messages.
@@ -622,7 +695,7 @@ pub fn failed_text(cx: &App) -> Hsla {
 
 /// `Theme.needsYou` and NSColor.systemOrange.
 pub fn needs_you_text(cx: &App) -> Hsla {
-    pick(cx, srgb(1., 0.62, 0.04, 1.), srgb(0.7, 0.33, 0., 1.))
+    pick(cx, rgb_hsla(dark_look::YELLOW), srgb(0.7, 0.33, 0., 1.))
 }
 
 /// `Theme.errorBackground`: behind a failed turn's message.

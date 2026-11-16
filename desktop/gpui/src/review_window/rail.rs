@@ -211,7 +211,7 @@ impl ReviewWindow {
         // Send says what will go, and while it goes says so with a spinner and
         // takes no more presses. Grey in a window that isn't in front, as a
         // Mac's own default button is.
-        let (send_fill, send_text) = if can_send && active { (accent, gpui_kit::white()) } else if can_send || submitting { (style::primary_opacity(cx, 0.08), style::label_text(cx)) } else { (style::primary_opacity(cx, 0.04), style::tertiary_label(cx)) };
+        let (send_fill, send_text) = if can_send && active { (accent, style::on_accent(cx)) } else if can_send || submitting { (style::primary_opacity(cx, 0.08), style::label_text(cx)) } else { (style::primary_opacity(cx, 0.04), style::tertiary_label(cx)) };
         let send = crate::highlights::tipped(
             h_flex()
                 .id("review-send")
@@ -299,7 +299,7 @@ fn inline_note(id: impl Into<ElementId>, source: &str, color: Hsla, cwd: &str, c
 /// A tick box: an outline, or filled with the accent and a white tick.
 fn checkbox(on: bool, accent: Hsla, cx: &App) -> AnyElement {
     if on {
-        return div().size(px(14.)).rounded(px(3.5)).bg(accent).flex().items_center().justify_center().child(Icon::new(IconName::Check).with_size(px(11.)).text_color(gpui_kit::white())).into_any_element();
+        return div().size(px(14.)).rounded(px(3.5)).bg(accent).flex().items_center().justify_center().child(Icon::new(IconName::Check).with_size(px(11.)).text_color(style::on_accent(cx))).into_any_element();
     }
     div().size(px(14.)).rounded(px(3.5)).border(px(1.2)).border_color(style::secondary_text(cx)).into_any_element()
 }

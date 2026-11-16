@@ -167,7 +167,7 @@ impl Threadbear {
     fn render_librarian_state(&mut self, status: &Status, now: i64, p: &Palette, cx: &mut Context<Self>) -> AnyElement {
         let (fg, secondary, faint) = (p.fg, p.secondary, p.faint);
         let mark: AnyElement = match status.state {
-            State::Working => Spinner::new().color(style::control_accent(cx)).with_size(px(12.)).into_any_element(),
+            State::Working => Spinner::new().color(style::running(cx)).with_size(px(12.)).into_any_element(),
             State::Paused => icon("pause.circle", 12., secondary).into_any_element(),
             State::Off => icon("exclamationmark.circle", 12., secondary).into_any_element(),
             State::Idle => div().size(px(6.)).rounded_full().bg(faint).into_any_element(),

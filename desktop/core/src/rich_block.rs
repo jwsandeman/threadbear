@@ -78,7 +78,7 @@ impl RichBlock {
     /// Where its pictures are kept, at the zoom they were drawn for
     /// (RichBlocks.key in the Swift app).
     pub fn key(&self, zoom: u32) -> String {
-        format!("{}-{zoom}", self.id)
+        format!("{}-{zoom}-v{CACHE_VERSION}", self.id)
     }
 
     /// The window's title (RichRenderer.showWindow).
@@ -114,8 +114,12 @@ pub struct RichPalette {
     pub accent: &'static str,
 }
 
+/// In a block's cache key: bumped when the palette or the renderer changes,
+/// so pictures drawn the old way aren't read back (RichBlocks.cacheVersion).
+pub const CACHE_VERSION: u32 = 3;
+
 impl RichPalette {
-    pub const DARK: RichPalette = RichPalette { bg: "#282828", fg: "#ececec", muted: "#9a9a9a", line: "#8e8e93", surface: "#333335", surface_alt: "#3a3a3c", border: "#5a5a5e", accent: "#0a84ff" };
+    pub const DARK: RichPalette = RichPalette { bg: "#0b0b0b", fg: "#ececec", muted: "#9a9a9a", line: "#8e8e93", surface: "#333335", surface_alt: "#3a3a3c", border: "#5a5a5e", accent: "#0a84ff" };
     pub const LIGHT: RichPalette = RichPalette { bg: "#f7f7f7", fg: "#1d1d1f", muted: "#6e6e73", line: "#86868b", surface: "#ffffff", surface_alt: "#f0f0f2", border: "#c7c7cc", accent: "#007aff" };
 
     /// Pele's CSS variables (pele.run/theming), without the selector.
@@ -481,7 +485,7 @@ mod tests {
         let digest = Sha256::digest(b"mermaid\ngraph TD");
         assert_eq!(block.id, digest[..10].iter().map(|b| format!("{b:02x}")).collect::<String>());
         assert_eq!(block.id.len(), 20);
-        assert_eq!(block.key(115), format!("{}-115", block.id));
+        assert_eq!(block.key(115), format!("{}-115-v3", block.id));
         assert_ne!(block.id, RichBlock::new(RichKind::Html, "graph TD").id, "the kind is part of it");
     }
 
@@ -515,7 +519,7 @@ mod tests {
         let page = diagram_page();
         assert!(!page.contains("<script"));
         assert!(page.contains("default-src 'none'"));
-        assert!(page.contains("#out.dark{--pele-bg:#282828"));
+        assert!(page.contains("#out.dark{--pele-bg:#0b0b0b"));
     }
 
     #[test]

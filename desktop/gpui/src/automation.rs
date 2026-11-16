@@ -1066,6 +1066,8 @@ fn step(app: &Entity<Threadbear>, cmd: &Value, window: &mut Window, cx: &mut App
         }
         // The colour space the window's drawn in (colour_space.rs): "sRGB" once tagged.
         "colour-space" => Ok(json!(crate::colour_space::describe(window))),
+        // `colours`: the look's named colours as #rrggbb (features/dark-look.feature).
+        "colours" => Ok(crate::style::colours_dump(cx)),
         other => Err(format!("unknown command {other:?}")),
     }
 }

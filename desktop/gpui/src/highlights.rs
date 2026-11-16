@@ -1468,7 +1468,7 @@ impl SidePane {
                 let (shown, more) = HighlightSections::capped(&started, core::SUBAGENT_LIMIT, flags.all_started);
                 for row in shown {
                     let color = match row.state {
-                        core::StartedState::NeedsYou => Some(p.accent),
+                        core::StartedState::NeedsYou => Some(style::needs_you(cx)),
                         core::StartedState::Failed => Some(p.failed),
                         _ => None,
                     };

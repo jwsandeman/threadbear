@@ -453,6 +453,8 @@ pub(crate) struct Palette {
     pub(crate) secondary: Hsla,
     pub(crate) faint: Hsla,
     pub(crate) accent: Hsla,
+    pub(crate) running: Hsla,
+    pub(crate) needs_you: Hsla,
     pub(crate) failed: Hsla,
     pub(crate) hover: Hsla,
     pub(crate) selected: Hsla,
@@ -476,6 +478,8 @@ pub(crate) fn palette(cx: &App) -> Palette {
         secondary: style::secondary_text(cx),
         faint: style::faint_text(cx),
         accent: style::accent(cx),
+        running: style::running(cx),
+        needs_you: style::needs_you(cx),
         failed: style::failed(cx),
         hover: style::sidebar_hover(cx),
         selected: style::sidebar_selected(cx),
@@ -2171,7 +2175,7 @@ fn render_tile(t: &ThreadSummary, look: &RowLook, behind: Hsla, project_icon: Op
                 .bottom_0()
                 .flex()
                 .items_center()
-                .child(div().size(px(7.)).rounded_full().bg(p.accent))
+                .child(div().size(px(7.)).rounded_full().bg(p.needs_you))
                 .into_any_element(),
         )
     } else {
@@ -2259,8 +2263,8 @@ fn trailing_words(trailing: &rows::Trailing, id: String, p: &Palette) -> AnyElem
             .gap(px(5.))
             .text_size(meta).line_height(px(15.))
             .font_medium()
-            .text_color(p.accent)
-            .child(crate::spinner::TurningArc::new(12., p.accent).layered())
+            .text_color(p.running)
+            .child(crate::spinner::TurningArc::new(12., p.running).layered())
             .child(text)
             .into_any_element(),
         TrailingKind::Background => h_flex()

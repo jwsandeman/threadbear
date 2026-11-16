@@ -145,7 +145,7 @@ fn rail_button(button: RailButton, on_click: impl Fn(&mut Threadbear, &mut Windo
     let (fg, secondary) = (cx.theme().foreground, style::secondary_text(cx));
     let hover_fill = style::sidebar_hover(cx);
     let active_fill = style::primary_opacity(cx, 0.08);
-    let background = cx.theme().background;
+    let background = style::rail_fill(cx);
     let separator = style::hairline(cx);
     let dot_color = if button.dot { style::accent(cx) } else { secondary };
     let color = if button.active { fg } else { secondary };
@@ -391,6 +391,7 @@ impl Threadbear {
             .flex_none()
             .w(px(BAR_WIDTH))
             .h_full()
+            .bg(style::rail_fill(cx))
             // Starts under the title bar strip: the traffic lights are wider
             // than the bar, so a full-height line cut between the yellow and
             // green dots (ActivityBar).
@@ -471,7 +472,7 @@ impl Threadbear {
             b.badge = Some(patches);
             rail = rail.child(rail_button(b, |this, _, cx| this.click_rail(shell::PATCHES, cx), cx));
         }
-        div().relative().flex_none().w(px(BAR_WIDTH)).h_full().child(div().absolute().top(px(4.)).bottom(px(4.)).left_0().w(gpui_kit::px(1.)).bg(hairline.opacity(0.7))).child(rail).into_any_element()
+        div().relative().flex_none().w(px(BAR_WIDTH)).h_full().bg(style::rail_fill(cx)).child(div().absolute().top(px(4.)).bottom(px(4.)).left_0().w(gpui_kit::px(1.)).bg(hairline.opacity(0.7))).child(rail).into_any_element()
     }
 
     /// The rails as `dump` reports them, with the fields the Swift app's has.

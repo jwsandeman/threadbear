@@ -437,7 +437,7 @@ impl Composer {
         let name = command.name.clone();
         let title = format!("/{name}");
         let tip: SharedString = if mid_message { format!("/{name}: double-click to put it in the message") } else { format!("/{name}: double-click to run it") }.into();
-        let (fg, accent, hover) = (cx.theme().foreground, style::accent(cx).opacity(0.75), style::primary_opacity(cx, 0.05));
+        let (fg, accent, hover, on_accent) = (cx.theme().foreground, style::accent(cx).opacity(0.75), style::primary_opacity(cx, 0.05), style::on_accent(cx));
         let picked = command.clone();
         div()
             .id(SharedString::from(format!("slash-row-{name}")))
@@ -449,7 +449,7 @@ impl Composer {
             .cursor_pointer()
             .text_size(px(size::LABEL + 1.))
             .truncate()
-            .when(on, |s| s.bg(accent).text_color(gpui_kit::white()))
+            .when(on, |s| s.bg(accent).text_color(on_accent))
             .when(!on, |s| s.text_color(fg).hover(move |s| s.bg(hover)))
             .tip(tip.clone())
             // Picked on the first click, at once; a second click on the

@@ -1489,7 +1489,7 @@ fn drawn_tick(t: f32, colour: Hsla) -> impl IntoElement {
 
 pub(crate) fn card_button(id: impl Into<ElementId>, title: &str, look: ButtonLook, tip: &'static str, cx: &App) -> Stateful<Div> {
     let (fill, text, edge) = match look {
-        ButtonLook::Picked => (style::control_accent(cx), gpui_kit::white(), gpui_kit::transparent_black()),
+        ButtonLook::Picked => (style::control_accent(cx), style::on_accent(cx), gpui_kit::transparent_black()),
         ButtonLook::Suggested => (style::button_fill(cx), style::label_text(cx), style::control_accent(cx).opacity(0.8)),
         ButtonLook::Plain => (style::button_fill(cx), style::label_text(cx), style::button_edge(cx)),
     };

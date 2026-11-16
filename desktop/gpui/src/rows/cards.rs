@@ -27,7 +27,7 @@ use crate::tips::Tip as _;
 pub(crate) fn pill(id: impl Into<ElementId>, title: &str, prominent: bool, enabled: bool, shortcut: Option<&str>, cx: &App) -> Stateful<Div> {
     let (accent, card_bg, card_border, inline_bg, label, tertiary) = (style::control_accent(cx), style::card_background(cx), style::card_border(cx), style::inline_code_background(cx), style::label_text(cx), style::tertiary_label(cx));
     let (bg, border, fg): (Hsla, Hsla, Hsla) = match (prominent, enabled) {
-        (true, true) => (accent, gpui_kit::transparent_black(), gpui_kit::white()),
+        (true, true) => (accent, gpui_kit::transparent_black(), style::on_accent(cx)),
         (true, false) => (inline_bg, gpui_kit::transparent_black(), tertiary),
         (false, true) => (card_bg, card_border, label),
         (false, false) => (card_bg, card_border, tertiary),
@@ -52,7 +52,7 @@ pub(crate) fn pill(id: impl Into<ElementId>, title: &str, prominent: bool, enabl
         .text_color(fg)
         .when(enabled, move |d| d.cursor_pointer().active(move |s| s.bg(pressed)))
         .child(div().whitespace_nowrap().child(title.to_owned()))
-        .when_some(shortcut, |d, shortcut| d.child(div().text_size(px(size::SMALL)).text_color(if prominent && enabled { gpui_kit::white().opacity(0.7) } else { tertiary }).child(shortcut.to_owned())))
+        .when_some(shortcut, |d, shortcut| d.child(div().text_size(px(size::SMALL)).text_color(if prominent && enabled { style::on_accent(cx).opacity(0.7) } else { tertiary }).child(shortcut.to_owned())))
 }
 
 /// A card's frame: the faint fill, the hairline border, and for one waiting on
@@ -819,7 +819,7 @@ fn question_option(
 ) -> AnyElement {
     let multi = question.multi_select;
     let (symbol, color) = if picked { (if multi { "checkbox.on" } else { "radio.on" }, accent) } else { (if multi { "checkbox.off" } else { "radio.off" }, faint_icon) };
-    let glyph = radio_or_check(symbol, color, multi, picked);
+    let glyph = radio_or_check(symbol, color, style::on_accent(cx), multi, picked);
     let (id_label, approval_title) = (title.to_owned(), title.to_owned());
     let aid = Some(approval_id);
     let mut line = h_flex()
@@ -863,13 +863,13 @@ fn question_option(
 
 /// A radio button or checkbox drawn like a macOS one: a filled grey disc, in
 /// the accent with a white mark once picked.
-fn radio_or_check(_symbol: &str, color: Hsla, multi: bool, picked: bool) -> impl IntoElement {
+fn radio_or_check(_symbol: &str, color: Hsla, mark: Hsla, multi: bool, picked: bool) -> impl IntoElement {
     let glyph = div().size(px(14.)).flex_none().flex().items_center().justify_center();
     let (empty, accent) = (hsla(0., 0., 1., 0.14), color);
     if multi {
-        glyph.rounded(px(4.)).bg(if picked { accent } else { empty }).when(picked, |d| d.child(icon("checkmark", 11., gpui_kit::white())))
+        glyph.rounded(px(4.)).bg(if picked { accent } else { empty }).when(picked, |d| d.child(icon("checkmark", 11., mark)))
     } else if picked {
-        glyph.rounded_full().bg(accent).child(div().size(px(5.)).rounded_full().bg(gpui_kit::white()))
+        glyph.rounded_full().bg(accent).child(div().size(px(5.)).rounded_full().bg(mark))
     } else {
         glyph.rounded_full().bg(empty)
     }

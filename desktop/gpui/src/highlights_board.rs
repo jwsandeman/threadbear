@@ -111,7 +111,7 @@ impl SidePane {
         if let Some(other) = &other {
             let id = other.id.clone();
             meta = meta.child(h_flex().id(SharedString::from(format!("board-thread-{}", task.id))).gap(px(3.)).items_center().cursor_pointer().tip(format!("Open {}", other.title)).test_support().role(Role::Button).aria_label(SharedString::from(format!("Open {}", other.title)))
-                .when(other.busy(), |d| d.child(div().size(px(5.)).rounded_full().bg(p.accent)))
+                .when(other.busy(), |d| d.child(div().size(px(5.)).rounded_full().bg(crate::style::running(cx))))
                 .child(icon("bubble.left", 10., p.secondary))
                 .on_click(cx.listener(move |this, _, window, cx| { cx.stop_propagation(); if let Some(app) = this.app.upgrade() { app.update(cx, |app, cx| app.open_thread_link(&id, window, cx)); } })));
         }

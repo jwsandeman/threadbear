@@ -1386,7 +1386,7 @@ impl Composer {
                 .into_any_element();
         }
         if running && !can_send {
-            let (fg, bg) = (cx.theme().background, cx.theme().foreground);
+            let (fg, bg) = (style::on_accent(cx), style::control_accent(cx));
             return circle()
                 .id("composer-stop")
                 .test_support()
@@ -1405,7 +1405,7 @@ impl Composer {
                 .into_any_element();
         }
         let tip = if running { "Send (into this turn)" } else { "Send (Return)" };
-        let (fg, bg) = if can_send { (cx.theme().background, cx.theme().foreground) } else { (style::faint_text(cx), style::send_faint_fill(cx)) };
+        let (fg, bg) = if can_send { (style::on_accent(cx), style::control_accent(cx)) } else { (style::faint_text(cx), style::send_faint_fill(cx)) };
         circle()
             .id("composer-send")
             .test_support()

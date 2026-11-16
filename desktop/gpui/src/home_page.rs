@@ -257,7 +257,7 @@ impl RenderOnce for InfoTrigger {
 
 /// `HomeStatusLine`: what it's doing now, under the title; a dot, accent while busy.
 pub(crate) fn home_status_line(text: &str, busy: bool, cx: &App) -> impl IntoElement {
-    let dot = if busy { style::control_accent(cx) } else { style::faint_text(cx) };
+    let dot = if busy { style::running(cx) } else { style::faint_text(cx) };
     h_flex()
         .pt(px(4.))
         .gap(px(6.))

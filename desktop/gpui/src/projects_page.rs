@@ -378,7 +378,7 @@ fn project_status_line(status: &CardStatus, last_activity_ms: i64, cx: &App) -> 
         }
         let color = match part {
             CardPart::NeedsYou(_) | CardPart::Decisions(_) => style::needs_you(cx),
-            CardPart::Working(_) => style::control_accent(cx),
+            CardPart::Working(_) => style::running(cx),
             CardPart::Failed(_) => style::failed(cx),
             CardPart::Unread(_) => style::secondary_text(cx),
         };

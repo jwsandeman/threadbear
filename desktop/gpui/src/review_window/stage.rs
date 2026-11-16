@@ -176,7 +176,7 @@ impl ReviewWindow {
             let peeking = self.session.peeking;
             let focused = self.session.focused_option().map(|o| o.id.clone()).unwrap_or_else(|| "it".into());
             let tip = if peeking { format!("Back to {focused} (or let go of Space)") } else { format!("Flick to {}: click, or hold Space", baseline.title) };
-            let (fg, bg) = if peeking { (gpui_kit::white(), style::control_accent(cx)) } else { (style::label_text(cx), style::primary_opacity(cx, 0.08)) };
+            let (fg, bg) = if peeking { (style::on_accent(cx), style::control_accent(cx)) } else { (style::label_text(cx), style::primary_opacity(cx, 0.08)) };
             buttons.push(
                 // Its words in a 140 wide frame, as the Swift label's
                 // `frame(maxWidth: 140)` takes all of that whatever they say.
