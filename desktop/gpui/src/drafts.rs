@@ -89,6 +89,20 @@ impl Threadbear {
         }
     }
 
+    /// Adds words and pictures after a thread's draft, in its box if it has
+    /// one and in what's kept for it otherwise. Nothing is sent.
+    pub(crate) fn append_to_draft(&mut self, thread_id: &str, text: String, images: Vec<ImageRef>, cx: &mut Context<Self>) {
+        match self.composers.get(thread_id).cloned() {
+            Some(composer) => composer.update(cx, |c, cx| c.append_draft(text, images, cx)),
+            None => {
+                let kept = self.drafts.saved.remove(thread_id).unwrap_or_default();
+                let joined = RestoreDraft::joined(RestoreDraft::plain(kept.text, kept.images), RestoreDraft::plain(text, images));
+                self.drafts.saved.insert(thread_id.to_owned(), Draft { text: joined.text, images: joined.images });
+            }
+        }
+        self.drafts_changed(cx);
+    }
+
     /// A handover's incoming app taking over: the drafts the outgoing app
     /// wrote as it handed over, into every box (none had its draft put back
     /// while it waited: `restore_saved_draft`).

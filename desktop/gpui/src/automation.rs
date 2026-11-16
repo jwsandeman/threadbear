@@ -190,6 +190,10 @@ async fn run(app: &WeakEntity<Threadbear>, window: AnyWindowHandle, cmd: &Value,
     if cmd["cmd"] == "webPanel" {
         return crate::web_panels::automation(cmd, cx).await;
     }
+    // Annotate over the pane's page (annotations.rs).
+    if cmd["cmd"] == "annotate" {
+        return crate::annotations::automation(app, cmd, cx).await;
+    }
     if cmd["cmd"] == "convex" {
         return crate::web_panels::convex_command(app, cmd, cx).await;
     }

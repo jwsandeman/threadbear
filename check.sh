@@ -394,10 +394,10 @@ fi
 # (cargo check of the GPUI app, the dock and every test), a few minutes from
 # cold. On a check host cargo's target folder is kept between runs
 # (scripts/check-remote.sh), so --quick stays about a minute.
-DESKTOP_NEEDS='^desktop/|^features/support/sample\.png$|^site/app-doc-slugs\.json$|^app/Tools/mock-runner/|^runner/src/|^app/Tests/Fixtures/|^app/Sources/Threadbear/Resources/Art/|^app/Sources/Threadbear/Resources/Rich/'
+DESKTOP_NEEDS='^desktop/|^features/support/sample\.png$|^site/app-doc-slugs\.json$|^app/Tools/mock-runner/|^runner/src/|^app/Tests/Fixtures/|^app/Sources/Threadbear/Resources/Art/|^app/Sources/Threadbear/Resources/Rich/|^app/Sources/Threadbear/Resources/Annotations/'
 # What cargo builds from outside desktop/ (include_bytes!, include_str!), folders
 # or files, for the hashing below.
-DESKTOP_BUILT_IN=(app/Sources/Threadbear/Resources/Art app/Sources/Threadbear/Resources/Rich site/app-doc-slugs.json features/support/sample.png)
+DESKTOP_BUILT_IN=(app/Sources/Threadbear/Resources/Art app/Sources/Threadbear/Resources/Rich app/Sources/Threadbear/Resources/Annotations site/app-doc-slugs.json features/support/sample.png)
 #
 # That kept target is shared by every checkout that sends a run, and cargo
 # calls a crate fresh when none of its files is newer than its last build: a
@@ -478,7 +478,7 @@ if [ "$APP_ONLY" = 0 ] && [ "$RUNNER_ONLY" = 0 ]; then
     # tests, so a test module that stopped compiling fails here too. Only
     # when something it builds from changed: the runner code the mock
     # imports can't break it.
-    if [ "$QUICK" = 1 ] && needed '^desktop/|^app/Sources/Threadbear/Resources/(Art|Rich)/|^features/support/sample\.png$'; then
+    if [ "$QUICK" = 1 ] && needed '^desktop/|^app/Sources/Threadbear/Resources/(Art|Rich|Annotations)/|^features/support/sample\.png$'; then
       cargo_step "desktop app check" check --locked -p threadbear-gpui --features automation --all-targets
     fi
     [ "$QUICK" = 1 ] || cargo_step "desktop build" check --locked --workspace --all-targets

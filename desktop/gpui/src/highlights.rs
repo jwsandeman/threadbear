@@ -1898,6 +1898,11 @@ impl SidePane {
     fn pane_dump(&self, thread: &ThreadSummary, section: &str, cx: &App) -> Value {
         let mut pane = serde_json::Map::new();
         pane.insert("section".into(), json!(section));
+        // Annotate over the page drawn in the pane, if one was.
+        let annotate = crate::annotations::dump(&thread.id, cx);
+        if !annotate.is_null() {
+            pane.insert("annotate".into(), annotate);
+        }
         if let Some(folder) = self.folder_summary(thread, cx) {
             pane.insert("folder".into(), json!(folder));
         }

@@ -311,6 +311,8 @@ Select elements, drag a Region, Draw a mark or Erase one, then write what
 should change. **Attach** puts the comment, element details and a screenshot
 in that thread's message box, preserving any text and pictures already there.
 Check it and press Send when ready; attaching alone doesn't start the agent.
+While it's on, a web link opened in the pane loads there too, with **Open in
+browser** in its bar.
 
 Escape or Cancel closes the tools. Navigating away, closing the page or
 switching threads cancels an unfinished annotation. An attachment that has

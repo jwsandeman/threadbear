@@ -5147,6 +5147,13 @@ Annotation leaves the page's script and network sandbox unchanged, including
 the existing consent to run a local HTML preview's scripts. The isolated
 annotation script does not grant the page access to native app functions.
 
+The GPUI app does the same (`desktop/gpui/src/annotations.rs`). Its pages
+are Chromium's, so the tools run in a world made with
+`Page.createIsolatedWorld` and the picture comes from
+`Page.captureScreenshot`, both over the page's own in-process DevTools channel.
+A web page previewed in a local thread's pane loads there while the experiment
+is on, and in the browser otherwise.
+
 There is no new runner request or backend field: the draft uses the existing
 text and image representation, `media.import` and, only when the user presses
 Send, `threads.send`. The page receives no runner credential or HTTP callback

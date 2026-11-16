@@ -17,6 +17,8 @@ This works with local threads, inside Threadbear, without BrowserBear or Chrome.
 
 `app/Sources/Threadbear/EmbeddedBrowserAnnotations.swift`, `Views/AnnotatedWebPanel.swift`, the shared payload/draft helpers in `BrowserAnnotations.swift`, `Views/AgentBrowserPanel.swift` and the bundled `Resources/Annotations` JavaScript adapted from T3 Code, with its MIT licence and source revision. The tools run in an isolated `WKContentWorld` and screenshots use `WKWebView.takeSnapshot`. The switch is read from the runner's existing `hello.experiments` field.
 
+In the GPUI app: `desktop/gpui/src/annotations.rs` (the session, the Annotate bar and status line), `desktop/core/src/annotations.rs` (the payload's bounds and the draft's words), the same bundled JavaScript, `append_draft` in `composer.rs`, a kept web page in `files.rs` and `web_panels.rs`, and the address field and Open here to annotate in `agent_browser.rs`. The tools run in an isolated world made through the page's own in-process DevTools channel, which also takes the screenshot. The switch is read from Settings' experiments list, else `hello.experiments`.
+
 ## Taking it out
 
-Remove the Annotate actions and `AnnotatedWebPanel` wrapper, the annotation controller, the Annotations resource bundle entry and files, its tests, and this experiment. Restore the plain web views at the wrapper's call sites. No stored thread format or backend changes need undoing.
+Remove the Annotate actions and `AnnotatedWebPanel` wrapper, the annotation controller, the Annotations resource bundle entry and files, its tests, and this experiment. Restore the plain web views at the wrapper's call sites. In the GPUI app, remove both `annotations.rs` files and the `annotates` checks at their call sites. No stored thread format or backend changes need undoing.

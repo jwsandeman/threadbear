@@ -78,6 +78,9 @@ pub struct Composer {
     sent_hop: Option<std::time::Instant>,
     /// A refused send's draft, to put back at the next render.
     restore: Option<RestoreDraft>,
+    /// Words and pictures to go after what's in the box, once it's next
+    /// drawn (`append_draft`).
+    append: Option<RestoreDraft>,
     /// The model picker's search and column, kept while it's open.
     pub(crate) model_picker: Option<Entity<ModelPickerView>>,
     /// What's picked on the open card, and how the card's showing.
@@ -221,6 +224,7 @@ impl Composer {
             stopping: None,
             sent_hop: None,
             restore: None,
+            append: None,
             model_picker: None,
             card: CardState::default(),
             card_arrival: Default::default(),
@@ -417,6 +421,9 @@ impl Composer {
         }
         if let Some(restore) = &self.restore {
             all = RestoreDraft::joined(restore.clone(), all);
+        }
+        if let Some(append) = &self.append {
+            all = RestoreDraft::joined(all, append.clone());
         }
         let (mut text, images) = all.for_saving();
         for mention in &self.pending_mentions { text = threadbear_core::board::adding(&mention.reference, &text); }
@@ -793,6 +800,29 @@ impl Composer {
             None => draft,
         });
         cx.notify();
+    }
+
+    /// Adds words and pictures after what's in the box, once it's next
+    /// drawn, a blank line between (a browser annotation, annotations.rs).
+    pub(crate) fn append_draft(&mut self, text: String, images: Vec<ImageRef>, cx: &mut Context<Self>) {
+        let more = RestoreDraft::plain(text, images);
+        self.append = Some(match self.append.take() {
+            Some(earlier) => RestoreDraft::joined(earlier, more),
+            None => more,
+        });
+        cx.notify();
+    }
+
+    fn apply_append(&mut self, append: RestoreDraft, window: &mut Window, cx: &mut Context<Self>) {
+        // As `apply_restore`: a picture on its way in is waited for.
+        if self.box_chips(cx).iter().any(|(_, chip)| matches!(chip, threadbear_core::inline_chips::BoxChip::Picture(None))) {
+            self.append = Some(append);
+            return;
+        }
+        let (now_text, now_images) = self.draft(cx);
+        let RestoreDraft { text, images, .. } = RestoreDraft::joined(RestoreDraft::plain(now_text, now_images), append);
+        let content = self.content_for(&text, &images);
+        self.input.update(cx, |s, cx| s.set_value(content, window, cx));
     }
 
     fn apply_restore(&mut self, restore: RestoreDraft, window: &mut Window, cx: &mut Context<Self>) {
@@ -1588,6 +1618,9 @@ impl Render for Composer {
         if self.editing.is_none() {
             if let Some(restore) = self.restore.take() {
                 self.apply_restore(restore, window, cx);
+            }
+            if let Some(append) = self.append.take() {
+                self.apply_append(append, window, cx);
             }
         }
         let mentions = threadbear_core::board::take_mentions(&mut self.pending_mentions, self.editing.as_ref().map(|e| e.seq), self.restore.is_some());

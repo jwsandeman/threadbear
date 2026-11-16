@@ -35,7 +35,7 @@ const MIKES_REPO = 'github.com/mikecann/threadbear';
 // What of app/ the GPUI app still uses, so a change there isn't one to
 // rebuild: the same as scripts/swift-freeze.sh --gpui-shared, which
 // swift-changes.test.ts checks.
-export const GPUI_SHARED = /^app\/Tools\/mock-runner\/|^app\/Tools\/(droptarget|post-gesture|realdrag)\.swift$|^app\/Tests\/Fixtures\/|^app\/Sources\/Threadbear\/Resources\/(Art|Rich)\//;
+export const GPUI_SHARED = /^app\/Tools\/mock-runner\/|^app\/Tools\/(droptarget|post-gesture|realdrag)\.swift$|^app\/Tests\/Fixtures\/|^app\/Sources\/Threadbear\/Resources\/(Art|Rich|Annotations)\//;
 const MAX_CHANGES = 100;
 const MAX_FILES = 12;
 const GIT_TIMEOUT_MS = 60_000;

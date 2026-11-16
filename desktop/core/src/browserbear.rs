@@ -353,6 +353,21 @@ pub fn empty_note(error: Option<&str>, available: bool) -> String {
     }
 }
 
+/// With browser annotations on, the pane's own words: its address field
+/// opens the page here, and a listed page offers the same.
+pub const OPEN_HERE_NOTE: &str = "Open a page above to view and annotate it here.";
+pub const OPEN_HERE: &str = "Open here to annotate";
+pub const OPEN_HERE_TIP: &str = "Open this address in Threadbear, then annotate the embedded page";
+
+/// The address field's placeholder: `here` with browser annotations on.
+pub fn address_placeholder(here: bool, browser_name: &str) -> String {
+    if here {
+        "Open a page here".to_owned()
+    } else {
+        format!("Open a page in {browser_name}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

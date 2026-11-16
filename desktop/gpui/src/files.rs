@@ -209,6 +209,10 @@ pub(crate) fn media_key(thread_id: &str, path: &str, opened: u64) -> String {
 /// Whether the pane is showing a video or a PDF in the system's view, which
 /// has to be placed every frame (shell.rs draws the pane uncached then).
 pub(crate) fn shows_media(side: &SidePane, thread_id: &str) -> bool {
+    // A web page kept in the pane is a page of the pool, placed every frame.
+    if side.previews.get(thread_id).is_some_and(|p| matches!(p.target, Target::Page(_))) {
+        return true;
+    }
     let Some(path) = side.previews.get(thread_id).and_then(|p| p.file_path()) else { return false };
     // A local page's view is placed every frame too (web_panels.rs).
     side.files.open.get(thread_id).is_some_and(|f| f.path == path && matches!(f.body, FileBody::Media(_) | FileBody::Page(_)))
@@ -350,6 +354,11 @@ impl Selectable for ModeLabel {
 impl DropdownMenu for ModeLabel {}
 
 impl SidePane {
+    /// Whether `thread`'s pages get Annotate (`Threadbear::annotates`).
+    pub(crate) fn annotates(&self, thread: &ThreadSummary, cx: &App) -> bool {
+        self.app.upgrade().is_some_and(|app| app.read(cx).annotates(thread))
+    }
+
     /// Reads the file the pane's preview names, if it's one that shows here.
     pub(crate) fn begin_preview(&mut self, thread: &ThreadSummary, cx: &mut Context<Self>) {
         let Some(preview) = self.previews.get(&thread.id).cloned() else { return };
@@ -368,6 +377,9 @@ impl SidePane {
                 _ if media_kind(path).is_some() => self.show_media_file(thread, path, preview.opened, cx),
                 _ => self.load_file(thread, path.clone(), preview.opened, cx),
             },
+            // With browser annotations on, a web page shows here in the
+            // pane, with Annotate over it (annotations.rs).
+            Target::Page(url) if self.annotates(thread, cx) && threadbear_web::site(url).is_some() => cx.notify(),
             Target::Page(url) => {
                 open_web(url, cx);
                 self.previews.remove(&thread.id);
@@ -710,6 +722,11 @@ impl SidePane {
                 row = row.child(self.header_button("hl-open", "arrow.up.right", "Open in Finder".to_owned(), p, cx, move |this, cx| this.open_externally(&open_path.clone(), cx)));
             }
         }
+        // A web page kept in the pane (annotations.rs).
+        if let Target::Page(url) = &preview.target {
+            let url = url.clone();
+            row = row.child(self.header_button("hl-open", "arrow.up.right", "Open in browser".to_owned(), p, cx, move |_, cx| open_web(&url, cx)));
+        }
         // A file here that's whole text: the Markdown menu for Markdown, else
         // the pencil, and Done while it's being worked on. Another Mac's file
         // isn't edited here, as only the copy would change.
@@ -834,10 +851,16 @@ impl SidePane {
     }
 
     pub(crate) fn render_preview(&mut self, thread: &ThreadSummary, preview: &PanePreview, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let p = palette(cx);
         match &preview.target {
             Target::File(path) => self.render_file(thread, path, preview.editing, window, cx),
-            Target::Page(url) => pane_note(&format!("{url} opened in your browser."), p).into_any_element(),
+            // Still here only when it was kept to show in the pane
+            // (`begin_preview`).
+            Target::Page(url) => {
+                let main = self.app.upgrade().is_some_and(|app| app.read(cx).main_window == window.window_handle());
+                let page = crate::web_panels::web_page(url, main, window, cx);
+                let body = if self.annotates(thread, cx) { crate::annotations::framed(thread, crate::web_panels::web_page_key(url), None, page, cx) } else { page };
+                div().id("hl-web-page").size_full().child(body).into_any_element()
+            }
             Target::Folder(path) => self.render_folder(thread, path, preview, window, cx),
         }
     }
@@ -893,7 +916,13 @@ impl SidePane {
                     div().size_full().flex().items_center().justify_center().child(Spinner::new().with_size(px(14.)).color(p.secondary)).into_any_element()
                 } else {
                     let main = self.app.upgrade().is_some_and(|app| app.read(cx).main_window == window.window_handle());
-                    crate::web_panels::local_page(&page.real, page.scripts_for(), open.opened, main, window, cx)
+                    let shown = crate::web_panels::local_page(&page.real, page.scripts_for(), open.opened, main, window, cx);
+                    if self.annotates(thread, cx) {
+                        let key = crate::web_panels::local_page_key(&page.real, page.scripts_for(), open.opened);
+                        crate::annotations::framed(thread, key, Some(threadbear_core::annotations::file_address(&page.real)), shown, cx)
+                    } else {
+                        shown
+                    }
                 };
                 v_flex().id("hl-page").size_full().children(bar).child(div().flex_1().min_h_0().child(body)).into_any_element()
             }

@@ -5156,3 +5156,25 @@ Fixes from Codex's review of the slice before:
   opening a typed address inside Threadbear. The Chrome/CDP overlay harness is
   not evidence of WebKit behaviour; its temporal checks did not reproduce the
   reported flicker. The installed-app flicker is not confirmed resolved.
+
+### 2026-11-16 Annotations in the GPUI app (`browser.annotate`)
+
+- `desktop/gpui/src/annotations.rs` puts Annotate over a local thread's web
+  previews, local HTML previews and URL panels, with the experiment on. The
+  Swift app's script runs in a world from `Page.createIsolatedWorld`, and
+  `Page.captureScreenshot` takes the picture, over the page's in-process
+  DevTools channel. No browser window or debugging port opens.
+- A web page previewed in the pane loads there while the experiment is on. It
+  still goes to the browser otherwise.
+- The Browser panel's address field opens its page in the pane, BrowserBear
+  running or not, and a listed page offers Open here to annotate.
+- Attach appends after the draft's words and pictures and sends nothing. The
+  page loading again, leaving the pane or the pool, or another thread on show
+  ends the session and closes the tools.
+- Verification: `features/browser-annotations.feature` passes on the GPUI app
+  on a Mac, 6 scenarios: attach, cancel, leaving for another thread, both ways
+  in from the Browser panel, and the experiment off. The Swift scenarios stay
+  pending. 91 scenarios of the Browser pane, drafts, previews, web panels,
+  thread panels and highlights pass beside it.
+- Not checked: a real pointer drawing a stroke or a region, and a page on
+  another site inside a frame.

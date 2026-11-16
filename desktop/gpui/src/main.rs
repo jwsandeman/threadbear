@@ -8,6 +8,7 @@ mod a11y;
 mod activity;
 mod activity_panels;
 mod agent_browser;
+mod annotations;
 mod about_window;
 mod alert;
 mod app;
@@ -271,6 +272,7 @@ fn main() {
         rich_boxes::init(cx);
         // And the panels' pages, the Convex dashboard's among them.
         web_panels::init(cx);
+        annotations::init(cx);
         // Videos and PDFs in the system's views: their calls back (a PDF's
         // links, to the open gate) and the menus they hide under.
         media_view::init(cx);

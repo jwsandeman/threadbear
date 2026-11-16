@@ -41,11 +41,11 @@ set -f
 # its CI and the features/ specs run against, the Swift test tools its
 # pointer, drag and menu specs compile (swiftTool in
 # features/tools/real-screen.ts), the golden transcripts and fixtures its
-# tests share, and the art and rich-block scripts it builds in (check.sh's
+# tests share, and the art, rich-block scripts and annotation tools it builds in (check.sh's
 # DESKTOP_NEEDS). check.sh reads this too (--gpui-shared), so a change to
 # only these doesn't build and test the Swift app. They move out of app/
 # before it goes at the cutover.
-GPUI_SHARED='^app/Tools/mock-runner/|^app/Tools/(droptarget|post-gesture|realdrag)\.swift$|^app/Tests/Fixtures/|^app/Sources/Threadbear/Resources/(Art|Rich)/'
+GPUI_SHARED='^app/Tools/mock-runner/|^app/Tools/(droptarget|post-gesture|realdrag)\.swift$|^app/Tests/Fixtures/|^app/Sources/Threadbear/Resources/(Art|Rich|Annotations)/'
 # The Swift tests of what's shared above: the mock runner's own tests, the
 # login check that starts it, and the golden transcripts of its fixtures. A
 # change to the mock (its demo data renamed, 15 Nov) has to update them, so

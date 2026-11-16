@@ -62,6 +62,9 @@ const ALLOWED_LINES: &[(&str, &str, usize)] = &[
     // This removes only this machine's exact authority from a file URI.
     // It opens nothing: Terminal passes the result through open_gate::open_link.
     ("core/src/terminal.rs", r#"(!host.is_empty() && host.eq_ignore_ascii_case(hostname)).then(|| format!("file://{}", &rest[host.len()..]))"#, 1),
+    // The annotated local page's address, as words in the draft's text
+    // (annotations.rs). It opens nothing.
+    ("core/src/annotations.rs", r#"format!("file://{escaped}")"#, 1),
     ("gpui/src/terminal.rs", "let pty = tty::new(&options, self.size.window_size(), 0)?;", 1),
     ("gpui/src/hang_watch.rs", "let mut sample = Command::new(\"/usr/bin/sandbox-exec\");", 1),
     ("gpui/src/app_update.rs", "let started = Command::new(\"/bin/sh\").arg(\"-c\").arg(wait).arg(\"sh\").args(open).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn();", 1),

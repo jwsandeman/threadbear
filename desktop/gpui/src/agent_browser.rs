@@ -686,23 +686,70 @@ impl SidePane {
     }
 
     fn browser_go(&mut self, input: &Entity<InputState>, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(url) = bear::address(&input.read(cx).value()) else { return };
-        let (Some(thread), Some(model)) = (self.thread(cx), model(cx)) else { return };
-        model.update(cx, |b, cx| b.open(&url, &thread.id, cx));
+        let typed = input.read(cx).value().to_string();
+        if !self.browser_open(&typed, cx) {
+            return;
+        }
         input.update(cx, |s, cx| s.set_value("", window, cx));
         window.blur(cx);
     }
 
+    /// What's typed in the address bar, opened: here in the pane with browser
+    /// annotations on (annotations.rs), else in the agents' browser. False
+    /// when it's nothing to open.
+    pub(crate) fn browser_open(&mut self, typed: &str, cx: &mut Context<Self>) -> bool {
+        let Some(thread) = self.thread(cx) else { return false };
+        if self.annotates(&thread, cx) {
+            let Some(page) = threadbear_core::annotations::typed(typed) else { return false };
+            self.open_here(page, None, &thread, cx);
+        } else {
+            let (Some(url), Some(model)) = (bear::address(typed), model(cx)) else { return false };
+            model.update(cx, |b, cx| b.open(&url, &thread.id, cx));
+        }
+        true
+    }
+
+    /// A page or a local file shown in the pane over the Browser section,
+    /// which Back comes back to.
+    fn open_here(&mut self, page: threadbear_core::annotations::Opened, title: Option<String>, thread: &ThreadSummary, cx: &mut Context<Self>) {
+        use crate::highlights::{PanePreview, Target};
+        use threadbear_core::annotations::Opened;
+        let title = title.filter(|t| !t.trim().is_empty());
+        let (target, title) = match page {
+            Opened::File(path) => {
+                let title = title.unwrap_or_else(|| threadbear_core::highlights::last_component(&path).to_owned());
+                (Target::File(path), title)
+            }
+            Opened::Page(url) => {
+                let title = title.unwrap_or_else(|| threadbear_core::highlights::text::address(&url));
+                (Target::Page(url), title)
+            }
+        };
+        self.section_pressed(&thread.id, BROWSER, cx);
+        self.show_preview(PanePreview::new(target, title, BROWSER.to_owned()), &thread.id, cx);
+    }
+
     /// The Browser pane (`AgentBrowserPanel`): the address bar, then the
     /// thread's pages, Mike's turn first.
+    /// With browser annotations on, the address bar opens its page here in
+    /// the pane, BrowserBear or not.
     pub(crate) fn render_browser_panel(&mut self, thread: &ThreadSummary, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let p = palette(cx);
-        let Some(model) = model(cx) else { return crate::files::pane_note("BrowserBear isn't running.", p).into_any_element() };
-        let b = model.read(cx);
-        let tabs = b.tabs_for(&thread.id);
-        let (available, opening, browser_name, error) = (b.available(), b.pending.contains(OPENING_KEY), b.browser_name.clone(), b.error.clone());
+        let here = self.annotates(thread, cx);
+        let model = model(cx);
+        if model.is_none() && !here {
+            return crate::files::pane_note("BrowserBear isn't running.", p).into_any_element();
+        }
+        let (tabs, available, opening, browser_name, error) = match &model {
+            Some(model) => {
+                let b = model.read(cx);
+                (b.tabs_for(&thread.id), b.available(), b.pending.contains(OPENING_KEY), b.browser_name.clone(), b.error.clone())
+            }
+            None => (Vec::new(), false, false, String::new(), None),
+        };
+        let (available, opening) = if here { (true, false) } else { (available, opening) };
         let input = self.browser_address(window, cx);
-        input.update(cx, |s, cx| s.set_placeholder(format!("Open a page in {browser_name}"), window, cx));
+        input.update(cx, |s, cx| s.set_placeholder(bear::address_placeholder(here, &browser_name), window, cx));
         let field = div()
             .flex_1()
             .min_w_0()
@@ -713,10 +760,11 @@ impl SidePane {
             .child(Input::new(&input).appearance(false).small().disabled(!available || opening).text_size(px(style::size::LABEL)));
         let bar = h_flex().flex_none().items_center().gap(px(6.)).px(px(10.)).py(px(6.)).child(field).when(opening, |s| s.child(Spinner::new().color(p.secondary).with_size(px(11.))));
         let mut pane = v_flex().size_full().child(bar);
-        if tabs.is_empty() {
-            return pane.child(crate::files::pane_note(&bear::empty_note(error.as_deref(), available), p)).into_any_element();
-        }
-        let rows: Vec<AnyElement> = tabs.iter().map(|tab| self.browser_row(tab, &thread.id, &browser_name, &model, cx)).collect();
+        let Some(model) = model.filter(|_| !tabs.is_empty()) else {
+            let words = if here { bear::OPEN_HERE_NOTE.to_owned() } else { bear::empty_note(error.as_deref(), available) };
+            return pane.child(crate::files::pane_note(&words, p)).into_any_element();
+        };
+        let rows: Vec<AnyElement> = tabs.iter().map(|tab| self.browser_row(tab, thread, here, &browser_name, &model, cx)).collect();
         pane = pane.child(div().id("browser-pages").flex_1().min_h_0().overflow_y_scroll().child(v_flex().gap(px(8.)).p(px(10.)).children(rows)));
         if let Some(error) = error {
             pane = pane.child(div().flex_none().p(px(6.)).text_size(px(style::size::LABEL)).text_color(p.secondary).child(error));
@@ -726,8 +774,9 @@ impl SidePane {
 
     /// One page: its still, what it is, what the agent's doing in it, and the
     /// buttons under them, so a narrow pane never cuts a button's name short.
-    fn browser_row(&self, tab: &AgentTab, thread: &str, browser_name: &str, model: &Entity<AgentBrowser>, cx: &mut Context<Self>) -> AnyElement {
+    fn browser_row(&self, tab: &AgentTab, thread: &ThreadSummary, here: bool, browser_name: &str, model: &Entity<AgentBrowser>, cx: &mut Context<Self>) -> AnyElement {
         let p = palette(cx);
+        let (summary, thread) = (thread, thread.id.as_str());
         let b = model.read(cx);
         let yours = tab.yours();
         let amber = style::needs_you(cx);
@@ -765,6 +814,13 @@ impl SidePane {
                     .render(cx, move |_, _, cx| done_model.update(cx, |b, cx| b.done(&done_tab, cx))),
             );
         }
+        if let Some(page) = threadbear_core::annotations::opens_here(&tab.url).filter(|_| here) {
+            let (title, summary) = (tab.title.clone(), summary.clone());
+            buttons = buttons.child(PushButton::new(SharedString::from(format!("browser-here-{}", tab.id())), bear::OPEN_HERE, bear::OPEN_HERE_TIP).small().render(
+                cx,
+                cx.listener(move |this, _, _, cx| this.open_here(page.clone(), Some(title.clone()), &summary, cx)),
+            ));
+        }
         let edge = if yours { amber.opacity(0.6) } else { style::primary_opacity(cx, 0.08) };
         v_flex()
             .gap(px(8.))
@@ -780,11 +836,20 @@ impl SidePane {
     /// What the dump says of the pane: each page as a line.
     #[cfg(feature = "automation")]
     pub(crate) fn fill_browser_dump(&self, pane: &mut serde_json::Map<String, Value>, thread: &ThreadSummary, cx: &App) {
-        let Some(model) = model(cx) else { return };
+        let here = self.annotates(thread, cx);
+        if here {
+            pane.insert("address".into(), json!(bear::address_placeholder(true, "")));
+        }
+        let Some(model) = model(cx) else {
+            if here {
+                pane.insert("empty".into(), json!(bear::OPEN_HERE_NOTE));
+            }
+            return;
+        };
         let b = model.read(cx);
         let tabs = b.tabs_for(&thread.id);
         if tabs.is_empty() {
-            pane.insert("empty".into(), json!(bear::empty_note(b.error.as_deref(), b.available())));
+            pane.insert("empty".into(), json!(if here { bear::OPEN_HERE_NOTE.to_owned() } else { bear::empty_note(b.error.as_deref(), b.available()) }));
             return;
         }
         let rows: Vec<Value> = tabs
@@ -793,6 +858,9 @@ impl SidePane {
                 let mut buttons = vec!["Show window"];
                 if t.yours() {
                     buttons.push("Done");
+                }
+                if here && threadbear_core::annotations::opens_here(&t.url).is_some() {
+                    buttons.push(bear::OPEN_HERE);
                 }
                 json!({ "title": t.shown_title(), "host": t.host(), "state": t.state, "action": t.working().then(|| t.action.clone()).flatten(), "buttons": buttons, "still": b.stills.contains_key(&t.id()) })
             })
@@ -824,10 +892,13 @@ impl crate::app::Threadbear {
     /// The rail's Browser button: the count of the thread's pages, and the
     /// accent dot while one's handed to Mike. None without BrowserBear.
     pub(crate) fn browser_rail(&self, thread: &str, cx: &App) -> Option<(usize, bool)> {
-        let model = model(cx)?;
+        // With browser annotations on, the pane opens pages itself.
+        let here = self.threads.get(thread).is_some_and(|t| self.annotates(t));
+        let nothing = here.then_some((0, false));
+        let Some(model) = model(cx) else { return nothing };
         let b = model.read(cx);
         if !b.available() {
-            return None;
+            return nothing;
         }
         let tabs = b.tabs_for(thread);
         Some((tabs.len(), tabs.iter().any(AgentTab::yours)))

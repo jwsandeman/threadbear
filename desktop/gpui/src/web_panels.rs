@@ -218,6 +218,7 @@ pub(crate) fn sweeper(menu_at: Option<Point<Pixels>>, popover: bool) -> AnyEleme
         f.set(f.get() + 1);
         f.get()
     });
+    crate::annotations::frame_started();
     canvas(
         move |_, window, cx| sweep(frame, menu_at, popover, window, cx),
         |_, _, window, _| {
@@ -460,6 +461,40 @@ fn slot(panels: &Entity<WebPanels>, key: &str, url: &str, kind: impl FnOnce() ->
     div().size_full().into_any_element()
 }
 
+/// The page kept under `key`, and whether the latest frame placed it in a
+/// slot (annotations.rs: a page out of the pane ends its session).
+pub(crate) fn shown_page(key: &str, cx: &App) -> Option<(Rc<PanelPage>, bool)> {
+    let panels = panels(cx)?;
+    let kept = panels.read(cx).pages.iter().find(|k| k.key == key)?;
+    Some((kept.page.clone(), kept.drawn.get().0 == frame_now()))
+}
+
+/// A previewed web page's key in the pool: a page of its own, apart from a
+/// patch's panel showing the same address.
+pub(crate) fn web_page_key(url: &str) -> String {
+    format!("view:{url}")
+}
+
+/// A web page previewed in the pane (browser.annotate): a page of the pool
+/// with a patch panel's rules, so its own site stays and a clicked link to
+/// another opens in the browser.
+pub(crate) fn web_page(url: &str, main: bool, window: &mut Window, cx: &mut App) -> AnyElement {
+    let Some(panels) = panels(cx) else { return note("This page can't show here.", cx) };
+    let open = Some(Opener { url: url.to_owned(), tip: "Open in browser".into() });
+    if threadbear_web::site(url).is_none() {
+        return away("This isn't a web page, so it opens outside the app.", open, cx);
+    }
+    match running("hl-web-page", "this page", main, open.clone(), window, cx) {
+        Ok(parent) => slot(&panels, &web_page_key(url), url, || PanelKind::Patch, parent, open, cx),
+        Err(instead) => instead,
+    }
+}
+
+/// A local page's key in the pool (`local_page`).
+pub(crate) fn local_page_key(real: &str, scripts_for: Option<&str>, opened: u64) -> String {
+    format!("preview:{opened}:{}:{real}", scripts_for.unwrap_or(""))
+}
+
 thread_local! {
     /// What the pane's local page last found, for the dump.
     static LOCAL_PAGE: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
@@ -480,7 +515,7 @@ pub(crate) fn local_page(real: &str, scripts_for: Option<&str>, opened: u64, mai
         }
     };
     LOCAL_PAGE.with(|l| *l.borrow_mut() = "running".into());
-    let key = format!("preview:{opened}:{}:{real}", scripts_for.unwrap_or(""));
+    let key = local_page_key(real, scripts_for, opened);
     if let Some(drawn) = panels.update(cx, |p, _| p.touch(&key)) {
         return canvas(move |bounds, _, _| drawn.set((frame_now(), bounds)), |_, _, _, _| {}).size_full().into_any_element();
     }
@@ -527,7 +562,14 @@ pub(crate) fn section(app: &Threadbear, thread: &ThreadSummary, panel_id: &str, 
     let main = window.window_handle() == app.main_window;
     let body = match &panel.convex {
         Some(configured) => convex_view(&panels, thread, &panel, configured, main, pinned, window, cx),
-        None => page_view(&panels, &panel, main, pinned, window, cx),
+        None => {
+            let page = page_view(&panels, &panel, main, pinned, window, cx);
+            // Annotate over a patch's page, in its own thread's pane.
+            match panel.url.clone().filter(|u| !pinned && app.annotates(thread) && threadbear_web::site(u).is_some()) {
+                Some(url) => crate::annotations::framed(thread, page_key(url, false), None, page, cx),
+                None => page,
+            }
+        }
     };
     let id = if pinned { format!("web-panel-pin-{}-{panel_id}", thread.id) } else { format!("web-panel-{panel_id}") };
     Some(div().id(SharedString::from(id)).size_full().child(body).into_any_element())
@@ -1347,6 +1389,14 @@ pub(crate) async fn automation(cmd: &Value, cx: &mut AsyncApp) -> Result<Value, 
             page.focus();
             page.devtools("Emulation.setFocusEmulationEnabled", json!({ "enabled": true })).await.map_err(|_| "the page went away".to_owned())??;
         }
+        // Any DevTools method on the page, for what the others don't cover
+        // (a real pointer through the Input domain, the accessibility tree).
+        "devtools" => {
+            let method = cmd["method"].as_str().ok_or("devtools needs method")?;
+            page.note_input();
+            let answer = page.devtools(method, cmd["params"].clone()).await.map_err(|_| "the page went away".to_owned())??;
+            return Ok(json!({ "result": answer }));
+        }
         "wait" => {
             let title = cmd["title"].as_str();
             loop {
@@ -1360,7 +1410,7 @@ pub(crate) async fn automation(cmd: &Value, cx: &mut AsyncApp) -> Result<Value, 
                 cx.background_executor().timer(Duration::from_millis(100)).await;
             }
         }
-        other => return Err(format!("do must be eval, click, drop, focus, wait or choose, not {other:?}")),
+        other => return Err(format!("do must be eval, click, drop, focus, devtools, wait or choose, not {other:?}")),
     }
     Ok(cx.update(|cx| dump_page(&key, cx)))
 }

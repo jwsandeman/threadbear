@@ -3,6 +3,7 @@
 // rows. Keeping it out of the GPUI crate means its tests need no graphics
 // libraries and take seconds.
 pub mod activity;
+pub mod annotations;
 pub mod board;
 pub mod archive_flight;
 pub mod app_update;
