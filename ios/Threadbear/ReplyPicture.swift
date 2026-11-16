@@ -413,10 +413,12 @@ struct PictureOnMac: View {
 struct WebPictureLink: View {
     var alt: String
     var url: URL
-    @Environment(\.openURL) private var openURL
 
     var body: some View {
-        Button { openURL(url) } label: {
+        // A Link, not a Button calling openURL itself: it goes through the
+        // same openURL the thread sets up (LinkGate, or the thread's own
+        // links), and OpenGateSourceTests refuses calling it directly.
+        Link(destination: url) {
             PictureOnMac(alt: alt, note: "Picture on \(url.host() ?? "the web"), not loaded. Tap to open it.")
         }
         .buttonStyle(.plain)
