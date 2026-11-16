@@ -609,6 +609,20 @@ async function killedDuringGroupCheck(sameSecond: boolean) {
   if (sameSecond) assert.deepEqual(fs.existsSync(notes) ? fs.readdirSync(notes) : [], [], 'no note from a commit to itself');
 }
 
+test('a note that a branch landed on the commit it is already on is dropped without a word', async () => {
+  const { main } = makeRepo();
+  const [c] = branches(main, ['c']);
+  const head = sh(c.path, 'git rev-parse HEAD');
+  sh(main, `git merge -q --ff-only ${head}`);
+  const done = path.join(main, '.git', 'threadbear-land-done');
+  fs.mkdirSync(done, { recursive: true });
+  fs.writeFileSync(path.join(done, head), head);
+  const out = capture();
+  assert.equal(await land({ ...c, check: 'true' }, out.opts), 0, out.err.join('\n'));
+  assert.deepEqual(out.out, [`Nothing to land: ${c.branch} has no commits that aren't on main.`]);
+  assert.ok(!fs.existsSync(path.join(done, head)));
+});
+
 test('a cherry-pick of several, stopped and then committed by hand, still holds a landing', async () => {
   const { main } = makeRepo();
   const [a] = branches(main, ['a']);
