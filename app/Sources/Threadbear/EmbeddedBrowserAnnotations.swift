@@ -61,7 +61,8 @@ final class EmbeddedBrowserAnnotations: ObservableObject {
                 try Task.checkCancellation()
                 self.message = "Select, mark or draw here, then choose Attach."
                 while !Task.isCancelled {
-                    guard app.experiments.contains("browserAnnotations"), app.threads[thread] != nil, !app.isRemote(thread) else {
+                    guard app.experiments.contains("browserAnnotations") else { self.message = nil; throw CancellationError() }
+                    guard app.threads[thread] != nil, !app.isRemote(thread) else {
                         throw BrowserAnnotationError.message("The original local thread is no longer available.")
                     }
                     let value = try await self.read(webView, session: id)
@@ -96,7 +97,8 @@ final class EmbeddedBrowserAnnotations: ObservableObject {
                         catch { warning = "The screenshot couldn't be attached; your comment and page context are in the draft." }
                         try Task.checkCancellation()
                         _ = try await self.read(webView, session: id, ready: true)
-                        guard app.threads[thread] != nil, !app.isRemote(thread), app.experiments.contains("browserAnnotations") else {
+                        guard app.experiments.contains("browserAnnotations") else { self.message = nil; throw CancellationError() }
+                        guard app.threads[thread] != nil, !app.isRemote(thread) else {
                             throw BrowserAnnotationError.message("The original local thread is no longer available.")
                         }
                         BrowserAnnotations.append(annotation, images: images, to: thread, app: app)

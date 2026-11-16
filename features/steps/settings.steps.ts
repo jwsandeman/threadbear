@@ -6,6 +6,11 @@ import type { ThreadbearWorld } from '../support/world.ts';
 type SettingsInfo = { tab: string; keepAwake?: boolean | null; fullSync?: boolean | null; privateFolders?: string[] | null; labReviewers?: string[] | null };
 const shown = (d: unknown) => (d as { settingsWindow?: SettingsInfo | null }).settingsWindow;
 
+When('the runner turns the {string} experiment {word}', async function (this: ThreadbearWorld, id: string, state: string) {
+  if (state !== 'on' && state !== 'off') throw new Error('An experiment is on or off');
+  await this.app.do({ cmd: 'mock', method: 'experiments', params: { [id]: state === 'on' } });
+});
+
 When('I open Settings', async function (this: ThreadbearWorld) {
   await this.app.do({ cmd: 'settings' });
   await this.until('the Settings window', (d) => shown(d));

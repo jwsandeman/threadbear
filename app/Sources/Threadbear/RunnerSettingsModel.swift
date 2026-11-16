@@ -27,6 +27,11 @@ extension AppModel {
     func receive(_ settings: RunnerSettings) {
         runnerSettings = settings
         settingsUnsupported = false
+        // Only confirmed settings change feature gates. An optimistic off
+        // must not discard an annotation if saving the switch then fails.
+        if settings.experimentsSupported {
+            experiments = Set(settings.experiments.filter(\.on).map(\.id))
+        }
         // The new-thread composer starts in the default folder.
         if !settings.defaultCwd.isEmpty { defaults.cwd = (settings.defaultCwd as NSString).expandingTildeInPath }
     }

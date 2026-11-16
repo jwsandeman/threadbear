@@ -458,7 +458,7 @@ final class AppModel {
     /// Asking for `runners` again after a failure (`retryRunners`).
     @ObservationIgnored var runnersRetry: Task<Void, Never>?
     @ObservationIgnored var runnersRetryDelay: Duration = .seconds(30)
-    /// The experiments on for this Mac's runner, from its hello.
+    /// This runner's enabled experiments, from hello then confirmed settings.
     var experiments: Set<String> = []
     /// The Move sheet, while it's open.
     var moveRequest: MoveRequest?

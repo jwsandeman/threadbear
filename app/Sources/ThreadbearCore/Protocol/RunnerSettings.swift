@@ -111,11 +111,15 @@ public struct RunnerSettings: Sendable, Hashable, Decodable {
     /// Every experiment there is, oldest first. Empty from an older runner,
     /// and Settings then shows no Experiments section.
     public var experiments: [Experiment]
+    /// An absent list leaves hello's experiment snapshot in place; an
+    /// explicit empty list clears it.
+    public var experimentsSupported: Bool
 
     public init(defaultCwd: String = "", idleMinutes: Int = 30, maxLiveCLIs: Int = 6, followMain: Bool = true, bulletReplies: Bool = true, oneReply: Bool = false,
                 labReview: Bool = true, labReviewSupported: Bool = false, keepAwake: Bool? = nil,
-                bringIn: BringIn = .standard, bringInSupported: Bool = false, models: Models = Models(), experiments: [Experiment] = []) {
-        self.experiments = experiments
+                bringIn: BringIn = .standard, bringInSupported: Bool = false, models: Models = Models(), experiments: [Experiment]? = nil) {
+        self.experiments = experiments ?? []
+        self.experimentsSupported = experiments != nil
         self.defaultCwd = defaultCwd
         self.idleMinutes = idleMinutes
         self.maxLiveCLIs = maxLiveCLIs
@@ -144,6 +148,7 @@ public struct RunnerSettings: Sendable, Hashable, Decodable {
         bringInSupported = c.contains(.bringIn)
         bringIn = BringIn.decode(c) ?? .standard
         models = (try? c.decodeIfPresent(Models.self, forKey: .models)) ?? Models()
+        experimentsSupported = c.contains(.experiments)
         experiments = c.lossyArray(Experiment.self, forKey: .experiments)
     }
 

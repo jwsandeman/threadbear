@@ -6,6 +6,17 @@ Feature: Settings
   Background:
     Given the app is connected to a runner with the demo threads
 
+  # The current Swift app refreshes from confirmed settings. GPUI still
+  # keeps the experiments it received when it connected.
+  @settings.general @project-decisions @gpui-pending
+  Scenario: Experiment changes reach an open project without reconnecting
+    When I open the project "Threadbear"
+    Then the project's decisions include "Rename the Settings tabs" asking "Call the Advanced tab \"Machine\" or \"Runner\"?"
+    When the runner turns the "projectDecisions" experiment off
+    Then the project's decisions don't include "Rename the Settings tabs"
+    When the runner turns the "projectDecisions" experiment on
+    Then the project's decisions include "Rename the Settings tabs" asking "Call the Advanced tab \"Machine\" or \"Runner\"?"
+
   @settings.window
   Scenario: Settings opens on General, and another section can be picked
     When I open Settings

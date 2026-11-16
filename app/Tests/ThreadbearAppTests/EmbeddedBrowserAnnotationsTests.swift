@@ -121,6 +121,60 @@ final class EmbeddedBrowserAnnotationsTests: XCTestCase {
         XCTAssertTrue(controller.message?.contains("page") == true)
     }
 
+    func testConfirmedOffRemovesToolsQuietlyAndReenableCanRestart() async throws {
+        let source = try source(), view = try await fixture(), app = app()
+        let original = Draft(text: "Keep this draft", images: [ImageRef(path: "/inbox/existing.png", mediaType: "image/png")])
+        app.drafts["origin"] = original
+        let controller = EmbeddedBrowserAnnotations(source: { source })
+        defer { controller.cancel() }
+        controller.start(webView: view, sourceURL: page, thread: "origin", app: app)
+        try await ready(controller, view: view)
+
+        app.receive(RunnerSettings(experiments: [.init(id: "browserAnnotations", name: "Browser annotations", on: false)]))
+        try await waitFor("confirmed off removes annotation tools") { controller.activeWebView == nil }
+        XCTAssertNil(controller.message, "turning the feature off is not a missing-thread error")
+        XCTAssertEqual(app.drafts["origin"], original)
+        XCTAssertEqual(app.drafts["other"]?.text, "Unrelated")
+        let overlays = try await view.evaluateJavaScript("document.querySelectorAll('[data-threadbear-annotation-ui]').length") as? Int
+        XCTAssertEqual(overlays, 0)
+
+        app.receive(RunnerSettings(experiments: [.init(id: "browserAnnotations", name: "Browser annotations", on: true)]))
+        XCTAssertNil(controller.message, "re-enabling must not reveal an error from the previous session")
+        controller.start(webView: view, sourceURL: page, thread: "origin", app: app)
+        try await ready(controller, view: view)
+        XCTAssertTrue(controller.activeWebView === view)
+        XCTAssertEqual(app.drafts["origin"], original)
+        controller.cancel()
+        try await waitFor("restarted annotation cleanup") { controller.activeWebView == nil }
+    }
+
+    func testConfirmedOffDuringImageImportDoesNotAttachOrShowAnError() async throws {
+        let source = try source(), view = try await fixture(), app = app()
+        let original = Draft(text: "Keep this draft", images: [ImageRef(path: "/inbox/existing.png", mediaType: "image/png")])
+        app.drafts["origin"] = original
+        var finishImport: CheckedContinuation<[ImageRef], Never>?
+        let controller = EmbeddedBrowserAnnotations(source: { source }, importImages: { _, _ in
+            await withCheckedContinuation { finishImport = $0 }
+        })
+        defer {
+            finishImport?.resume(returning: [])
+            controller.cancel()
+        }
+        controller.start(webView: view, sourceURL: page, thread: "origin", app: app)
+        try await ready(controller, view: view)
+        try await submit(in: view)
+        try await waitFor("image import started") { finishImport != nil }
+
+        app.receive(RunnerSettings(experiments: []))
+        finishImport?.resume(returning: [ImageRef(path: "/inbox/late-capture.png", mediaType: "image/png")])
+        finishImport = nil
+        try await waitFor("confirmed off cancels the attachment") { controller.activeWebView == nil }
+        XCTAssertNil(controller.message, "a capture finishing after off must cancel quietly")
+        XCTAssertEqual(app.drafts["origin"], original, "neither late picture nor annotation text is appended")
+        let overlays = try await view.evaluateJavaScript("document.querySelectorAll('[data-threadbear-annotation-ui]').length") as? Int
+        XCTAssertEqual(overlays, 0)
+    }
+
     func testEvictingPooledLocalPreviewCancelsItsAnnotation() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("EmbeddedAnnotationEviction-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)

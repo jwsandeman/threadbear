@@ -332,6 +332,12 @@ const settings = {
     pool: 'claude',
     privateFolders: ['~/dev/clients/acme'],
   },
+  experiments: [
+    { id: 'openAnything', name: 'Open Anything', does: 'Search threads, projects, files and actions together.' },
+    { id: 'projectDecisions', name: 'Project decisions', does: 'Shows waiting questions on the project page.' },
+    { id: 'browserAnnotations', name: 'Browser annotations', does: 'Select or draw on a page and attach it to the draft.' },
+    { id: 'nestedThreads', name: 'Nested threads', does: 'Groups threads under the thread that started them.' },
+  ].map((experiment) => ({ ...experiment, on: mockExperiments().includes(experiment.id) })),
 };
 
 /** threadId -> { summary, events: [], inProgress: Map(itemId -> {type,text}), timers: [] } */
@@ -578,7 +584,7 @@ async function dispatch(client, method, p) {
       }
       return {
         runnerVersion, protocol: 1, accounts: publicAccounts(),
-        defaults: oldRunner ? { ...defaults, poolId: undefined } : defaults, ...(oldRunner ? {} : { clis, updates, pools, experiments: mockExperiments() }),
+        defaults: oldRunner ? { ...defaults, poolId: undefined } : defaults, ...(oldRunner ? {} : { clis, updates, pools, experiments: settings.experiments.filter((e) => e.on).map((e) => e.id) }),
       };
     // Moving a thread to another runner (docs/protocol.md): a guess from
     // "that runner", and a move that only marks the row, for the app's
@@ -1537,7 +1543,20 @@ async function dispatch(client, method, p) {
       return { instructions: mockInstructions };
     case 'settings.get':
       return { settings };
+    // A confirmed change from another client, through the same settings
+    // handler and notification as a real runner. The app stays connected.
+    case 'mock.experiments':
+      return dispatch(client, 'settings.update', { experiments: p });
     case 'settings.update': {
+      if (p.experiments !== undefined) {
+        if (!p.experiments || typeof p.experiments !== 'object' || Array.isArray(p.experiments)) throw rpcError(-32602, 'experiments must be an object');
+        for (const [id, on] of Object.entries(p.experiments)) {
+          if (!settings.experiments.some((e) => e.id === id) || typeof on !== 'boolean') throw rpcError(-32602, 'experiments must name a known experiment with true or false');
+        }
+        for (const e of settings.experiments) {
+          if (Object.hasOwn(p.experiments, e.id)) e.on = p.experiments[e.id];
+        }
+      }
       if (p.defaultCwd !== undefined) {
         if (typeof p.defaultCwd !== 'string' || !p.defaultCwd.trim()) throw rpcError(-32602, 'defaultCwd must be a folder');
         settings.defaultCwd = p.defaultCwd;

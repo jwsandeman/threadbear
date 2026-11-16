@@ -257,6 +257,7 @@ final class BrowserAnnotations: ObservableObject {
                 model.show(tab, thread: thread)
                 self.message = "Select, mark or draw on the page, then choose Attach."
                 while !Task.isCancelled {
+                    guard app.experiments.contains("browserAnnotations") else { throw CancellationError() }
                     guard model.annotationTargetIsCurrent(tab, thread: thread, port: port), !app.isRemote(thread), app.threads[thread] != nil else {
                         throw BrowserAnnotationError.message("This page no longer belongs to the original local thread.")
                     }
@@ -281,6 +282,7 @@ final class BrowserAnnotations: ObservableObject {
                             let current = try await cdp.evaluate("window.__threadbearAnnotation?.read() ?? ({status:'missing'})", context: context)
                             guard current["sessionId"] as? String == id, current["status"] as? String == "ready" else { throw CancellationError() }
                             try Task.checkCancellation()
+                            guard app.experiments.contains("browserAnnotations") else { throw CancellationError() }
                             let file = FileManager.default.temporaryDirectory.appendingPathComponent("threadbear-annotation-\(id).png")
                             try bytes.write(to: file, options: [.atomic])
                             defer { try? FileManager.default.removeItem(at: file) }
@@ -295,6 +297,7 @@ final class BrowserAnnotations: ObservableObject {
                             guard current["sessionId"] as? String == id, current["status"] as? String == "ready" else { throw CancellationError() }
                         } else if warning == nil { throw BrowserAnnotationError.message("The annotation page changed before it could be attached.") }
                         try Task.checkCancellation()
+                        guard app.experiments.contains("browserAnnotations") else { throw CancellationError() }
                         guard model.annotationTargetIsCurrent(tab, thread: thread, port: port), !app.isRemote(thread), app.threads[thread] != nil else {
                             throw BrowserAnnotationError.message("The original thread or browser page moved before the annotation could be attached.")
                         }

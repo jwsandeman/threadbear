@@ -7,6 +7,11 @@ behaviour specs pass (`features/`). The table is written by
 A blank cell means no spec covers that yet, not that the feature is missing.
 The full list of features is [features.md](features.md).
 
+Experiment switches refresh the current Swift app as soon as the runner
+confirms them, including changes from another client. GPUI still refreshes
+its enabled features at connection time. The Settings scenario for changing
+an experiment on an open project is tagged `@gpui-pending` until it catches up.
+
 ## The table
 
 Mac picture input is covered by `features/composer-media.feature`: a
