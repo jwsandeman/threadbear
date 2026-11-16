@@ -101,11 +101,10 @@ pub fn empty_line(r: &RunnerInfo, asked: bool) -> &'static str {
 }
 
 /// The ⓘ beside the panel's first line: where it comes from, and where
-/// runners are set up. `tb pair` is drawn as code, as the Swift popover's
-/// Markdown has it.
+/// runners are set up.
 pub const ABOUT: [&str; 3] = [
     "The machines your threads run on, as your backend last heard from each. A runner that hasn't checked in for 3 minutes shows as offline. Updating means an old release is finishing its threads before handing over.",
-    "The code on the right is the commit each one runs. Click a running thread to open it. A runner that isn't paired with this Mac lists its threads, but they open only once you run `tb pair` there.",
+    "The code on the right is the commit each one runs. Click a running thread to open it. Other machines' threads open through this Mac's runner and your backend, with no network link between the machines.",
     "The star is where new threads start, which you can change in Settings > Runners. A runner is added or renamed on its own machine, so ask an agent to do it.",
 ];
 
@@ -376,8 +375,7 @@ pub struct SettingsRow {
     pub id: String,
     pub name: String,
     pub icon: Option<String>,
-    /// "This Mac", "Online", "Offline", or with the direct link on and no
-    /// token copied in, "Not paired with this Mac".
+    /// "This Mac", "Online" or "Offline".
     pub status: String,
     pub is_default: bool,
     pub is_self: bool,
@@ -387,7 +385,7 @@ pub struct SettingsRow {
 /// Mike's order once it can be changed (`orderedRunnerIds`), else this Mac
 /// first and the rest as the backend has them. `default` is this Mac's own
 /// choice, None for itself.
-pub fn settings_rows(this_mac: Option<&RunnerInfo>, others: &[crate::remote::RemoteRunner], order: Option<&[String]>, default: Option<&str>, orderable: bool, direct_link: bool) -> Vec<SettingsRow> {
+pub fn settings_rows(this_mac: Option<&RunnerInfo>, others: &[crate::remote::RemoteRunner], order: Option<&[String]>, default: Option<&str>, orderable: bool) -> Vec<SettingsRow> {
     let own = SettingsRow {
         id: this_mac.map(|r| r.id.clone()).unwrap_or_default(),
         // Its own name, as other machines see it ("m5").
@@ -401,9 +399,7 @@ pub fn settings_rows(this_mac: Option<&RunnerInfo>, others: &[crate::remote::Rem
         id: r.id.clone(),
         name: r.name.clone(),
         icon: r.icon.clone(),
-        status: if direct_link && r.token_file.is_none() {
-            "Not paired with this Mac".to_owned()
-        } else if r.online {
+        status: if r.online {
             "Online".to_owned()
         } else {
             "Offline".to_owned()
@@ -441,9 +437,7 @@ pub fn default_title(default: Option<&str>, others: &[crate::remote::RemoteRunne
 pub const DEFAULT_ABOUT: &str = "Where a new thread runs unless you pick another machine on the composer. This is this Mac's own choice.";
 pub const DEFAULT_ASK: &str = "change it, or to set up another machine to run threads on.";
 pub const DEFAULT_TIP: &str = "Where a new thread runs unless you pick another machine on the composer";
-pub const RUNNERS_ASK: &str = "add one, rename one, pair it with this Mac or change how it runs. It knows how, and a Linux server's steps are in INSTALL.md.";
-pub const OTHERS_ABOUT: &str = "Threads on other machines open through this Mac's runner and Convex, with no network link between the machines. Tool output stays on the machine that ran it for now. Connecting directly reaches the other machine over Tailscale instead, and needs it paired with this Mac.";
-pub const OTHERS_ASK: &str = "explain how other machines' threads reach this Mac, or pair one for a direct connection.";
+pub const RUNNERS_ASK: &str = "add one, rename one or change how it runs. It knows how, and a Linux server's steps are in INSTALL.md.";
 
 pub fn runners_about(orderable: bool) -> &'static str {
     if orderable {
@@ -473,7 +467,7 @@ mod tests {
     #[test]
     fn the_state_line_says_how_long_its_been_up_or_gone() {
         let now = 1_000_000 * MIN;
-        let mut r = runner("b", "bruce");
+        let mut r = runner("b", "mac-mini");
         assert_eq!(state_line(&r, now), "Online");
         r.started_ms = Some(now - 16 * MIN - 20_000);
         assert_eq!(state_line(&r, now), "Online, up 16m");
@@ -491,7 +485,7 @@ mod tests {
 
     #[test]
     fn the_build_is_the_releases_commit_or_the_version() {
-        let mut r = runner("m", "m5");
+        let mut r = runner("m", "laptop");
         assert_eq!(build(&r), None);
         r.version = Some("0.1.0+source".into());
         assert_eq!(build(&r).as_deref(), Some("0.1.0+source"));
@@ -503,30 +497,30 @@ mod tests {
 
     #[test]
     fn the_icon_says_whos_up() {
-        let mut list = vec![runner("m", "m5"), runner("b", "bruce")];
+        let mut list = vec![runner("m", "laptop"), runner("b", "mac-mini")];
         assert_eq!(tooltip(&list), "Runners\nBoth online");
         assert_eq!(summary(&list), "All online");
         list.push(runner("c", "cloud"));
         assert_eq!(tooltip(&list), "Runners\nAll 3 online");
         list[1].online = false;
         list[2].online = false;
-        assert_eq!(tooltip(&list), "Runners\n1 of 3 online\nbruce and cloud offline");
+        assert_eq!(tooltip(&list), "Runners\n1 of 3 online\nmac-mini and cloud offline");
         assert_eq!(summary(&list), "1 of 3 online");
         list[1].online = true;
         list[1].draining = true;
-        assert_eq!(tooltip(&list), "Runners\n2 of 3 online\ncloud offline\nbruce is updating");
+        assert_eq!(tooltip(&list), "Runners\n2 of 3 online\ncloud offline\nmac-mini is updating");
         assert_eq!(summary(&list), "2 of 3 online", "an updating runner is up");
     }
 
     #[test]
     fn each_runner_lists_its_own_running_threads() {
-        let me = RunnerInfo { is_self: true, ..runner("m", "m5") };
-        let bruce = runner("b", "bruce");
+        let me = RunnerInfo { is_self: true, ..runner("m", "laptop") };
+        let mini = runner("b", "mac-mini");
         let mine = ThreadSummary { id: "t1".into(), ..Default::default() };
         let theirs = ThreadSummary { id: "t2".into(), runner_id: Some("b".into()), ..Default::default() };
         let rows = vec![mine, theirs];
         assert_eq!(running(&me, &rows).iter().map(|t| t.id.as_str()).collect::<Vec<_>>(), ["t1"]);
-        assert_eq!(running(&bruce, &rows).iter().map(|t| t.id.as_str()).collect::<Vec<_>>(), ["t2"]);
+        assert_eq!(running(&mini, &rows).iter().map(|t| t.id.as_str()).collect::<Vec<_>>(), ["t2"]);
     }
 
     #[test]
@@ -569,12 +563,12 @@ mod tests {
 
     #[test]
     fn the_order_puts_mikes_first_then_this_mac() {
-        let me = RunnerInfo { is_self: true, ..runner("m", "m5") };
-        let list = vec![me, runner("b", "bruce"), runner("c", "cloud")];
+        let me = RunnerInfo { is_self: true, ..runner("m", "laptop") };
+        let list = vec![me, runner("b", "mac-mini"), runner("c", "cloud")];
         let names = |l: Vec<RunnerInfo>| l.into_iter().map(|r| r.name).collect::<Vec<_>>();
-        assert_eq!(names(ordered(&list, None)), ["m5", "bruce", "cloud"]);
+        assert_eq!(names(ordered(&list, None)), ["laptop", "mac-mini", "cloud"]);
         let order = ["c".to_string(), "m".to_string()];
-        assert_eq!(names(ordered(&list, Some(&order))), ["cloud", "m5", "bruce"]);
+        assert_eq!(names(ordered(&list, Some(&order))), ["cloud", "laptop", "mac-mini"]);
         let others = ["b".to_string(), "c".to_string(), "p".to_string()];
         assert_eq!(ordered_ids(Some("m"), &others, Some(&order)), ["c", "m", "b", "p"]);
     }
@@ -582,28 +576,26 @@ mod tests {
     #[test]
     fn settings_lists_this_mac_and_the_others_in_mikes_order() {
         use crate::remote::RemoteRunner;
-        let me = RunnerInfo { is_self: true, icon: Some("laptopcomputer".into()), ..runner("m", "m5") };
-        let bruce = RemoteRunner { id: "b".into(), name: "bruce".into(), icon: Some("macmini".into()), online: true, token_file: Some("/x/b.token".into()) };
+        let me = RunnerInfo { is_self: true, icon: Some("laptopcomputer".into()), ..runner("m", "laptop") };
+        let mini = RemoteRunner { id: "b".into(), name: "mac-mini".into(), icon: Some("macmini".into()), online: true };
         let cloud = RemoteRunner { id: "c".into(), name: "cloud".into(), online: false, ..Default::default() };
-        let others = [bruce.clone(), cloud.clone()];
+        let others = [mini.clone(), cloud.clone()];
         let lines = |rows: Vec<SettingsRow>| rows.iter().map(settings_line).collect::<Vec<_>>();
         // Not orderable yet: this Mac first, the rest as the backend has them.
-        assert_eq!(lines(settings_rows(Some(&me), &others, None, None, false, false)), ["m5 *: This Mac", "bruce: Online", "cloud: Offline"]);
+        assert_eq!(lines(settings_rows(Some(&me), &others, None, None, false)), ["laptop *: This Mac", "mac-mini: Online", "cloud: Offline"]);
         // In Mike's order, with the star on another default.
         let order = ["c".to_string(), "m".to_string(), "b".to_string()];
-        let rows = settings_rows(Some(&me), &others, Some(&order), Some("b"), true, false);
-        assert_eq!(lines(rows.clone()), ["cloud: Offline", "m5: This Mac", "bruce *: Online"]);
+        let rows = settings_rows(Some(&me), &others, Some(&order), Some("b"), true);
+        assert_eq!(lines(rows.clone()), ["cloud: Offline", "laptop: This Mac", "mac-mini *: Online"]);
         assert_eq!(rows[1].icon.as_deref(), Some("laptopcomputer"));
         assert!(rows[1].is_self && !rows[0].is_self);
-        // The direct link needs a token copied in.
-        assert_eq!(lines(settings_rows(Some(&me), &others, None, None, false, true))[2], "cloud: Not paired with this Mac");
         // This Mac before runners.list has said its name.
-        assert_eq!(settings_rows(None, &[], None, None, false, false)[0].name, "This Mac");
+        assert_eq!(settings_rows(None, &[], None, None, false)[0].name, "This Mac");
         assert!(can_order(true, &others, &[me.clone()]));
         assert!(!can_order(false, &others, &[me.clone()]), "no order from the backend yet");
         assert!(!can_order(true, &others, &[]), "this Mac's id isn't known yet");
         assert_eq!(default_title(None, &others), "This Mac");
-        assert_eq!(default_title(Some("b"), &others), "bruce");
+        assert_eq!(default_title(Some("b"), &others), "mac-mini");
         assert!(runners_about(true).contains("Drag a runner"));
     }
 

@@ -4,12 +4,13 @@
 // runner's own listeners (sync would mirror them as this runner's).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { Relay, SCALE, mergeTail, relayEvents, type RelayRow, type RelayThreadRow } from '../../src/relay.ts';
+import { MAX_CARDS, MAX_HELD, MAX_RELAY_SEQ, Relay, SCALE, isRelaySeq, mergeTail, relayEvents, type RelayRow, type RelayThreadRow } from '../../src/relay.ts';
 import { FakeClock } from '../../src/clock.ts';
 import { nullLogger } from '../../src/log.ts';
 import type { RemoteThreads } from '../../src/thread-index.ts';
+import { patiently } from '../helpers/patience.ts';
 
-const T = 'thread-on-bruce';
+const T = 'thread-on-mac-mini';
 const at = (s: number) => new Date(Date.parse('2026-11-05T10:00:00Z') + s * 1000).toISOString();
 const rows: RelayRow[] = [
   { seq: 3, role: 'user', text: 'Fix it', turn: 'aaaa1111', at: at(0) },
@@ -18,10 +19,10 @@ const rows: RelayRow[] = [
   { seq: 12, role: 'user', text: 'Again', turn: 'bbbb2222', at: at(20) },
   { seq: 14, role: 'tool', text: 'Ran tests', toolKind: 'command', turn: 'bbbb2222', at: at(21) },
 ];
-const idle: RelayThreadRow = { runnerId: 'bruce', status: 'idle', needs: 'nothing' };
+const idle: RelayThreadRow = { runnerId: 'mac-mini', status: 'idle', needs: 'nothing' };
 
 test('rows become events eight seqs apart, with turns, results and ends made up beside them', () => {
-  const ev = relayEvents(T, rows, idle, [], false, 'bruce');
+  const ev = relayEvents(T, rows, idle, [], false, 'mac-mini');
   const types = ev.map((e) => `${e.seq}:${e.type}`);
   assert.deepEqual(types, [
     '24:turn.started',
@@ -36,36 +37,36 @@ test('rows become events eight seqs apart, with turns, results and ends made up 
     '114:tool.result',
     '119:turn.completed',
   ]);
-  assert.equal(ev.find((e) => e.type === 'tool.result')!.text, 'The output is kept on bruce.');
+  assert.equal(ev.find((e) => e.type === 'tool.result')!.text, 'The output is kept on mac-mini.');
   assert.deepEqual(ev.find((e) => e.type === 'tool.result')!.heldBack, { seq: 5 });
   assert.equal(ev.find((e) => e.seq === 79)!.durationMs, 10_000);
   assert.equal(ev.find((e) => e.seq === 73)!.summary, true);
 });
 
 test('a running turn has no end, and its last tool is still running', () => {
-  const ev = relayEvents(T, rows, { runnerId: 'bruce', status: 'running' }, [], false, 'bruce');
+  const ev = relayEvents(T, rows, { runnerId: 'mac-mini', status: 'running' }, [], false, 'mac-mini');
   assert.equal(ev.some((e) => e.seq === 114), false);
   assert.equal(ev.some((e) => e.seq === 119), false);
   // The earlier turn still ended, at its next row.
   assert.ok(ev.some((e) => e.seq === 79 && e.type === 'turn.completed'));
   // Nor does one whose row has only just said it stopped.
-  assert.equal(relayEvents(T, rows, idle, [], false, 'bruce', false).some((e) => e.seq === 119), false);
+  assert.equal(relayEvents(T, rows, idle, [], false, 'mac-mini', false).some((e) => e.seq === 119), false);
 });
 
 test('no turn.started for the first row held when older rows may still be its turn', () => {
-  const ev = relayEvents(T, rows.slice(1), idle, [], true, 'bruce');
+  const ev = relayEvents(T, rows.slice(1), idle, [], true, 'mac-mini');
   assert.equal(ev[0]!.type, 'tool.call');
 });
 
 test("the open card is the last turn's end, and an approval sits at its own seq", () => {
-  const asksRow: RelayThreadRow = { runnerId: 'bruce', status: 'idle', needs: 'you', asks: [{ action: 'Pick one', options: ['A', 'B'], ticked: true }] };
-  const ev = relayEvents(T, rows, asksRow, [{ slot: 13 * SCALE + 1, pending: { approvalId: 'ap1', kind: 'approval', name: 'Bash', title: 'Run it', options: ['allow', 'deny'], inputSummary: 'npm test' } }], false, 'bruce');
+  const asksRow: RelayThreadRow = { runnerId: 'mac-mini', status: 'idle', needs: 'you', asks: [{ action: 'Pick one', options: ['A', 'B'], ticked: true }] };
+  const ev = relayEvents(T, rows, asksRow, [{ slot: 13 * SCALE + 1, pending: { approvalId: 'ap1', kind: 'approval', name: 'Bash', title: 'Run it', options: ['allow', 'deny'], inputSummary: 'npm test' } }], false, 'mac-mini');
   const end = ev.find((e) => e.seq === 119)!;
   assert.equal(end.needs, 'you');
   assert.deepEqual(end.asks, [{ action: 'Pick one', options: ['A', 'B'], ticked: true }]);
   // What each answer does comes through, so the Mac draws rows as it does
   // for its own runner's threads, not plain buttons (8 Nov).
-  const noted = relayEvents(T, rows, { ...asksRow, asks: [{ action: 'Pick one', options: ['A', 'B'], optionNotes: ['Does A', 'Does B'] }] }, [], false, 'bruce');
+  const noted = relayEvents(T, rows, { ...asksRow, asks: [{ action: 'Pick one', options: ['A', 'B'], optionNotes: ['Does A', 'Does B'] }] }, [], false, 'mac-mini');
   const notedEnd = noted.filter((e) => e.type === 'turn.completed').at(-1) as { asks?: unknown };
   assert.deepEqual(notedEnd.asks, [{ action: 'Pick one', options: ['A', 'B'], optionNotes: ['Does A', 'Does B'] }]);
   const ap = ev.find((e) => e.type === 'approval.requested')!;
@@ -83,7 +84,7 @@ test('a tail past what is held asks for the gap; one that overlaps just merges',
 });
 
 type Call = { kind: string; fn: string; args: Record<string, unknown> };
-type HarnessOpts = { online?: boolean; row?: () => RelayThreadRow & { share?: unknown }; apiVersion?: number; queueFails?: boolean; uploadMs?: number; rows?: RelayRow[] };
+type HarnessOpts = { paged?: boolean; online?: boolean; row?: () => RelayThreadRow & { share?: unknown }; apiVersion?: number; queueFails?: boolean; uploadMs?: number; rows?: RelayRow[]; readMessages?: (args: Record<string, unknown>) => unknown };
 function harness(opts: HarnessOpts = {}) {
   const calls: Call[] = [];
   const subs = new Map<string, { args: Record<string, unknown>; onUpdate: (v: unknown) => void; closed: boolean }[]>();
@@ -91,8 +92,8 @@ function harness(opts: HarnessOpts = {}) {
   const subscribed = new Set<string>();
   const clock = new FakeClock();
   const remote: RemoteThreads = {
-    runners: [{ id: 'bruce', name: 'bruce', online: opts.online ?? true, lastSeenAt: at(0) }],
-    threads: [{ runnerId: 'bruce', threadId: T, title: 'A thread', cwd: '/Users/b/x', accountId: 'claude-main', provider: 'claude', status: 'idle', needsYou: false, unread: true, preview: '', createdAt: at(0), lastActivityAt: at(0) }],
+    runners: [{ id: 'mac-mini', name: 'mac-mini', online: opts.online ?? true, lastSeenAt: at(0) }],
+    threads: [{ runnerId: 'mac-mini', threadId: T, title: 'A thread', cwd: '/Users/b/x', accountId: 'claude-main', provider: 'claude', status: 'idle', needsYou: false, unread: true, preview: '', createdAt: at(0), lastActivityAt: at(0) }],
   };
   let commandN = 0;
   let uploadN = 0;
@@ -110,13 +111,26 @@ function harness(opts: HarnessOpts = {}) {
       post: async (kind, fn, args) => {
         calls.push({ kind, fn, args });
         if (fn === 'relay:remoteThread') return opts.row?.() ?? idle;
+        if (fn === 'relay:remoteMessages' && opts.readMessages) return opts.readMessages(args);
+        if (fn === 'relay:remoteMessages' && opts.paged) {
+          // As convex/relay.ts pages: ascending after afterSeq, else the newest page.
+          const all = opts.rows ?? rows;
+          const limit = Number(args.limit ?? 50);
+          if (typeof args.afterSeq === 'number') {
+            const from = all.findIndex((r) => r.seq > (args.afterSeq as number));
+            const page = from < 0 ? [] : all.slice(from, from + limit);
+            return { messages: page, hasMore: from >= 0 && from + limit < all.length };
+          }
+          const before = typeof args.beforeSeq === 'number' ? all.filter((r) => r.seq < (args.beforeSeq as number)) : all;
+          return { messages: before.slice(-limit), hasMore: before.length > limit };
+        }
         if (fn === 'relay:remoteMessages') return { messages: opts.rows ?? rows, hasMore: false };
         if (fn === 'relay:queueCommand') {
           if (opts.queueFails) throw new Error('Convex is away');
           return `cmd${++commandN}`;
         }
         if (fn === 'relay:pictureUploadUrl') return `https://upload.example/${++uploadN}`;
-        if (fn === 'relay:remoteAccounts') return [{ runnerId: 'bruce', id: 'claude-main', provider: 'claude', title: 'Claude' }];
+        if (fn === 'relay:remoteAccounts') return [{ runnerId: 'mac-mini', id: 'claude-main', provider: 'claude', title: 'Claude' }];
         return null;
       },
       subscribe: (fn, args, onUpdate) => {
@@ -157,27 +171,179 @@ test('a subscribe watches a tail and the row, and new rows reach clients only', 
   await h.relay.call(T, 'threads.events', { threadId: T });
   const back = (await h.relay.call(T, 'threads.subscribe', { threadId: T, afterSeq: 119 })) as { events: { seq: number }[] };
   // Nothing new; only what could have come late, again (the app ignores seqs it has).
-  assert.ok(back.events.every((e) => e.seq <= 119 && [2, 3, 4, 7].includes(e.seq % SCALE)));
+  assert.ok(back.events.every((e) => e.seq <= 119 && [0, 2, 3, 4, 7].includes(e.seq % SCALE)));
   const tail = h.subs.get('relay:remoteTail')![0]!;
   assert.equal(tail.args.limit, 15);
   assert.ok(h.subs.get('relay:remoteThread'));
   // The next turn arrives while the thread runs.
-  h.subs.get('relay:remoteThread')![0]!.onUpdate({ runnerId: 'bruce', status: 'running' });
+  h.subs.get('relay:remoteThread')![0]!.onUpdate({ runnerId: 'mac-mini', status: 'running' });
   tail.onUpdate({ messages: [...rows.slice(-2), { seq: 20, role: 'user', text: 'More', turn: 'cccc3333', at: at(30) }], hasMore: true });
   await new Promise((r) => setImmediate(r));
   const seqs = h.published.map((n) => (n as { params: { event: { seq: number; type: string } } }).params.event).map((e) => `${e.seq}:${e.type}`);
   assert.deepEqual(seqs, ['160:turn.started', '161:user.message']);
   // An approval comes and is answered from here: its card, then its answer, both late-safe.
-  h.subs.get('relay:remoteThread')![0]!.onUpdate({ runnerId: 'bruce', status: 'waiting', pendingApproval: { approvalId: 'ap9', kind: 'approval', seq: 22, name: 'Bash', title: 'Run', options: ['allow', 'deny'] } });
+  h.subs.get('relay:remoteThread')![0]!.onUpdate({ runnerId: 'mac-mini', status: 'waiting', pendingApproval: { approvalId: 'ap9', kind: 'approval', seq: 22, name: 'Bash', title: 'Run', options: ['allow', 'deny'] } });
   const respond = h.relay.call(T, 'approvals.respond', { threadId: T, approvalId: 'ap9', decision: 'deny' });
   await new Promise((r) => setImmediate(r));
   const cmd = h.calls.find((c) => c.fn === 'relay:queueCommand')!;
-  assert.deepEqual(cmd.args, { key: 'owner', runnerId: 'bruce', threadId: T, kind: 'respond', args: { approvalId: 'ap9', decision: 'deny' } });
+  assert.deepEqual(cmd.args, { key: 'owner', runnerId: 'mac-mini', threadId: T, kind: 'respond', args: { approvalId: 'ap9', decision: 'deny' } });
   h.subs.get('relay:commandState')![0]!.onUpdate({ state: 'done' });
   await respond;
   const last = h.published.map((n) => (n as { params: { event: { seq: number; type: string; decision?: string } } }).params.event).slice(-2);
   assert.deepEqual(last.map((e) => `${e.seq}:${e.type}`), ['177:approval.requested', '178:approval.resolved']);
   assert.equal(last[1]!.decision, 'deny');
+});
+
+test('a subscriber receives only its missing late events, independent of another reader', async () => {
+  const h = harness();
+  await h.relay.call(T, 'threads.events', { threadId: T });
+  // This reader has only the last page. Another reader loaded the earlier
+  // turn, whose results must not appear in this reader's reply.
+  const seen = [[96, 97], [113, 114], [119, 119]];
+  const same = await h.relay.call(T, 'threads.subscribe', { afterSeq: 119, relaySeen: seen }) as { events: { seq: number }[] };
+  assert.deepEqual(same.events, []);
+  // A hole below afterSeq is real: the last tool result arrived late.
+  const missing = await h.relay.call(T, 'threads.subscribe', { afterSeq: 119, relaySeen: [[96, 97], [113, 113], [119, 119]] }) as { events: { seq: number }[] };
+  assert.deepEqual(missing.events.map((e) => e.seq), [114]);
+  const fresh = await h.relay.call(T, 'threads.subscribe', { afterSeq: 0, relaySeen: [] }) as { events: { seq: number }[] };
+  assert.ok(fresh.events.some((e) => e.seq === 25));
+});
+
+test('invalid relay seen ranges are refused rather than hiding events', async () => {
+  const h = harness();
+  for (const relaySeen of [null, [1], [[0, 1]], [[2, 1]], [[1, 120]], [[1.5, 2]], [[1, 3], [3, 4]], [[5, 6], [1, 2]], Array(20_001).fill([1, 1])]) {
+    await assert.rejects(h.relay.call(T, 'threads.subscribe', { afterSeq: 119, relaySeen }), /relaySeen/);
+  }
+});
+
+test('a page or subscription read does not consume live events owed to another subscriber', async () => {
+  for (const method of ['threads.events', 'threads.subscribe']) {
+    let release!: (value: unknown) => void;
+    const gap = new Promise((resolve) => { release = resolve; });
+    const h = harness({ readMessages: (args) => args.afterSeq === undefined ? { messages: rows, hasMore: false } : gap });
+    await h.relay.call(T, 'threads.events', { threadId: T });
+    await h.relay.call(T, 'threads.subscribe', { afterSeq: 119 });
+    h.subscribed.add(T);
+    h.subs.get('relay:remoteThread')![0]!.onUpdate({ runnerId: 'mac-mini', status: 'running' });
+    h.subs.get('relay:remoteTail')![0]!.onUpdate({ messages: [{ seq: 20, role: 'user', text: 'More', turn: 'cccc3333', at: at(30) }], hasMore: true });
+    // The tail merged seq 20 but is waiting for the missing rows 15..19.
+    const reading = h.relay.call(T, method, { afterSeq: 119, relaySeen: [[96, 97], [113, 114], [119, 119]] });
+    release({ messages: [], hasMore: false });
+    await reading;
+    await new Promise((r) => setImmediate(r));
+    const got = h.published.map((n) => (n as { params: { event?: { seq: number } } }).params.event?.seq);
+    assert.equal(got.filter((seq) => seq === 161).length, 1, `${method}: the already-subscribed reader still gets it once`);
+  }
+});
+
+test('a gap fill cannot publish an invented early turn end to a reader or live listener', async () => {
+  let release!: (value: unknown) => void;
+  const gap = new Promise((resolve) => { release = resolve; });
+  const h = harness({ row: () => ({ runnerId: 'mac-mini', status: 'running' }), readMessages: (args) => args.afterSeq === undefined ? { messages: rows, hasMore: false } : gap });
+  await h.relay.call(T, 'threads.subscribe', { afterSeq: 0 });
+  h.subscribed.add(T);
+  h.subs.get('relay:remoteTail')![0]!.onUpdate({ messages: [{ seq: 20, role: 'user', text: 'Next turn', turn: 'cccc3333', at: at(30) }], hasMore: true });
+  const page = await h.relay.call(T, 'threads.events', {}) as { events: { seq: number; type: string }[] };
+  await new Promise((r) => setImmediate(r));
+  assert.ok(page.events.some((e) => e.seq === 161), 'the known messages show without waiting for the fill');
+  assert.ok(!page.events.some((e) => e.seq === 119 || e.seq === 160), 'the two turn boundaries are not known yet');
+  release({ messages: [{ seq: 18, role: 'assistant', text: 'The real end', turn: 'bbbb2222', at: at(29) }], hasMore: false });
+  await new Promise((r) => setImmediate(r));
+  const events = h.published.map((n) => (n as { params: { event: { seq: number; type: string } } }).params.event);
+  assert.ok(events.some((e) => e.seq === 151 && e.type === 'turn.completed'));
+  assert.ok(!events.some((e) => e.seq === 119 && e.type === 'turn.completed'));
+});
+
+test('a stale final gap page cannot erase a newer tail hole', async () => {
+  for (const empty of [false, true]) {
+    let release!: (value: unknown) => void;
+    const gap = new Promise((resolve) => { release = resolve; });
+    const readAfter: number[] = [];
+    const h = harness({ row: () => ({ runnerId: 'mac-mini', status: 'running' }), readMessages: (args) => {
+      if (args.afterSeq === undefined) return { messages: rows, hasMore: false };
+      readAfter.push(Number(args.afterSeq));
+      if (readAfter.length === 1) return gap;
+      return { messages: [{ seq: 45, role: 'assistant', text: 'Must not disappear', turn: 'c', at: at(45) }], hasMore: false };
+    } });
+    await h.relay.call(T, 'threads.subscribe', { afterSeq: 0 });
+    const tail = h.subs.get('relay:remoteTail')![0]!;
+    tail.onUpdate({ messages: [{ seq: 20, role: 'user', text: 'Second turn', turn: 'c', at: at(30) }], hasMore: true });
+    tail.onUpdate({ messages: [{ seq: 50, role: 'user', text: 'Third turn', turn: 'd', at: at(50) }], hasMore: true });
+    release({ messages: empty ? [] : [{ seq: 30, role: 'assistant', text: 'Earlier page', turn: 'c', at: at(40) }], hasMore: false });
+    await new Promise((r) => setImmediate(r));
+    assert.deepEqual(readAfter, [14, empty ? 14 : 30], 'read again after the new tail, even though the old answer said final');
+    const page = await h.relay.call(T, 'threads.events', {}) as { events: { text?: string }[] };
+    assert.ok(page.events.some((e) => e.text === 'Must not disappear'));
+  }
+});
+
+test('a failed gap fill leaves the thread readable and a read retries it without a new tail', async () => {
+  let reads = 0;
+  const h = harness({ row: () => ({ runnerId: 'mac-mini', status: 'running' }), readMessages: (args) => {
+    if (args.afterSeq === undefined) return { messages: rows, hasMore: false };
+    if (++reads === 1) throw new Error('network still waking up');
+    return { messages: [{ seq: 18, role: 'assistant', text: 'The real end', turn: 'bbbb2222', at: at(29) }], hasMore: false };
+  } });
+  await h.relay.call(T, 'threads.subscribe', { afterSeq: 0 });
+  h.subs.get('relay:remoteTail')![0]!.onUpdate({ messages: [{ seq: 20, role: 'user', text: 'Next turn', turn: 'cccc3333', at: at(30) }], hasMore: true });
+  await new Promise((r) => setImmediate(r));
+  const page = await h.relay.call(T, 'threads.events', {}) as { events: { seq: number }[] };
+  assert.ok(page.events.some((e) => e.seq === 161));
+  await new Promise((r) => setImmediate(r));
+  assert.equal(reads, 2, 'the page retried it without another tail update');
+  const got = h.published.map((n) => (n as { params: { event: { seq: number } } }).params.event.seq);
+  assert.ok(got.includes(151));
+  assert.ok(!got.includes(119));
+});
+
+test('another tail during a gap fill cannot publish boundaries inside the merged holes', async () => {
+  let release!: (value: unknown) => void;
+  const gap = new Promise((resolve) => { release = resolve; });
+  const h = harness({ row: () => ({ runnerId: 'mac-mini', status: 'running' }), readMessages: (args) => args.afterSeq === undefined ? { messages: rows, hasMore: false } : gap });
+  await h.relay.call(T, 'threads.subscribe', { afterSeq: 0 });
+  const tail = h.subs.get('relay:remoteTail')![0]!;
+  tail.onUpdate({ messages: [{ seq: 20, role: 'user', text: 'Second turn', turn: 'c', at: at(30) }], hasMore: true });
+  tail.onUpdate({ messages: [{ seq: 50, role: 'user', text: 'Third turn', turn: 'd', at: at(50) }], hasMore: true });
+  const page = await h.relay.call(T, 'threads.events', {}) as { events: { seq: number; type: string }[] };
+  assert.ok(page.events.some((e) => e.seq === 401));
+  assert.ok(!page.events.some((e) => e.seq >= 112 && e.seq <= 400 && ['turn.started', 'turn.completed'].includes(e.type)));
+  release({ messages: [{ seq: 18, role: 'assistant', text: 'End', turn: 'bbbb2222', at: at(29) }, { seq: 30, role: 'assistant', text: 'End', turn: 'c', at: at(49) }], hasMore: false });
+  await new Promise((r) => setImmediate(r));
+  const events = h.published.map((n) => (n as { params: { event: { seq: number; type: string } } }).params.event);
+  assert.ok(!events.some((e) => e.seq === 119 || e.seq === 167));
+  assert.ok(events.some((e) => e.seq === 247));
+});
+
+test('an idle subscribed thread retries a failed gap read without any app read or tail change', async () => {
+  let reads = 0;
+  const h = harness({ row: () => ({ runnerId: 'mac-mini', status: 'running' }), readMessages: (args) => {
+    if (args.afterSeq === undefined) return { messages: rows, hasMore: false };
+    if (++reads === 1) throw new Error('network still waking up');
+    return { messages: [{ seq: 18, role: 'assistant', text: 'End', turn: 'bbbb2222', at: at(29) }], hasMore: false };
+  } });
+  await h.relay.call(T, 'threads.subscribe', { afterSeq: 0 });
+  h.subscribed.add(T);
+  h.subs.get('relay:remoteTail')![0]!.onUpdate({ messages: [{ seq: 20, role: 'user', text: 'Next', turn: 'c', at: at(30) }], hasMore: true });
+  await new Promise((r) => setImmediate(r));
+  h.clock.advance(15_000);
+  await new Promise((r) => setImmediate(r));
+  assert.equal(reads, 2);
+  assert.ok(h.published.some((n) => (n as { params: { event: { seq: number } } }).params.event.seq === 151));
+});
+
+test('an older client gets turn starts that a gap delayed below its last seq', async () => {
+  let release!: (value: unknown) => void;
+  const gap = new Promise((resolve) => { release = resolve; });
+  const h = harness({ row: () => ({ runnerId: 'mac-mini', status: 'running' }), readMessages: (args) => args.afterSeq === undefined ? { messages: rows, hasMore: false } : gap });
+  await h.relay.call(T, 'threads.subscribe', { afterSeq: 0 });
+  h.subs.get('relay:remoteTail')![0]!.onUpdate({ messages: [{ seq: 20, role: 'user', text: 'Next', turn: 'c', at: at(30) }], hasMore: true });
+  const page = await h.relay.call(T, 'threads.events', {}) as { events: { seq: number }[] };
+  assert.ok(page.events.some((e) => e.seq === 161));
+  assert.ok(!page.events.some((e) => e.seq === 160));
+  release({ messages: [{ seq: 18, role: 'assistant', text: 'End', turn: 'bbbb2222', at: at(29) }], hasMore: false });
+  await new Promise((r) => setImmediate(r));
+  const sub = await h.relay.call(T, 'threads.subscribe', { afterSeq: 161 }) as { events: { seq: number }[] };
+  assert.ok(sub.events.some((e) => e.seq === 160), 'no relaySeen in an older client');
 });
 
 test("a turn ends a moment after the row says it stopped, so its last messages come first", async () => {
@@ -186,10 +352,10 @@ test("a turn ends a moment after the row says it stopped, so its last messages c
   await h.relay.call(T, 'threads.subscribe', { threadId: T, afterSeq: 119 });
   const row = h.subs.get('relay:remoteThread')![0]!;
   const tail = h.subs.get('relay:remoteTail')![0]!;
-  row.onUpdate({ runnerId: 'bruce', status: 'running' });
+  row.onUpdate({ runnerId: 'mac-mini', status: 'running' });
   tail.onUpdate({ messages: [{ seq: 20, role: 'user', text: 'More', turn: 'cccc3333', at: at(30) }], hasMore: true });
   await new Promise((r) => setImmediate(r));
-  row.onUpdate({ runnerId: 'bruce', status: 'idle', needs: 'nothing' });
+  row.onUpdate({ runnerId: 'mac-mini', status: 'idle', needs: 'nothing' });
   const kinds = () => h.published.map((n) => (n as { params: { event: { seq: number; type: string } } }).params.event).map((e) => `${e.seq}:${e.type}`);
   assert.equal(kinds().includes('167:turn.completed'), false);
   // Its reply lands after the row said idle.
@@ -201,7 +367,7 @@ test("a turn ends a moment after the row says it stopped, so its last messages c
 
 test('a thread made from here opens before the sidebar lists it', async () => {
   const h = harness();
-  const made = h.relay.create('bruce', { text: 'Start', permissionMode: 'ask' });
+  const made = h.relay.create('mac-mini', { text: 'Start', permissionMode: 'ask' });
   await new Promise((r) => setImmediate(r));
   h.subs.get('relay:commandState')![0]!.onUpdate({ state: 'done', threadId: 'fresh' });
   await made;
@@ -233,7 +399,36 @@ test('sends, stops and changes go to the thread runner; settings that only work 
   h.subs.get('relay:commandState')![1]!.onUpdate({ state: 'done' });
   await stop;
   assert.equal(h.calls.at(-1)!.args.kind, 'interrupt');
-  await assert.rejects(h.relay.call(T, 'threads.update', { threadId: T, model: 'opus' }), /isn't possible through Convex yet/);
+  await assert.rejects(h.relay.call(T, 'threads.update', { threadId: T, cwd: '/elsewhere' }), /isn't possible through Convex yet/);
+});
+
+// 13 Nov: Continue now on for a Pixel thread at its limit was refused as
+// "Changing its login, model or settings isn't possible through Convex yet".
+test("a login or model change goes to the thread's runner as one update, once the backend takes it, and shows what it applied", async () => {
+  const old = harness();
+  await assert.rejects(old.relay.call(T, 'threads.update', { threadId: T, accountId: 'claude-2' }), /once your Convex backend is updated/);
+  assert.ok(!old.calls.some((c) => c.fn === 'relay:queueCommand'), 'nothing queued for a backend that would refuse it');
+  const h = harness({ apiVersion: 77 });
+  const moved = h.relay.call(T, 'threads.update', { threadId: T, accountId: 'claude-2', model: 'opus', carryOn: true });
+  await new Promise((r) => setImmediate(r));
+  // That runner put its own default in place of a model its login can't run.
+  h.subs.get('relay:commandState')![0]!.onUpdate({ state: 'done', result: { accountId: 'claude-2', model: 'claude-sonnet-5-5' } });
+  const { thread } = (await moved) as { thread: { accountId: string; model?: string } };
+  const queued = h.calls.find((c) => c.fn === 'relay:queueCommand')!;
+  assert.equal(queued.args.kind, 'update');
+  assert.deepEqual(queued.args.args, { accountId: 'claude-2', model: 'opus', carryOn: true });
+  assert.equal(thread.accountId, 'claude-2', 'the reply has the new login at once');
+  assert.equal(thread.model, 'claude-sonnet-5-5', 'and the model that runner applied, not the one asked for');
+  // An agent's goes as one, so that runner keeps a sandboxed thread in.
+  const agent = h.relay.call(T, 'threads.update', { threadId: T, model: 'haiku', byAgent: true });
+  await new Promise((r) => setImmediate(r));
+  h.subs.get('relay:commandState')![1]!.onUpdate({ state: 'done' });
+  await agent;
+  assert.deepEqual(h.calls.filter((c) => c.fn === 'relay:queueCommand').at(-1)!.args.args, { model: 'haiku', by: 'agent' });
+  // No row carries effort, so this Mac couldn't show what it became.
+  await assert.rejects(h.relay.call(T, 'threads.update', { threadId: T, effort: 'high' }), /isn't possible through Convex yet/);
+  await assert.rejects(h.relay.call(T, 'threads.update', { threadId: T, accountId: 'claude-2', title: 'x' }), /on its own/);
+  await assert.rejects(h.relay.call(T, 'threads.update', { threadId: T, model: 'opus', carryOn: true }), /carryOn goes with accountId/);
 });
 
 // 8 Nov: a picture pasted for a thread on Hetzner Cloud was refused with
@@ -255,7 +450,7 @@ test('pictures in a send to another runner are uploaded and go with the command,
 
 test('a new thread there takes pictures, words or not', async () => {
   const h = harness();
-  const made = h.relay.create('bruce', { text: '', cwd: '/Users/b/x', runnerId: 'bruce', images: [{ path: '/inbox/a.png', mediaType: 'image/png' }] });
+  const made = h.relay.create('mac-mini', { text: '', cwd: '/Users/b/x', runnerId: 'mac-mini', images: [{ path: '/inbox/a.png', mediaType: 'image/png' }] });
   await new Promise((r) => setTimeout(r, 5));
   h.subs.get('relay:commandState')![0]!.onUpdate({ state: 'done', threadId: 'new1' });
   assert.equal(((await made) as { thread: { id: string } }).thread.id, 'new1');
@@ -276,7 +471,7 @@ test("pictures that can't go say why, and nothing is queued or uploaded", async 
   assert.equal(h.calls.filter((c) => c.fn === 'relay:queueCommand').length, 0);
   // Offline: said at once, before uploading anything.
   const off = harness({ online: false });
-  await assert.rejects(off.relay.call(T, 'threads.send', { threadId: T, text: 'x', images: [{ path: '/inbox/a.png' }] }), /bruce is offline/);
+  await assert.rejects(off.relay.call(T, 'threads.send', { threadId: T, text: 'x', images: [{ path: '/inbox/a.png' }] }), /mac-mini is offline/);
   assert.equal(off.uploads.length, 0);
 });
 
@@ -328,7 +523,7 @@ test('a last upload that ends past 75 s sends nothing, and a slow queue still an
   assert.equal(late.calls.filter((c) => c.fn === 'relay:queueCommand').length, 0);
   // Uploaded by 72 s and queued: a new thread there waits only what's left of the 100 s.
   const h = harness({ uploadMs: 24_000 });
-  const made = h.relay.create('bruce', { text: '', runnerId: 'bruce', images: [1, 2, 3].map((i) => ({ path: `/inbox/${i}.png` })) });
+  const made = h.relay.create('mac-mini', { text: '', runnerId: 'mac-mini', images: [1, 2, 3].map((i) => ({ path: `/inbox/${i}.png` })) });
   await new Promise((r) => setTimeout(r, 5));
   h.subs.get('relay:commandState')![0]!.onUpdate({ state: 'taken' });
   let over = false;
@@ -355,7 +550,7 @@ test("a change answers with the thread, as the app decodes any runner's threads.
   settle(0);
   const { thread } = (await archive) as { thread: Record<string, unknown> };
   assert.equal(thread.id, T);
-  assert.equal(thread.runnerId, 'bruce');
+  assert.equal(thread.runnerId, 'mac-mini');
   assert.equal(thread.title, 'A thread');
   assert.equal(typeof thread.archivedAt, 'string');
   assert.equal(thread.lastSeq, 1, 'still unread');
@@ -443,7 +638,7 @@ test("sharing answers with the link, read from that runner's row once it shows i
   share = { access: 'link', slug: 'abc' };
   h.clock.advance(1000);
   assert.deepEqual(((await on) as { thread: { share: unknown } }).thread.share, { access: 'link', slug: 'abc' });
-  assert.deepEqual(h.calls.filter((c) => c.fn === 'relay:queueCommand').at(-1)!.args, { key: 'owner', runnerId: 'bruce', threadId: T, kind: 'share', args: { access: 'link' } });
+  assert.deepEqual(h.calls.filter((c) => c.fn === 'relay:queueCommand').at(-1)!.args, { key: 'owner', runnerId: 'mac-mini', threadId: T, kind: 'share', args: { access: 'link' } });
   // A new link: not done until the slug isn't the old one.
   const fresh = h.relay.call(T, 'threads.share', { threadId: T, access: 'link', newLink: true });
   await done(1);
@@ -477,7 +672,7 @@ test("an open thread's share changing there (the website's New link, Stop sharin
   await h.relay.call(T, 'threads.subscribe', { threadId: T, afterSeq: 0 });
   const said = () => h.published.filter((n) => (n as { method: string }).method === 'thread.updated').map((n) => (n as { params: { thread: { id: string; runnerId: string; share?: unknown } } }).params.thread);
   // Opened, and it's shared: the app hears so, as the sidebar's rows never say.
-  assert.deepEqual(said().map((t) => [t.id, t.runnerId, t.share]), [[T, 'bruce', { access: 'link', slug: 'abc' }]]);
+  assert.deepEqual(said().map((t) => [t.id, t.runnerId, t.share]), [[T, 'mac-mini', { access: 'link', slug: 'abc' }]]);
   const row = h.subs.get('relay:remoteThread')![0]!;
   row.onUpdate({ ...idle, status: 'running', share: { access: 'link', slug: 'abc' } });
   assert.equal(said().length, 1, 'nothing new about the share, nothing said');
@@ -513,52 +708,52 @@ test('a failed command says why, and an offline runner is said at once', async (
   h.subs.get('relay:commandState')![0]!.onUpdate({ state: 'failed', note: 'No thread' });
   await assert.rejects(p, /No thread/);
   const off = harness({ online: false });
-  await assert.rejects(off.relay.call(T, 'threads.send', { threadId: T, text: 'x' }), /bruce is offline/);
+  await assert.rejects(off.relay.call(T, 'threads.send', { threadId: T, text: 'x' }), /mac-mini is offline/);
   assert.equal(off.calls.length, 0);
 });
 
 test("a new thread there, a folder there and that runner's logins", async () => {
   const h = harness();
-  const made = h.relay.create('bruce', { text: 'Start', cwd: '/Users/b/x', runnerId: 'bruce' });
+  const made = h.relay.create('mac-mini', { text: 'Start', cwd: '/Users/b/x', runnerId: 'mac-mini' });
   await new Promise((r) => setImmediate(r));
   h.subs.get('relay:commandState')![0]!.onUpdate({ state: 'done', threadId: 'new1' });
   assert.equal(((await made) as { thread: { id: string } }).thread.id, 'new1');
-  assert.deepEqual(h.calls.at(-1)!.args, { key: 'owner', runnerId: 'bruce', kind: 'create', args: { text: 'Start', cwd: '/Users/b/x' } });
-  const list = h.relay.listFolder('bruce', '/Users/b');
+  assert.deepEqual(h.calls.at(-1)!.args, { key: 'owner', runnerId: 'mac-mini', kind: 'create', args: { text: 'Start', cwd: '/Users/b/x' } });
+  const list = h.relay.listFolder('mac-mini', '/Users/b');
   await new Promise((r) => setImmediate(r));
   h.subs.get('relay:commandState')![1]!.onUpdate({ state: 'done', result: { path: '/Users/b', entries: [], truncated: false } });
   assert.deepEqual(await list, { path: '/Users/b', entries: [], truncated: false });
   assert.deepEqual(h.calls.at(-1)!.args.args, { method: 'files.list', params: { path: '/Users/b' } });
-  const logins = await h.relay.logins('bruce');
+  const logins = await h.relay.logins('mac-mini');
   assert.equal(logins.defaults.cwd, '/Users/b/x');
   assert.deepEqual(logins.accounts, [{ id: 'claude-main', provider: 'claude', title: 'Claude', configDir: '' }]);
 });
 
 test('an opened tool fills in from its body: its real call, result and diffs, in seqs of their own', () => {
   const bodies = new Map([[14, { state: 'text' as const, text: 'all passed', ok: true, input: JSON.stringify({ command: 'npm test' }), diffs: JSON.stringify([{ path: 'a.ts', hunks: [] }, { path: 'b.ts', hunks: [] }, { path: 'c.ts', hunks: [] }]), images: 2 }]]);
-  const ev = relayEvents(T, rows, idle, [], false, 'bruce', true, bodies);
+  const ev = relayEvents(T, rows, idle, [], false, 'mac-mini', true, bodies);
   const of = (n: number) => ev.find((e) => e.seq === 14 * SCALE + n) as Record<string, unknown> | undefined;
   assert.equal(of(2)!.type, 'tool.result', 'the stub stays, and is replaced by itemId');
   assert.deepEqual(of(5)!.input, { command: 'npm test' });
   assert.equal(of(5)!.itemId, of(2)!.itemId);
   assert.equal(of(3)!.path, 'a.ts');
   assert.equal(of(4)!.path, 'b.ts');
-  assert.match(String(of(6)!.text), /all passed[\s\S]*Also changed: c\.ts[\s\S]*2 pictures are kept on bruce/);
+  assert.match(String(of(6)!.text), /all passed[\s\S]*Also changed: c\.ts[\s\S]*2 pictures are kept on mac-mini/);
   assert.equal(of(6)!.heldBack, undefined, 'nothing more to ask for');
   assert.equal(new Set(ev.map((e) => e.seq)).size, ev.length, 'every seq once');
   assert.deepEqual(ev.map((e) => e.seq), [...ev.map((e) => e.seq)].sort((a, b) => a - b));
 });
 
 test("a body that's withheld says so, and one that's missing changes nothing", () => {
-  const withheld = relayEvents(T, rows, idle, [], false, 'bruce', true, new Map([[14, { state: 'withheld' as const, reason: 'environment' }]]));
+  const withheld = relayEvents(T, rows, idle, [], false, 'mac-mini', true, new Map([[14, { state: 'withheld' as const, reason: 'environment' }]]));
   assert.match(String((withheld.find((e) => e.seq === 14 * SCALE + 6) as { text?: string }).text), /can hold secrets/);
-  const plain = relayEvents(T, rows, idle, [], false, 'bruce');
-  for (const body of [null, { state: 'expired' as const }]) assert.deepEqual(relayEvents(T, rows, idle, [], false, 'bruce', true, new Map([[14, body]])), plain);
+  const plain = relayEvents(T, rows, idle, [], false, 'mac-mini');
+  for (const body of [null, { state: 'expired' as const }]) assert.deepEqual(relayEvents(T, rows, idle, [], false, 'mac-mini', true, new Map([[14, body]])), plain);
 });
 
 test("a card from an older runner keeps its seqs: the body's diffs make way", () => {
   const card = { pending: { approvalId: 'a', kind: 'approval' as const, name: 'Bash', title: 'x', options: [] }, slot: 14 * SCALE + 3 };
-  const ev = relayEvents(T, rows, idle, [card], false, 'bruce', true, new Map([[14, { state: 'text' as const, text: 'x', diffs: JSON.stringify([{ path: 'a.ts', hunks: [] }]) }]]));
+  const ev = relayEvents(T, rows, idle, [card], false, 'mac-mini', true, new Map([[14, { state: 'text' as const, text: 'x', diffs: JSON.stringify([{ path: 'a.ts', hunks: [] }]) }]]));
   assert.equal(new Set(ev.map((e) => e.seq)).size, ev.length);
   assert.match(String((ev.find((e) => e.seq === 14 * SCALE + 6) as { text?: string }).text), /Also changed: a\.ts/);
 });
@@ -580,7 +775,7 @@ test("an agent's archive goes to that runner with by: agent", async () => {
 test('a new thread there keeps every mode; Plan first goes as Ask plus a flag, and an unknown mode is refused', async () => {
   const sent = async (permissionMode: unknown) => {
     const h = harness();
-    const made = h.relay.create('bruce', { text: 'Start', permissionMode });
+    const made = h.relay.create('mac-mini', { text: 'Start', permissionMode });
     await new Promise((r) => setImmediate(r));
     h.subs.get('relay:commandState')![0]!.onUpdate({ state: 'done', threadId: 'new1' });
     await made;
@@ -594,7 +789,7 @@ test('a new thread there keeps every mode; Plan first goes as Ask plus a flag, a
   assert.equal(oldReceiver(plan), 'ask');
   assert.deepEqual(await sent(undefined), { text: 'Start' });
   const h = harness();
-  await assert.rejects(h.relay.create('bruce', { text: 'Start', permissionMode: 'yolo' }), /permissionMode must be one of/);
+  await assert.rejects(h.relay.create('mac-mini', { text: 'Start', permissionMode: 'yolo' }), /permissionMode must be one of/);
   assert.equal(h.calls.filter((c) => c.fn === 'relay:queueCommand').length, 0, 'nothing queued');
 });
 
@@ -642,7 +837,7 @@ test('hibernating in words: done before the row has its time still answers it as
 });
 
 // docs/parity.md showed reply buttons and slash commands working from the
-// phone and not from the Mac on a Hetzner or bruce thread. The relay answers
+// phone and not from the Mac on a Cloud box or mac-mini thread. The relay answers
 // buttons.list from the rows' buttons (backend API 68), and presses and lists
 // with the commands the phone sends.
 test("a thread there's reply buttons come from its rows, and pressing one presses it there", async () => {
@@ -663,7 +858,7 @@ test("a thread there's reply buttons come from its rows, and pressing one presse
   assert.equal((listed.buttons[0]!.start as { text: string }).text, '');
   const press = h.relay.call(T, 'buttons.press', { threadId: T, buttonId: 'abcd1234' });
   await new Promise((r) => setTimeout(r, 5));
-  assert.deepEqual(h.calls.find((c) => c.fn === 'relay:queueCommand')!.args, { key: 'owner', runnerId: 'bruce', threadId: T, kind: 'press', args: { buttonId: 'abcd1234' } });
+  assert.deepEqual(h.calls.find((c) => c.fn === 'relay:queueCommand')!.args, { key: 'owner', runnerId: 'mac-mini', threadId: T, kind: 'press', args: { buttonId: 'abcd1234' } });
   h.subs.get('relay:commandState')!.at(-1)!.onUpdate({ state: 'taken' });
   h.subs.get('relay:commandState')!.at(-1)!.onUpdate({ state: 'done', threadId: 'started1' });
   const pressed = (await press) as { button: { id: string; pressed?: { threadId: string } } };
@@ -713,6 +908,26 @@ test("a thread's loose ends go on its row in the list, for its own turn's card o
   }
 });
 
+// The app opens the thread with threads.subscribe and reads the done
+// card's loose ends off the thread.updated that follows: nothing else
+// comes once the thread has settled. The nightly parity run (14 Nov) found
+// the GPUI app's done card without them.
+test("opening a thread tells the app its done card's loose ends", async () => {
+  const ends = [{ kind: 'scheduled', text: 'Look at how the experiment went', at: '2026-11-15T01:30:00.000Z' }];
+  const doneRows: RelayRow[] = [
+    { seq: 3, role: 'user', text: 'Check it in', turn: 'aaaa1111', at: at(0) },
+    { seq: 6, role: 'assistant', text: 'Checked it in.', turn: 'aaaa1111', at: at(2) },
+  ];
+  const h = harness({ rows: doneRows, row: () => ({ ...idle, looseEnds: ends, cardTurn: 'aaaa1111' }) });
+  h.subscribed.add(T);
+  const reply = (await h.relay.call(T, 'threads.subscribe', { threadId: T, afterSeq: 0 })) as { events: { seq: number; type: string }[] };
+  await new Promise((r) => setTimeout(r, 10));
+  const end = reply.events.filter((e) => e.type === 'turn.completed').at(-1);
+  assert.ok(end, JSON.stringify(reply.events.map((e) => e.type)));
+  const told = (h.published as { method: string; params: { thread?: { looseEnds?: unknown } } }[]).filter((n) => n.method === 'thread.updated').map((n) => n.params.thread?.looseEnds).filter(Boolean);
+  assert.deepEqual(told.at(-1), { seq: end.seq, ends });
+});
+
 // A plan answered while this Mac wasn't looking, with more than a tail's
 // rows since: its decision is on a row the tail doesn't cover, so it's read
 // again (Codex's review, 12 Nov).
@@ -731,4 +946,173 @@ test("a waiting plan older than the tail is read again, and its decision reaches
   await new Promise((r) => setTimeout(r, 10));
   const sent = (h.published as { method: string; params: { event?: { type: string; decision?: string } } }[]).map((n) => n.params.event).filter(Boolean);
   assert.ok(sent.some((e) => e!.type === 'plan.resolved' && e!.decision === 'go'), JSON.stringify(sent.map((e) => e!.type)));
+});
+
+// Daybreak 12 Nov (finding 105): another runner can write tens of thousands
+// of tiny plan rows to its own thread. Once this Mac had the thread open, a
+// refresh read them all, held them all, and rebuilt every event (each plan
+// copying every row after it) on each read, taking this runner's event loop
+// for seconds per call. Now a watch holds MAX_HELD rows at most, the newest,
+// and a read of a page is quick however many came.
+test("a flood of another runner's rows is held to the newest few thousand, and reading stays quick", async () => {
+  const backend: RelayRow[] = [{ seq: 1, role: 'user', text: 'Plan it', turn: 'aaaa1111', at: at(0) }];
+  const h = harness({ paged: true, rows: backend });
+  await h.relay.call(T, 'threads.events', { threadId: T, limit: 1 });
+  for (let i = 0; i < 40_000; i++) backend.push({ seq: 2 + i, role: 'assistant', text: 'p', plan: true, turn: 'aaaa1111', at: at(1) });
+  // Not subscribed and read over two seconds ago: the next read refreshes.
+  h.clock.advance(3000);
+  const first = (await h.relay.call(T, 'threads.events', { threadId: T, limit: 1 })) as { events: { seq: number; type: string }[] };
+  assert.ok(h.relay.status().held <= MAX_HELD + 1000, `held ${h.relay.status().held}`);
+  // The newest row's is what's shown (its turn's end, as the thread is idle).
+  assert.ok(first.events[0]!.seq >= 40_001 * SCALE, `seq ${first.events[0]!.seq}`);
+  // A read of what's held, as each one after it is.
+  const before = process.cpuUsage();
+  await h.relay.call(T, 'threads.events', { threadId: T, limit: 1 });
+  const d = process.cpuUsage(before);
+  const ms = (d.user + d.system) / 1000;
+  assert.ok(ms < 100, `a read took ${ms.toFixed(1)} ms of CPU`);
+  // Scrolling back reads what was dropped again.
+  const older = (await h.relay.call(T, 'threads.events', { threadId: T, beforeSeq: first.events[0]!.seq, limit: 200 })) as { events: unknown[] };
+  assert.ok(older.events.length > 0);
+});
+
+// Codex's review of that fix: trimming dropped every seq the app had been
+// given, and emit, seeing none, sent nothing more; scrolling back held rows
+// past the cap; and each new card another runner put on its row stayed,
+// each costing a copy of the rows on every read.
+test('after a gap bigger than the cap is filled, new rows still reach the app', async () => {
+  const backend: RelayRow[] = [{ seq: 1, role: 'user', text: 'Go', turn: 'aaaa1111', at: at(0) }];
+  const h = harness({ paged: true, rows: backend, row: () => ({ runnerId: 'mac-mini', status: 'running' }) });
+  h.subscribed.add(T);
+  await h.relay.call(T, 'threads.subscribe', { threadId: T, afterSeq: 0 });
+  for (let i = 0; i < 8_000; i++) backend.push({ seq: 2 + i, role: 'assistant', text: 'p', turn: 'aaaa1111', at: at(1) });
+  const tail = h.subs.get('relay:remoteTail')![0]!;
+  tail.onUpdate({ messages: backend.slice(-15), hasMore: true });
+  await new Promise((r) => setTimeout(r, 50));
+  assert.ok(h.relay.status().held <= MAX_HELD + 1000, `held ${h.relay.status().held}`);
+  const count = h.published.length;
+  assert.ok(count > 0, 'the filled rows went out');
+  backend.push({ seq: 9_000, role: 'user', text: 'Still here', turn: 'bbbb2222', at: at(5) });
+  tail.onUpdate({ messages: backend.slice(-15), hasMore: true });
+  await new Promise((r) => setTimeout(r, 20));
+  const sent = h.published.slice(count).map((n) => (n as { params: { event: { type: string; text?: string } } }).params.event);
+  assert.ok(sent.some((e) => e.type === 'user.message' && e.text === 'Still here'), 'the next row still reaches the app');
+});
+
+test('scrolling back stops holding more once twice the cap is held', async () => {
+  const backend: RelayRow[] = Array.from({ length: 30_000 }, (_, i) => ({ seq: 1 + i, role: 'assistant' as const, text: 'p', turn: 'aaaa1111', at: at(1) }));
+  const h = harness({ paged: true, rows: backend });
+  let page = (await h.relay.call(T, 'threads.events', { threadId: T, limit: 200 })) as { events: { seq: number }[] };
+  for (let n = 0; n < 200 && page.events.length; n++) {
+    page = (await h.relay.call(T, 'threads.events', { threadId: T, beforeSeq: page.events[0]!.seq, limit: 2000 })) as { events: { seq: number }[] };
+  }
+  assert.ok(h.relay.status().held <= 2 * MAX_HELD + 1000, `held ${h.relay.status().held}`);
+});
+
+test("cards another runner keeps putting on its row are held to the newest few hundred", async () => {
+  let n = 0;
+  const h = harness({ row: () => ({ runnerId: 'mac-mini', status: 'waiting', pendingApproval: { approvalId: `ap${n}`, kind: 'approval', name: 'Bash', title: 'Run', options: ['allow', 'deny'] } }) });
+  h.subscribed.add(T);
+  await h.relay.call(T, 'threads.subscribe', { threadId: T, afterSeq: 0 });
+  const row = h.subs.get('relay:remoteThread')![0]!;
+  for (n = 0; n < 1_000; n++) row.onUpdate({ runnerId: 'mac-mini', status: 'waiting', pendingApproval: { approvalId: `ap${n}`, kind: 'approval', seq: 14, name: 'Bash', title: 'Run', options: ['allow', 'deny'] } });
+  // With rising seqs too, so each goes out to the app (Codex's second
+  // review): what's been given stays as small as the cards held.
+  for (; n < 2_000; n++) {
+    row.onUpdate({ runnerId: 'mac-mini', status: 'waiting', pendingApproval: { approvalId: `ap${n}`, kind: 'approval', seq: 100 + n, name: 'Bash', title: 'Run', options: ['allow', 'deny'] } });
+    await new Promise((r) => setImmediate(r));
+  }
+  n = 1_999;
+  const given = (h.relay as unknown as { watches: Map<string, { given: Set<number> }> }).watches.get(T)!.given;
+  assert.ok(given.size <= 2 * MAX_CARDS + 50, `${given.size} seqs given held`);
+  const page = (await h.relay.call(T, 'threads.events', { threadId: T, limit: 2000 })) as { events: { type: string; approvalId?: string }[] };
+  const cards = page.events.filter((e) => e.type === 'approval.requested');
+  assert.ok(cards.length <= MAX_CARDS, `${cards.length} cards`);
+  assert.ok(cards.some((e) => e.approvalId === 'ap1999'), 'the open one stays');
+});
+
+// A watch started in the moment before this runner's first heartbeat (its
+// cached backend version still the old one) asked for no login notes, and a
+// live query keeps the arguments it was started with: the thread would go on
+// showing none until it was closed and opened again (Codex's review, 13 Nov).
+test('a watch from before the backend had login notes asks for them once it does', async () => {
+  const opts: HarnessOpts = { apiVersion: 77 };
+  const h = harness(opts);
+  await h.relay.call(T, 'threads.subscribe', { threadId: T, afterSeq: 0 });
+  const tails = () => h.subs.get('relay:remoteTail')!;
+  assert.equal(tails().length, 1);
+  assert.equal('notes' in tails()[0]!.args, false, 'an older backend refuses an argument it does not know');
+  const page = await h.relay.call(T, 'threads.events', { threadId: T });
+  assert.ok(page);
+  assert.ok(h.calls.filter((c) => c.fn === 'relay:remoteMessages').every((c) => !('notes' in c.args)));
+  opts.apiVersion = 78;
+  tails()[0]!.onUpdate({ messages: rows.slice(-2), hasMore: true });
+  await new Promise((r) => setImmediate(r));
+  assert.equal(tails().length, 2, 'watched again');
+  assert.equal(tails()[0]!.closed, true);
+  assert.equal(tails()[1]!.args.notes, true);
+  assert.equal(h.subs.get('relay:remoteThread')!.at(-1)!.closed, false);
+  // The note in the new watch's tail shows, and nothing watches a third time.
+  const moved: RelayRow = { seq: 15, role: 'note', text: 'Moved to alex@example.org: alex@example.net hit its 5-hour limit.', at: at(30) };
+  tails()[1]!.onUpdate({ messages: [...rows.slice(-2), moved], hasMore: true });
+  await new Promise((r) => setImmediate(r));
+  assert.equal(tails().length, 2);
+  const { events } = (await h.relay.call(T, 'threads.events', { threadId: T })) as { events: { type: string; text?: string; login?: boolean }[] };
+  const note = events.find((e) => e.type === 'system.note');
+  assert.equal(note?.text, moved.text);
+  assert.equal(note?.login, true);
+});
+
+// Daybreak 113: the RPC server checks a send's runnerId against this, so it
+// must be the runner `call` really sends to.
+test('ownerOf names the runner a request goes to, following a move', async () => {
+  const h = harness();
+  assert.equal(h.relay.ownerOf(T), 'mac-mini');
+  assert.equal(h.relay.ownerOf('not-listed'), undefined);
+  await h.relay.call(T, 'threads.events', { threadId: T });
+  h.remote.runners.push({ id: 'cloud', name: 'cloud', online: true, lastSeenAt: at(0) });
+  h.remote.threads[0] = { ...h.remote.threads[0]!, runnerId: 'cloud' };
+  assert.equal(h.relay.ownerOf(T), 'cloud');
+  // And the open watch sends there too, not to the runner it was opened for.
+  void h.relay.call(T, 'threads.interrupt', { threadId: T }).catch(() => {});
+  await patiently(() => h.calls.some((c) => c.fn === 'relay:queueCommand'));
+  assert.equal(h.calls.find((c) => c.fn === 'relay:queueCommand')?.args.runnerId, 'cloud');
+  h.remote.threads.length = 0;
+  assert.equal(h.relay.ownerOf(T), undefined);
+});
+
+// Daybreak finding 134 (15 Nov 2026): a runner key could store a message
+// under a seq that's NaN, an infinity, a fraction, negative or past 2^53,
+// which the relay sorted, keyed and multiplied into event ids.
+const BAD_SEQS = [NaN, Infinity, -Infinity, 1.5, -1, 2 ** 53, MAX_RELAY_SEQ + 1];
+
+test('a seq is a whole number from 0 to MAX_RELAY_SEQ, and the greatest still makes distinct exact event ids', () => {
+  for (const bad of BAD_SEQS) assert.equal(isRelaySeq(bad), false, String(bad));
+  for (const good of [0, 1, 119, MAX_RELAY_SEQ]) assert.equal(isRelaySeq(good), true);
+  const top = MAX_RELAY_SEQ * SCALE;
+  const ids = [0, 1, 2, 3, 4, 5, 6, 7].map((k) => top + k);
+  assert.ok(ids.every((n) => Number.isSafeInteger(n)));
+  assert.deepEqual(JSON.parse(JSON.stringify(ids)), ids);
+  assert.equal(new Set(ids).size, 8);
+  const below = (MAX_RELAY_SEQ - 1) * SCALE + 7;
+  assert.ok(below < top, "the row before's ids stay below");
+});
+
+test('rows with a bad seq are left out of a page, a tail and the events, and the rest of the thread shows', async () => {
+  const bad = BAD_SEQS.map((seq, i) => ({ seq, role: 'assistant', text: `bad ${i}`, at: at(1) }) as RelayRow);
+  // relayEvents on its own.
+  const events = relayEvents(T, [...bad, ...rows], idle, [], false, 'mac-mini');
+  assert.deepEqual(events, relayEvents(T, rows, idle, [], false, 'mac-mini'));
+  // Through a page read from the backend, and a tail.
+  const h = harness({ rows: [bad[0]!, ...rows, ...bad.slice(1)] });
+  const page = (await h.relay.call(T, 'threads.events', { threadId: T, limit: 200 })) as { events: { seq: number; text?: string }[] };
+  assert.ok(page.events.length > 0);
+  assert.ok(page.events.every((e) => Number.isSafeInteger(e.seq) && e.seq >= 0), JSON.stringify(page.events.map((e) => e.seq)));
+  assert.ok(!page.events.some((e) => String(e.text ?? '').startsWith('bad ')));
+  await h.relay.call(T, 'threads.subscribe', { threadId: T, afterSeq: 119 });
+  h.subs.get('relay:remoteThread')![0]!.onUpdate({ runnerId: 'mac-mini', status: 'running' });
+  h.subs.get('relay:remoteTail')![0]!.onUpdate({ messages: [...bad, { seq: 20, role: 'user', text: 'More', turn: 'cccc3333', at: at(30) }], hasMore: true });
+  await new Promise((r) => setImmediate(r));
+  const published = h.published.map((n) => (n as { params: { event: { seq: number; type: string; text?: string } } }).params.event);
+  assert.deepEqual(published.map((e) => `${e.seq}:${e.type}`), ['160:turn.started', '161:user.message']);
 });

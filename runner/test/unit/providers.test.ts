@@ -54,24 +54,12 @@ test('a thread with no provider is a Claude one, as a record from before Codex',
   assert.equal(providerName(''), 'Claude');
 });
 
-function home(on: boolean): string {
-  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'tb-prov-'));
-  if (on) fs.writeFileSync(path.join(d, 'runner.json'), JSON.stringify({ experiments: { acpAgents: true } }));
-  return d;
-}
-
-test('the ACP agents are only offered with the experiment on', () => {
-  assert.deepEqual(activeProviders(home(false)), ['claude', 'codex']);
-  assert.deepEqual(activeProviders(home(true)), ['claude', 'codex', 'cursor', 'opencode']);
-});
-
-test('with the experiment off, an installed agent adds no account', () => {
+test('an installed ACP agent adds its account', () => {
   const d = fs.mkdtempSync(path.join(os.tmpdir(), 'tb-disc-'));
   const bin = path.join(d, 'oc');
   fs.writeFileSync(bin, '#!/bin/sh\n', { mode: 0o755 });
-  const cfg = { claudeMainDir: path.join(d, 'none'), claudeMainJson: path.join(d, 'none.json'), tokenStatsAccountsDir: path.join(d, 'none2'), opencodePath: bin, cursorPath: path.join(d, 'no-cursor') };
-  assert.deepEqual(discoverAccounts({ ...cfg, home: home(false) }), []);
-  assert.deepEqual(discoverAccounts({ ...cfg, home: home(true) }).map((a) => a.id), ['opencode-main']);
+  const cfg = { userHome: d, pathEnv: '', claudeMainDir: path.join(d, 'none'), claudeMainJson: path.join(d, 'none.json'), tokenStatsAccountsDir: path.join(d, 'none2'), opencodePath: bin, cursorPath: path.join(d, 'no-cursor') };
+  assert.deepEqual(discoverAccounts(cfg).map((a) => a.id), ['opencode-main']);
 });
 
 test('an ACP model is only ever the one its account lists', () => {
@@ -94,5 +82,36 @@ test('a saved pool of only an agent this runner does not offer is gone', () => {
 test('hello lists each provider this runner offers', () => {
   assert.deepEqual(providersForHello().map((p) => p.id), [...PROVIDERS]);
   const h = makeHarness(undefined, {}, { accounts: new FakeAccounts(withCodex()) });
-  assert.deepEqual(h.runner.hello().providers.map((p) => p.name), ['Claude', 'Codex']);
+  assert.deepEqual(h.runner.hello().providers.map((p) => p.name), ['Claude', 'Codex', 'Cursor', 'OpenCode', 'Grok']);
+});
+
+test('Oh My Pi is only offered with its experiment on', () => {
+  const home = (on: boolean) => {
+    const d = fs.mkdtempSync(path.join(os.tmpdir(), 'tb-omp-gate-'));
+    fs.writeFileSync(path.join(d, 'runner.json'), JSON.stringify({ experiments: { ohMyPi: on } }));
+    return d;
+  };
+  assert.deepEqual(activeProviders(home(false)), ['claude', 'codex', 'cursor', 'opencode', 'grok']);
+  assert.deepEqual(activeProviders(home(true)), ['claude', 'codex', 'cursor', 'opencode', 'grok', 'omp']);
+});
+
+test('what Grok can do', () => {
+  const g = PROVIDER_INFO.grok;
+  assert.equal(g.name, 'Grok');
+  assert.equal(g.loginCommand, 'grok login');
+  // Its models list their own levels, which narrow Codex's set.
+  assert.equal(g.effort, 'codex');
+  assert.equal(g.autoMode, 'asks');
+  assert.equal(g.smallJobs, true, 'its hook denies every tool for one');
+  for (const can of [g.sandbox, g.rewind, g.usageReadings]) assert.equal(can, false);
+});
+
+test('a Grok thread takes an effort its model lists, and not one it does not', () => {
+  const grok: Account = { id: 'grok-main', provider: 'grok', title: 'Grok', configDir: '/g', models: [{ id: 'grok-4.7', model: 'grok-4.7', title: 'Grok 4.7', effortLevels: ['low', 'medium', 'high', 'xhigh'], defaultEffort: 'high' }, { id: 'grok-4.5', model: 'grok-4.5', title: 'Grok 4.5', effortLevels: ['low', 'medium', 'high'] }] };
+  const h = makeHarness(undefined, {}, { accounts: new FakeAccounts([...withCodex(), grok]) });
+  assert.deepEqual(h.runner.checkSettings(grok, 'grok-4.7', 'high'), { model: 'grok-4.7', effort: 'high', notes: [] });
+  const r = h.runner.checkSettings(grok, 'grok-4.5', 'xhigh');
+  assert.equal(r.effort, undefined);
+  assert.equal(r.notes.length, 1);
+  assert.equal(h.runner.modelFits(grok, 'claude-opus-5-5'), false);
 });

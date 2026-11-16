@@ -35,12 +35,102 @@ pub struct RunnerUpdates {
     /// Which way the LaunchAgent is behind main, in a sentence (runners from
     /// before 29 Oct 2026 don't send it).
     pub launcher_reason: Option<String>,
+    /// What the runner is doing about it (runner.reinstall); None while
+    /// it's waiting for Reinstall now, and from runners before 14 Nov 2026.
+    pub reinstall: Option<Reinstall>,
+    /// The runner's update of it stages for the next login, stopping
+    /// nothing (protocol `launcherStages`, from 15 Nov 2026). The runner of
+    /// 14 Nov reinstalled once idle instead, so its panel offers no button.
+    pub launcher_stages: bool,
     /// Left out by runners before 30 Oct 2026, and while it's off.
     pub upstream: Option<Upstream>,
     /// This machine can't follow GitHub's main properly. None while it's fine.
     pub follow_problem: Option<String>,
+    pub web_runtime_problem: Option<String>,
     /// The other runners saying that of themselves (the main Mac's runner).
     pub behind_runners: Vec<BehindRunner>,
+    /// A fork's own changes to the old Swift app not yet rebuilt in this one
+    /// (protocol "Your changes to the old app"). Empty while there are none.
+    pub swift_changes: Vec<SwiftChange>,
+}
+
+/// The runner reinstalling its LaunchAgent (protocol "Runner updates",
+/// `reinstall`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Reinstall {
+    /// waiting (about to start), running, staged (in place, starting
+    /// when the Mac restarts) or failed.
+    pub state: String,
+    pub reason: Option<String>,
+    pub log_file: Option<String>,
+    /// It does it by itself (the selfReinstall experiment), not because
+    /// Reinstall now was pressed.
+    pub auto: bool,
+}
+
+impl Reinstall {
+    pub fn decode(v: &Value) -> Option<Reinstall> {
+        let state = v["state"].as_str()?.to_owned();
+        Some(Reinstall { state, reason: text(v, "reason"), log_file: text(v, "logFile"), auto: v["auto"].as_bool().unwrap_or(false) })
+    }
+}
+
+/// One of someone's own commits to the old Swift app.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SwiftChange {
+    pub commit: String,
+    pub short: String,
+    pub subject: String,
+    /// The committer's date, ISO.
+    pub date: String,
+    pub files: Vec<String>,
+    pub more_files: i64,
+    /// An open thread rebuilding it.
+    pub thread_id: Option<String>,
+}
+
+impl SwiftChange {
+    fn decode(v: &Value) -> Option<SwiftChange> {
+        let commit = v["commit"].as_str().filter(|c| !c.is_empty())?.to_owned();
+        Some(SwiftChange {
+            short: v["short"].as_str().map_or_else(|| commit.chars().take(7).collect(), str::to_owned),
+            commit,
+            subject: v["subject"].as_str().unwrap_or("").to_owned(),
+            date: v["date"].as_str().unwrap_or("").to_owned(),
+            files: strings(&v["files"]),
+            more_files: v["moreFiles"].as_i64().unwrap_or(0),
+            thread_id: text(v, "threadId").filter(|t| !t.is_empty()),
+        })
+    }
+}
+
+/// The "Not in the new app yet" section's line above its list.
+pub fn swift_changes_line(n: usize) -> String {
+    if n == 1 {
+        "You changed the old app in 1 place that isn't in this one yet. Port it to rebuild it here, or dismiss it.".to_owned()
+    } else {
+        format!("You changed the old app in {n} places that aren't in this one yet. Port each to rebuild it here, or dismiss it.")
+    }
+}
+
+/// Under a change's subject: its day, short commit and files.
+pub fn swift_change_detail(c: &SwiftChange) -> String {
+    // The day where they made it, from the date's own offset.
+    let day = DateTime::parse_from_rfc3339(&c.date).ok().map(|d| d.format("%-d %b").to_string());
+    let mut files = c.files.iter().map(|f| f.rsplit('/').next().unwrap_or(f).to_owned()).collect::<Vec<_>>();
+    if files.len() > 3 {
+        let more = files.len() as i64 - 3 + c.more_files;
+        files.truncate(3);
+        files.push(format!("{more} more"));
+    } else if c.more_files > 0 {
+        files.push(format!("{} more", c.more_files));
+    }
+    let mut parts = day.into_iter().collect::<Vec<_>>();
+    parts.push(c.short.clone());
+    if !files.is_empty() {
+        parts.push(files.join(", "));
+    }
+    parts.join(" · ")
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -111,21 +201,28 @@ impl RunnerUpdates {
                 .collect(),
             launcher_changed: v["launcherChanged"].as_bool().unwrap_or(false),
             launcher_reason: text(v, "launcherReason"),
+            reinstall: Reinstall::decode(&v["reinstall"]),
+            launcher_stages: v["launcherStages"].as_bool().unwrap_or(false),
             upstream: Upstream::decode(&v["upstream"]),
             follow_problem: text(v, "followProblem"),
+            web_runtime_problem: text(v, "webRuntimeProblem"),
             behind_runners: v["behindRunners"]
                 .as_array()
                 .into_iter()
                 .flatten()
                 .filter_map(|b| Some(BehindRunner { name: b["name"].as_str()?.to_owned(), problem: b["problem"].as_str()?.to_owned() }))
                 .collect(),
+            swift_changes: v["swiftChanges"]["changes"].as_array().into_iter().flatten().filter_map(SwiftChange::decode).collect(),
         })
     }
 
     /// Something's on its way: a release being built or about to start, an
     /// old runner still finishing turns, or a LaunchAgent to reinstall.
     pub fn is_pending(&self) -> bool {
-        self.state == "building" || self.state == "waiting" || !self.old_runners.is_empty() || self.launcher_changed
+        // A staged launcher (protocol "Runner updates") has nothing left
+        // to do until the Mac restarts, so it isn't on its way.
+        let staged = self.reinstall.as_ref().is_some_and(|r| r.state == "staged");
+        self.state == "building" || self.state == "waiting" || !self.old_runners.is_empty() || (self.launcher_changed && !staged)
     }
 
     pub fn failed(&self) -> bool {
@@ -184,6 +281,8 @@ pub struct AppSide {
     /// Short commit waiting to be swapped in.
     pub staged: Option<String>,
     pub building: bool,
+    /// Main changed recently; let nearby desktop changes settle first.
+    pub settling: bool,
     pub failed: bool,
     /// The GPUI app's build found no Mac to build on, and tries again at its
     /// next look (the Swift app builds where it is, so never).
@@ -191,11 +290,14 @@ pub struct AppSide {
     /// Why the installed GPUI app can't follow main (one installed before it
     /// could, say). The Swift app has no such case.
     pub not_following: Option<String>,
+    /// What the staged build's restart waits on (`restart_wait`), when the
+    /// app knows: a countdown, or what's typed or open.
+    pub wait: Option<crate::app_update::RestartWait>,
 }
 
 impl AppSide {
     pub fn is_pending(&self) -> bool {
-        self.staged.is_some() || self.building || self.waiting
+        self.staged.is_some() || self.building || self.waiting || self.settling
     }
 }
 
@@ -211,7 +313,7 @@ fn runner_failed(runner: Option<&RunnerUpdates>) -> bool {
 /// runner: the icon's grey dot. The icon itself is always there since the
 /// CLIs' versions moved into its panel (28 Oct).
 pub fn shown(app: &AppSide, runner: Option<&RunnerUpdates>) -> bool {
-    app.is_pending() || app.failed || app.not_following.is_some() || runner_pending(runner) || runner_failed(runner) || from_mike(runner) || not_following(runner)
+    app.is_pending() || app.failed || app.not_following.is_some() || runner_pending(runner) || runner_failed(runner) || from_mike(runner) || not_following(runner) || runner.is_some_and(|r| r.web_runtime_problem.is_some())
 }
 
 /// A release of Mike's this copy's main doesn't have yet.
@@ -226,24 +328,38 @@ pub fn cli_pending(cli: &CliStatus) -> bool {
 }
 
 /// The tooltip's line for a Threadbear Runner.app (or launch.mjs) that only
-/// install-runner.sh brings up to date.
-pub const REINSTALL_LINE: &str = "The runner needs reinstalling, which only you can do";
+/// a reinstall brings up to date, by what's being done about it.
+pub fn reinstall_tooltip(u: &RunnerUpdates) -> &'static str {
+    match u.reinstall.as_ref().map(|r| r.state.as_str()) {
+        None => "The runner needs updating",
+        Some("failed") => "The runner's update didn't work",
+        Some("staged") => "The runner updates when your Mac restarts",
+        _ => "The runner is updating",
+    }
+}
+
+/// A LaunchAgent behind main that waits on Mike: nobody has pressed
+/// Reinstall now (and the runner won't by itself), or the reinstall failed.
+pub fn launcher_needs_you(u: &RunnerUpdates) -> bool {
+    u.launcher_changed && u.reinstall.as_ref().is_none_or(|r| r.state == "failed")
+}
 
 /// The icon's tooltip: "Updates", then a line for each thing going on, or
 /// that everything is up to date. The panel has the rest.
 pub fn icon_tooltip(app: &AppSide, runner: Option<&RunnerUpdates>, clis: &[CliStatus]) -> String {
     let mut lines = vec!["Updates".to_owned()];
-    // A runner app to reinstall gets its own line, as it's the one that's
-    // Mike's to do (the accent dot); left in, it read as "A runner update",
-    // which looks like one on its way by itself (12 Nov, Mike: "I thought
-    // blue dots reserved for something that needs me to action on it").
+    lines.extend(runner.and_then(|r| r.web_runtime_problem.clone()));
+    // A runner app to reinstall gets its own line, as it can be Mike's to
+    // do (the accent dot); left in, it read as "A runner update", which
+    // looks like one on its way by itself (12 Nov, Mike: "I thought blue
+    // dots reserved for something that needs me to action on it").
     let moving = runner.map(|r| RunnerUpdates { launcher_changed: false, ..r.clone() });
     let moving = moving.as_ref();
     if app.is_pending() || app.failed || runner_pending(moving) || runner_failed(moving) {
         lines.push(tooltip(app, moving));
     }
-    if runner.is_some_and(|r| r.launcher_changed) {
-        lines.push(REINSTALL_LINE.to_owned());
+    if let Some(r) = runner.filter(|r| r.launcher_changed) {
+        lines.push(reinstall_tooltip(r).to_owned());
     }
     if let Some(line) = upstream_tooltip(runner.and_then(|r| r.upstream.as_ref())) {
         lines.push(line);
@@ -263,14 +379,15 @@ pub fn icon_tooltip(app: &AppSide, runner: Option<&RunnerUpdates>, clis: &[CliSt
     lines.join("\n")
 }
 
-/// Whether it wants Mike (the accent dot): a launch.mjs only he can install,
+/// Whether it wants Mike (the accent dot): a launch.mjs to reinstall that
+/// waits on his Reinstall now, or whose reinstall failed,
 /// a release of his to bring in (they only come in when he says), a
 /// machine that isn't following GitHub's main, or an installed GPUI app that
 /// can't follow main until it's installed again. Anything else sorts itself
 /// out, a failed build included, so it gets the grey dot (27 Oct, Mike: "the
 /// blue dot usually indicates there's something for me to action").
 pub fn needs_you(app: &AppSide, runner: Option<&RunnerUpdates>) -> bool {
-    app.not_following.is_some() || runner.is_some_and(|r| r.launcher_changed) || from_mike(runner) || not_following(runner)
+    app.not_following.is_some() || runner.is_some_and(launcher_needs_you) || from_mike(runner) || not_following(runner)
 }
 
 /// A machine that isn't following GitHub's main: nothing fixes that by
@@ -438,13 +555,21 @@ pub fn tooltip(app: &AppSide, runner: Option<&RunnerUpdates>) -> String {
 
 pub fn app_line(a: &AppSide) -> String {
     if let Some(staged) = &a.staged {
-        return format!("The app's next version ({staged}) is ready. It switches in when you're not using the app, or now.");
+        use crate::app_update::RestartWait;
+        return match &a.wait {
+            Some(RestartWait::Countdown(n)) => format!("The app's next version ({staged}) is ready. It switches in {n}s if you leave the app alone, or now."),
+            Some(RestartWait::Held(why)) => format!("The app's next version ({staged}) is ready. It switches in once {why}, or now."),
+            None => format!("The app's next version ({staged}) is ready. It switches in when you're not using the app, or now."),
+        };
     }
     if a.building {
         return "Building the app from main.".to_owned();
     }
     if a.waiting {
         return "The app has a new version on main, waiting for a Mac to build it on.".to_owned();
+    }
+    if a.settling {
+        return "The app has a new version on main, waiting for ten quiet minutes before building.".to_owned();
     }
     if a.failed {
         return "The app's last build from main failed. The log says why.".to_owned();
@@ -491,15 +616,46 @@ pub fn old_runners_line(u: &RunnerUpdates) -> Option<String> {
     }
 }
 
-/// A LaunchAgent only install-runner.sh brings up to date (launch.mjs, the
-/// plist, Threadbear Runner.app); the view shows the command under it. An
-/// older runner sends no reason, and then it was launch.mjs.
+/// A LaunchAgent only an update outside releases brings up to date (launch.mjs, the plist,
+/// Threadbear Runner.app), and what's being done about it; the view puts
+/// `launcher_button` under it. An older runner sends no reason, and then
+/// it was launch.mjs.
 pub fn launcher_line(u: &RunnerUpdates) -> Option<String> {
     if !u.launcher_changed {
         return None;
     }
     let why = u.launcher_reason.as_deref().unwrap_or("launch.mjs has changed on main.");
-    Some(format!("{why} It only updates when you run this, once nothing is busy:"))
+    if !u.launcher_stages {
+        return Some(match u.reinstall.as_ref() {
+            Some(r) if r.state == "failed" => format!("The runner's update didn't work: {}", r.reason.as_deref().unwrap_or("it didn't say why.")),
+            _ => format!("{why} It's updated once the runner itself is, a few minutes after main."),
+        });
+    }
+    // It's staged, not reinstalled (runner/src/reinstall.ts): nothing
+    // stops, and the new one takes over when launchd next starts the job.
+    Some(match u.reinstall.as_ref().map(|r| (r.state.as_str(), r)) {
+        None => format!("{why} Updating it stops nothing; the new one starts next time your Mac restarts."),
+        Some(("failed", r)) => format!("The runner's update didn't work: {}", r.reason.as_deref().unwrap_or("it didn't say why.")),
+        Some(("staged", _)) => format!("{why} The update is in place, and starts next time your Mac restarts."),
+        Some(_) => "Updating Threadbear Runner. Nothing stops; the new one starts next time your Mac restarts.".to_owned(),
+    })
+}
+
+/// The button under `launcher_line`: its label and tip, and whether it
+/// spins (taking no clicks) because the reinstall is already on its way.
+/// None while the runner will do it by itself anyway.
+pub fn launcher_button(u: &RunnerUpdates) -> Option<(&'static str, &'static str, bool)> {
+    // An older runner's runner.reinstall stops everything once idle, which
+    // the button's words don't promise.
+    if !u.launcher_changed || !u.launcher_stages {
+        return None;
+    }
+    match u.reinstall.as_ref().map(|r| r.state.as_str()) {
+        None => Some(("Update it", "Put the new Threadbear Runner in place. Nothing stops; it starts next time your Mac restarts.", false)),
+        Some("failed") => Some(("Try again", "Run the update again", false)),
+        Some("staged") => None,
+        Some(_) => Some(("Updating", "Threadbear Runner is updating", true)),
+    }
 }
 
 /// Every runner line in order, or the one that says there's nothing.
@@ -507,22 +663,11 @@ pub fn runner_lines(u: Option<&RunnerUpdates>) -> Vec<String> {
     let Some(u) = u else { return vec!["This runner doesn't say how its updates are going.".to_owned()] };
     let mut out: Vec<String> = [build_line(u), old_runners_line(u), launcher_line(u)].into_iter().flatten().collect();
     out.extend(follow_lines(u));
+    out.extend(u.web_runtime_problem.clone());
     if out.is_empty() {
         out.push("The runner is up to date.".to_owned());
     }
     out
-}
-
-/// The command for a changed launch.mjs, from the checkout with `~` for the
-/// home folder. A runner that doesn't say where its checkout is: the README's
-/// `gh repo fork --clone` puts it in ~/threadbear from the home folder.
-pub fn install_command(checkout: Option<&str>, home: &str) -> String {
-    let root = match checkout {
-        Some(path) if !home.is_empty() && (path == home || path.starts_with(&format!("{}/", home.trim_end_matches('/')))) => format!("~{}", &path[home.trim_end_matches('/').len()..]),
-        Some(path) => path.to_owned(),
-        None => "~/threadbear".to_owned(),
-    };
-    format!("{root}/runner/scripts/install-runner.sh")
 }
 
 // ---- The CLIs (`clis.list`, `CliText`)
@@ -532,6 +677,8 @@ pub fn install_command(checkout: Option<&str>, home: &str) -> String {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct CliStatus {
     pub provider: String,
+    /// Display name from hello.providers, filled by the client.
+    pub name: Option<String>,
     pub path: String,
     /// "threadbear" (Codex's own copies), "cli" (Claude's installer) or
     /// "none" (a path set by hand, never updated).
@@ -574,6 +721,7 @@ impl CliStatus {
         let provider = v["provider"].as_str()?.to_owned();
         Some(CliStatus {
             provider,
+            name: None,
             path: v["path"].as_str().unwrap_or("").to_owned(),
             managed_by: v["managedBy"].as_str().unwrap_or("cli").to_owned(),
             installed_version: text(v, "installedVersion"),
@@ -604,11 +752,17 @@ pub fn decode_clis(list: &Value) -> Vec<CliStatus> {
     list.as_array().into_iter().flatten().filter_map(CliStatus::decode).collect()
 }
 
+pub fn decode_clis_with(list: &Value, logins: &crate::logins::RunnerLogins) -> Vec<CliStatus> {
+    let mut clis = decode_clis(list);
+    for cli in &mut clis { cli.name = Some(logins.cli_name(&cli.provider)); }
+    clis
+}
+
 /// "Claude Code 2.1.311, up to date", "Claude Code 2.1.311, 2.1.312
 /// available", "Codex 0.165.0 is held back because the app-server protocol
 /// changed".
 pub fn status_line(cli: &CliStatus) -> String {
-    let name = cli_name(&cli.provider);
+    let name = cli.name.clone().unwrap_or_else(|| cli_name(&cli.provider));
     let installed = cli.installed_version.as_ref().map_or_else(|| name.clone(), |v| format!("{name} {v}"));
     match cli.status.as_str() {
         "current" => format!("{installed}, up to date"),
@@ -663,11 +817,11 @@ pub fn is_updating(cli: &CliStatus) -> bool {
 /// 2.1.312", "Installing Codex 0.165.0".
 pub fn banner_text(cli: &CliStatus) -> Option<String> {
     let update = cli.update.as_ref()?;
-    let name = cli_name(&cli.provider);
+    let name = cli.name.clone().unwrap_or_else(|| cli_name(&cli.provider));
     let target = update.target_version.clone().or_else(|| cli.latest_version.clone());
     let to = target.as_ref().map_or_else(String::new, |t| format!(" to {t}"));
     match update.state.as_str() {
-        "running" if cli.provider == "codex" => Some(format!("Installing Codex{}", target.as_ref().map_or_else(String::new, |t| format!(" {t}")))),
+        "running" if cli.provider == "codex" => Some(format!("Installing {name}{}", target.as_ref().map_or_else(String::new, |t| format!(" {t}")))),
         "running" => Some(format!("Updating {name}{to}")),
         "waiting" => Some(format!("Waiting to update {name}{to}")),
         "failed" => {
@@ -743,6 +897,25 @@ mod tests {
     use chrono::{FixedOffset, Local};
     use serde_json::json;
 
+    #[test]
+    fn swift_changes_from_a_fork() {
+        let u = RunnerUpdates::decode(&json!({ "state": "idle", "swiftChanges": { "state": "ready", "checkout": "/Users/me/threadbear", "changes": [
+            { "commit": "abc1234def", "short": "abc1234", "subject": "Orange dock badge", "date": "2026-11-02T03:00:00+08:00", "files": ["dock/Sources/Badge.swift"], "threadId": "t1" },
+            { "commit": "0123456789", "subject": "Bigger sidebar font", "date": "2026-10-20T10:00:00Z", "files": ["app/A.swift", "app/B.swift", "app/C.swift", "app/D.swift"], "moreFiles": 2 },
+            { "subject": "no commit" },
+            "junk"
+        ], "somethingNew": 1 } })).unwrap();
+        assert_eq!(u.swift_changes.len(), 2);
+        assert_eq!(u.swift_changes[0].thread_id.as_deref(), Some("t1"));
+        assert_eq!(u.swift_changes[1].short, "0123456");
+        assert_eq!(swift_change_detail(&u.swift_changes[0]), "2 Nov · abc1234 · Badge.swift");
+        assert_eq!(swift_change_detail(&u.swift_changes[1]), "20 Oct · 0123456 · A.swift, B.swift, C.swift, 3 more");
+        assert_eq!(swift_changes_line(1), "You changed the old app in 1 place that isn't in this one yet. Port it to rebuild it here, or dismiss it.");
+        assert!(swift_changes_line(2).starts_with("You changed the old app in 2 places that aren't"));
+        // Mike's own runner, or an older one, says nothing.
+        assert!(RunnerUpdates::decode(&json!({ "state": "idle" })).unwrap().swift_changes.is_empty());
+    }
+
     /// The mock runner's two CLIs (app/Tools/mock-runner/server.mjs).
     fn mock_clis() -> Vec<CliStatus> {
         decode_clis(&json!([
@@ -751,6 +924,16 @@ mod tests {
               "checkedAt": "2026-11-11T01:00:00.000Z", "hold": { "version": "0.165.0", "reason": "the app-server protocol changed", "missing": ["thread/backgroundTerminals/list"] } },
             { "path": "no provider" },
         ]))
+    }
+
+    #[test]
+    fn stale_web_runtime_is_visible_in_the_panel_and_updates_icon() {
+        let u = RunnerUpdates::decode(&json!({ "state": "idle", "webRuntimeProblem": "CEF needs updating" })).unwrap();
+        let app = AppSide::default();
+        assert_eq!(runner_lines(Some(&u)), vec!["CEF needs updating"]);
+        assert!(shown(&app, Some(&u)));
+        assert!(icon_tooltip(&app, Some(&u), &[]).contains("CEF needs updating"));
+        assert!(!needs_you(&app, Some(&u)));
     }
 
     #[test]
@@ -821,16 +1004,43 @@ mod tests {
         let failed = RunnerUpdates::decode(&json!({ "state": "failed", "commit": "abc1234", "reason": "npm ci failed" })).unwrap();
         assert_eq!(tooltip(&app, Some(&failed)), "The runner's update failed");
         assert_eq!(runner_lines(Some(&failed)), ["The runner couldn't update to main at abc1234: npm ci failed"]);
-        let launcher = RunnerUpdates::decode(&json!({ "state": "idle", "launcherChanged": true })).unwrap();
+        let launcher = RunnerUpdates::decode(&json!({ "state": "idle", "launcherChanged": true, "launcherStages": true })).unwrap();
         assert!(needs_you(&app, Some(&launcher)));
-        assert_eq!(icon_tooltip(&app, Some(&launcher), &[]), "Updates\nThe runner needs reinstalling, which only you can do");
+        assert_eq!(icon_tooltip(&app, Some(&launcher), &[]), "Updates\nThe runner needs updating");
         let both = RunnerUpdates::decode(&json!({ "state": "building", "commit": "abc1234", "launcherChanged": true })).unwrap();
-        assert_eq!(icon_tooltip(&app, Some(&both), &[]), "Updates\nA runner update\nThe runner needs reinstalling, which only you can do");
-        assert_eq!(runner_lines(Some(&launcher)), ["launch.mjs has changed on main. It only updates when you run this, once nothing is busy:"]);
-        let behind = RunnerUpdates::decode(&json!({ "state": "idle", "behindRunners": [{ "name": "bruce", "problem": "3 days behind" }] })).unwrap();
+        assert_eq!(icon_tooltip(&app, Some(&both), &[]), "Updates\nA runner update\nThe runner needs updating");
+        assert_eq!(runner_lines(Some(&launcher)), ["launch.mjs has changed on main. Updating it stops nothing; the new one starts next time your Mac restarts."]);
+        assert_eq!(launcher_button(&launcher).map(|b| (b.0, b.2)), Some(("Update it", false)));
+        // What the runner is doing about it (runner.reinstall): only a failure is Mike's.
+        let reinstall = |r: Value| RunnerUpdates::decode(&json!({ "state": "idle", "launcherChanged": true, "launcherStages": true, "launcherReason": "Threadbear Runner.app was built from older launcher sources than main's.", "reinstall": r })).unwrap();
+        // A runner from 14 Nov reinstalls once idle: no button, no promise that nothing stops.
+        let older = RunnerUpdates::decode(&json!({ "state": "idle", "launcherChanged": true, "launcherReason": "Threadbear Runner.app was built from older launcher sources than main's.", "reinstall": { "state": "waiting" } })).unwrap();
+        assert_eq!(launcher_button(&older), None);
+        assert_eq!(runner_lines(Some(&older)), ["Threadbear Runner.app was built from older launcher sources than main's. It's updated once the runner itself is, a few minutes after main."]);
+        let auto = reinstall(json!({ "state": "waiting", "auto": true }));
+        assert!(!needs_you(&app, Some(&auto)), "it sorts itself out");
+        assert!(shown(&app, Some(&auto)));
+        assert_eq!(icon_tooltip(&app, Some(&auto), &[]), "Updates\nThe runner is updating");
+        let running = reinstall(json!({ "state": "running", "logFile": "/x/reinstall.log" }));
+        assert!(!needs_you(&app, Some(&running)));
+        assert_eq!(runner_lines(Some(&running)), ["Updating Threadbear Runner. Nothing stops; the new one starts next time your Mac restarts."]);
+        assert_eq!(launcher_button(&running).map(|b| (b.0, b.2)), Some(("Updating", true)));
+        // Staged: nothing more to do until the Mac restarts, so no dot at all.
+        let staged = reinstall(json!({ "state": "staged", "logFile": "/x/reinstall.log" }));
+        assert!(!needs_you(&app, Some(&staged)));
+        assert!(!staged.is_pending());
+        assert_eq!(runner_lines(Some(&staged)), ["Threadbear Runner.app was built from older launcher sources than main's. The update is in place, and starts next time your Mac restarts."]);
+        assert_eq!(launcher_button(&staged), None);
+        let failed = reinstall(json!({ "state": "failed", "reason": "launch.mjs doesn't load.", "logFile": "/x/reinstall.log" }));
+        assert!(needs_you(&app, Some(&failed)));
+        assert_eq!(icon_tooltip(&app, Some(&failed), &[]), "Updates\nThe runner's update didn't work");
+        assert_eq!(runner_lines(Some(&failed)), ["The runner's update didn't work: launch.mjs doesn't load."]);
+        assert_eq!(failed.reinstall.as_ref().and_then(|r| r.log_file.as_deref()), Some("/x/reinstall.log"));
+        assert_eq!(launcher_button(&failed).map(|b| (b.0, b.2)), Some(("Try again", false)));
+        let behind = RunnerUpdates::decode(&json!({ "state": "idle", "behindRunners": [{ "name": "mac-mini", "problem": "3 days behind" }] })).unwrap();
         assert!(needs_you(&app, Some(&behind)));
         assert_eq!(icon_tooltip(&app, Some(&behind), &[]), "Updates\nA runner isn't following GitHub's main");
-        assert_eq!(runner_lines(Some(&behind)), ["bruce isn't following GitHub's main properly: 3 days behind"]);
+        assert_eq!(runner_lines(Some(&behind)), ["mac-mini isn't following GitHub's main properly: 3 days behind"]);
         let draining = RunnerUpdates::decode(&json!({ "state": "idle", "oldRunners": [{ "version": "0.1.0", "threads": ["t1", "t2"] }] })).unwrap();
         assert_eq!(runner_lines(Some(&draining)), ["2 threads are finishing their turns on the previous version. Each moves to the new one when its turn ends."]);
         assert_eq!(runner_lines(Some(&idle)), ["The runner is up to date."]);
@@ -851,6 +1061,27 @@ mod tests {
         let waiting = AppSide { running: Some("abc1234".into()), waiting: true, ..Default::default() };
         assert!(shown(&waiting, None) && !needs_you(&waiting, None));
         assert_eq!(app_line(&waiting), "The app has a new version on main, waiting for a Mac to build it on.");
+    }
+
+    #[test]
+    fn an_app_waiting_for_main_to_settle_is_pending() {
+        let app = AppSide { settling: true, ..Default::default() };
+        assert!(app.is_pending() && shown(&app, None) && !needs_you(&app, None));
+        assert_eq!(app_line(&app), "The app has a new version on main, waiting for ten quiet minutes before building.");
+    }
+
+    // Mike, 13 Nov: a countdown that starts again when he does something,
+    // and otherwise what it's waiting for.
+    #[test]
+    fn a_staged_app_says_what_its_restart_waits_on() {
+        use crate::app_update::RestartWait;
+        let staged = |wait| AppSide { running: Some("abc1234".into()), staged: Some("def5678".into()), wait, ..Default::default() };
+        assert_eq!(app_line(&staged(None)), "The app's next version (def5678) is ready. It switches in when you're not using the app, or now.");
+        assert_eq!(app_line(&staged(Some(RestartWait::Countdown(3)))), "The app's next version (def5678) is ready. It switches in 3s if you leave the app alone, or now.");
+        assert_eq!(
+            app_line(&staged(Some(RestartWait::Held("the message box in “Fix it” is sent or cleared".into())))),
+            "The app's next version (def5678) is ready. It switches in once the message box in “Fix it” is sent or cleared, or now."
+        );
     }
 
     #[test]
@@ -881,13 +1112,5 @@ mod tests {
         let failed = Upstream { state: "failed".into(), reason: Some("no network".into()), ..Default::default() };
         assert_eq!(upstream_line(Some(&failed)).as_deref(), Some("Couldn't check for Mike's releases: no network"));
         assert_eq!(release_date("release/2026-13-01"), "release/2026-13-01");
-    }
-
-    #[test]
-    fn the_install_command_starts_from_the_checkout() {
-        assert_eq!(install_command(Some("/Users/me/dev/threadbear"), "/Users/me"), "~/dev/threadbear/runner/scripts/install-runner.sh");
-        assert_eq!(install_command(Some("/opt/threadbear"), "/Users/me"), "/opt/threadbear/runner/scripts/install-runner.sh");
-        assert_eq!(install_command(Some("/Users/me2/x"), "/Users/me"), "/Users/me2/x/runner/scripts/install-runner.sh");
-        assert_eq!(install_command(None, "/Users/me"), "~/threadbear/runner/scripts/install-runner.sh");
     }
 }

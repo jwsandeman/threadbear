@@ -19,6 +19,8 @@ import type { ThreadState } from '../runner.ts';
 import { checkImages, effortTitle, isClaudeModel, modelRow, modelTitle, newRuntime, oneLine, titleFrom, userMessage } from '../runner.ts';
 import { providerInfo, providerName } from '../providers.ts';
 import { cutSafely } from '../safe-cut.ts';
+import { experimentOn } from '../experiments.ts';
+import { findSameWork, sameWorkNote, type SameWorkCandidate } from '../same-work.ts';
 
 export const newThreadsPart = {
   create(this: Runner, params: {
@@ -37,6 +39,9 @@ export const newThreadsPart = {
     // worktree per thread.
     worktree?: boolean;
     startedBy?: ThreadStartedBy;
+    // Not to sit under the thread in startedBy in the sidebar
+    // (docs/protocol.md, "Nested threads").
+    detached?: boolean;
     // Started by a sandboxed thread's agent in a sandbox folder: shut in
     // one too (ThreadRecord.confined).
     confined?: boolean;
@@ -60,6 +65,8 @@ export const newThreadsPart = {
     }
     const { st, notes } = this.makeThread(params);
     if (projectIds.length) this.projects!.changeMembership(st.rec.id, { add: projectIds, by: 'mike' });
+    const sameWork = params.text?.trim() && experimentOn(this.cfg.home, 'sameWork') ? this.findSameWork(st, params.text) : undefined;
+    if (sameWork) notes.push(sameWork);
     const turnId = this.sendTo(st, params.text ?? '', params.images ?? [], { origin: params.origin, scheduleId: params.scheduleId });
     // Under the first turn, so they read as part of starting it.
     for (const text of notes) this.emit(st, { type: 'system.note', text }, st.rt.turn?.turnId ?? turnId);
@@ -158,6 +165,53 @@ export const newThreadsPart = {
     return { threads: made.reverse() };
   },
 
+  // Open threads that may already be doing what a new thread's first
+  // message asks (same-work.ts), kept on the record for its first
+  // session's instructions. Returns a line for Mike's transcript, or
+  // undefined when there are none. Never fails the create.
+  findSameWork(this: Runner, st: ThreadState, text: string): string | undefined {
+    const { rec } = st;
+    try {
+      const candidates: SameWorkCandidate[] = [];
+      const me = this.authorityNow(rec.id);
+      for (const other of this.threads.values()) {
+        const o = other.rec;
+        // Not itself, the thread that started it (its starter knows what
+        // it's doing), another run of the same schedule, or a sample.
+        if (o.id === rec.id || o.archivedAt || o.sample || o.id === rec.startedBy?.threadId) continue;
+        if (rec.schedule && o.schedule?.id === rec.schedule.id) continue;
+        // Nor one with less access (mode or sandbox) than this one: its
+        // title and words are its agent's own (update_thread), and handing
+        // them to this agent is a message upward that send_message would
+        // ask Mike about first (Daybreak, 12 Nov 2026, finding 111).
+        if (!this.mayTellOf(me, o.id)) continue;
+        candidates.push({
+          id: o.id,
+          title: o.title,
+          asked: o.asked,
+          preview: o.preview,
+          keywords: o.keywords,
+          place: o.worktree && !o.worktree.removedAt ? o.worktree.mainCheckout : o.cwd,
+          projectIds: (o.projects ?? []).map((m) => m.id),
+          status: o.snoozedUntil || o.wakeWhen ? 'snoozed' : o.status === 'running' || o.status === 'starting' ? 'working' : 'idle',
+          lastActivityAt: o.lastActivityAt,
+        });
+      }
+      const matches = findSameWork(text, rec.cwd, (rec.projects ?? []).map((m) => m.id), candidates);
+      const note = sameWorkNote(matches, this.clock.now());
+      if (!note) return undefined;
+      rec.sameWork = note;
+      rec.sameWorkIds = matches.map((m) => m.candidate.id);
+      this.markDirty(st);
+      this.log.info('found threads that may be the same work', { threadId: rec.id, ids: matches.map((m) => m.candidate.id) });
+      const titles = matches.map((m) => `"${m.candidate.title.replace(/\s+/g, ' ').trim()}"`);
+      return `${titles.length === 1 ? 'An open thread' : `${titles.length} open threads`} may already be on this, so its agent will look first: ${titles.join(', ')}.`;
+    } catch (e) {
+      this.log.warn("couldn't look for threads doing the same work", { threadId: rec.id, error: String(e) });
+      return undefined;
+    }
+  },
+
   // The record and state of a new thread, before anything is sent to it:
   // its folder, login, model and effort as create picks them.
   makeThread(this: Runner, params: {
@@ -173,6 +227,7 @@ export const newThreadsPart = {
     scheduleId?: string;
     worktree?: boolean;
     startedBy?: ThreadStartedBy;
+    detached?: boolean;
     confined?: boolean;
     unconfine?: boolean;
   }): { st: ThreadState; notes: string[] } {
@@ -250,6 +305,8 @@ export const newThreadsPart = {
       // renamed, archived or deleted later.
       const from = startedBy.threadId ? this.threads.get(startedBy.threadId) : undefined;
       rec.startedBy = { ...startedBy, ...(from ? { threadTitle: from.rec.title } : {}) };
+      // Only means something for a thread another thread started.
+      if (params.detached && startedBy.kind === 'thread' && startedBy.threadId) rec.detached = true;
     }
     this.store.create(rec);
     const st: ThreadState = { rec, rt: newRuntime(this.clock.now()) };

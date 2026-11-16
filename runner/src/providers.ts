@@ -75,16 +75,29 @@ export const PROVIDER_INFO: Record<Provider, ProviderInfo> = {
     smallJobs: false,
     usageReadings: false,
   },
+  grok: {
+    id: 'grok',
+    name: 'Grok',
+    cliName: 'Grok',
+    loginCommand: 'grok login',
+    // Its models list their own levels (low to xhigh), which narrow this
+    // (AcpSession sets them as the session's thought_level option).
+    effort: 'codex',
+    autoMode: 'asks',
+    sandbox: false,
+    rewind: false,
+    // Threadbear's hook denies every tool for a small job, reads included
+    // (adapters/acp/grok-guard.ts).
+    smallJobs: true,
+    usageReadings: false,
+  },
 };
 
-const ACP: readonly Provider[] = ['cursor', 'opencode'];
-
-// The providers this runner offers: the ACP agents and Oh My Pi only with
-// their experiments on, so with them off nothing of theirs turns up anywhere.
+// The providers this runner offers: Oh My Pi only with its experiment on, so
+// with it off nothing of its turns up anywhere.
 export function activeProviders(home: string): Provider[] {
-  const acp = experimentOn(home, 'acpAgents');
   const omp = experimentOn(home, 'ohMyPi');
-  return PROVIDERS.filter((p) => (p === 'omp' ? omp : acp || !ACP.includes(p)));
+  return PROVIDERS.filter((p) => p !== 'omp' || omp);
 }
 
 // One this build has no row for (a record or another runner's hello from a

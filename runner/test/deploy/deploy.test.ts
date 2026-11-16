@@ -16,7 +16,14 @@ import { pathToFileURL } from 'node:url';
 
 const RUNNER = path.join(import.meta.dirname, '..', '..');
 const FAKE_LAUNCHCTL = path.join(import.meta.dirname, 'fake-launchctl.mjs');
-const NODE = process.execPath;
+// install-runner.sh pins a Homebrew Cellar Node as its opt/ link, so on a
+// Mac whose Node is Homebrew's the plist names that one.
+function stableNode(p: string): string {
+  const m = /^(.*)\/Cellar\/([^/]+)\/[^/]+\/bin\/node$/.exec(p);
+  const opt = m ? path.join(m[1]!, 'opt', m[2]!, 'bin', 'node') : undefined;
+  return opt && fs.existsSync(opt) ? opt : p;
+}
+const NODE = stableNode(process.execPath);
 const LABEL = 'com.mikerosoft.threadbear.runner.devtest';
 const TARGET = `gui/${process.getuid!()}/${LABEL}`;
 const ID_RE = /^\d{8}T\d{6}Z-[0-9a-f]{7,}(-dirty)?$/;
@@ -666,7 +673,7 @@ test('a runner too old for runner.restart: waits until idle, then kickstarts', {
   const fifth = current();
   await runsOn(fifth);
 
-  // Inside a thread it can't wait for itself, so it hands Mike the command.
+  // Inside a thread it can't wait for itself, so it hands Alex the command.
   commit({ v: 6 }, 'sixth');
   r = deploy(['--skip-checks'], { THREADBEAR_THREAD_ID: 'thread-1', THREADBEAR_HOME: home });
   assert.equal(r.status, 0, out(r));
@@ -1023,7 +1030,7 @@ test('no deploy to a LaunchAgent that runs a checkout, or to none', () => {
     assert.equal(r.status, 1, out(r));
     assert.match(r.stderr, /runs from a checkout/);
     assert.match(r.stderr, /Install it with scripts\/install-runner\.sh --home/);
-    // From a thread of that runner it's Mike's to do, not the agent's.
+    // From a thread of that runner it's Alex's to do, not the agent's.
     r = sh('deploy-runner.sh', ['--home', home3, '--label', label, '--dry-run'], { THREADBEAR_THREAD_ID: 't', THREADBEAR_RUNNER_HOME: home3 });
     assert.equal(r.status, 1, out(r));
     assert.match(r.stderr, /the user has to switch it to releases once, from a terminal/);
@@ -1038,6 +1045,42 @@ test('no deploy to a LaunchAgent that runs a checkout, or to none', () => {
     assert.match(r.stderr, /--label com\.mikerosoft\.threadbear\.runner\.devtest, which builds/);
   } finally {
     fs.rmSync(path.join(agents, `${label}.plist`));
+  }
+});
+
+// Homebrew deletes Cellar/<formula>/<version> on the next `brew upgrade`, and
+// a runner pinned to it can't start Node again: no restart, no deploy. Its
+// opt/<formula> link moves to each new version (teodorboev's fork, 9 Nov).
+test('install-runner.sh pins a Homebrew Cellar Node as its opt/ link, which outlives brew upgrade', () => {
+  const brew = fs.mkdtempSync(path.join(os.tmpdir(), 'tb-brew-'));
+  try {
+    const cellarBin = path.join(brew, 'Cellar', 'node', '26.1.0', 'bin');
+    fs.mkdirSync(cellarBin, { recursive: true });
+    fs.symlinkSync(process.execPath, path.join(cellarBin, 'node'));
+    fs.mkdirSync(path.join(brew, 'opt'));
+    fs.symlinkSync(path.join('..', 'Cellar', 'node', '26.1.0'), path.join(brew, 'opt', 'node'));
+    const optBin = path.join(brew, 'opt', 'node', 'bin');
+    const r = sh('install-runner.sh', ['--home', home, '--label', LABEL, '--port', '0', '--path', '/usr/bin:/bin', '--print'], { THREADBEAR_NODE: path.join(cellarBin, 'node') });
+    assert.equal(r.status, 0, out(r));
+    assert.ok(r.stdout.includes(`<string>${path.join(optBin, 'node')}</string>`), out(r));
+    assert.ok(r.stdout.includes(`<string>${optBin}:`), out(r));
+    assert.ok(!r.stdout.includes('Cellar'), out(r));
+    // An opt/ link to another version isn't this Node, so it stays as given.
+    const newer = path.join(brew, 'Cellar', 'node', '27.0.0', 'bin');
+    fs.mkdirSync(newer, { recursive: true });
+    fs.symlinkSync(process.execPath, path.join(newer, 'node'));
+    fs.rmSync(path.join(brew, 'opt', 'node'));
+    fs.symlinkSync(path.join('..', 'Cellar', 'node', '27.0.0'), path.join(brew, 'opt', 'node'));
+    const other = sh('install-runner.sh', ['--home', home, '--label', LABEL, '--port', '0', '--path', '/usr/bin:/bin', '--print'], { THREADBEAR_NODE: path.join(cellarBin, 'node') });
+    assert.equal(other.status, 0, out(other));
+    assert.ok(other.stdout.includes(`<string>${path.join(cellarBin, 'node')}</string>`), out(other));
+    // Without an opt/ link (not Homebrew's layout after all), as given.
+    fs.rmSync(path.join(brew, 'opt'), { recursive: true });
+    const plain = sh('install-runner.sh', ['--home', home, '--label', LABEL, '--port', '0', '--path', '/usr/bin:/bin', '--print'], { THREADBEAR_NODE: path.join(cellarBin, 'node') });
+    assert.equal(plain.status, 0, out(plain));
+    assert.ok(plain.stdout.includes(`<string>${path.join(cellarBin, 'node')}</string>`), out(plain));
+  } finally {
+    fs.rmSync(brew, { recursive: true, force: true });
   }
 });
 
@@ -1060,13 +1103,72 @@ test('install-runner.sh guards: sandbox labels, and not from inside its own thre
   // A busy runner isn't replaced (or removed) without --force.
   setBusy(['t-9']);
   r = sh('install-runner.sh', ['--home', home, '--label', LABEL, '--port', '0', '--path', '/usr/bin:/bin']);
-  assert.equal(r.status, 1, out(r));
+  assert.equal(r.status, 75, out(r));
   assert.match(r.stderr, /1 thread would be cut short/);
   assert.match(r.stderr, /while threads are busy/);
   r = sh('install-runner.sh', ['--uninstall', '--home', home, '--label', LABEL]);
   assert.equal(r.status, 1, out(r));
   setBusy([]);
   assert.equal(launchctl('print', TARGET), 0, 'still installed');
+});
+
+test('--stage puts the new launch.mjs and plist in place with threads busy, stopping and loading nothing', { timeout: 120_000 }, async () => {
+  const installed = path.join(runnerDir(), 'launch.mjs');
+  const launchSrc = path.join(rdir, 'launch.mjs');
+  const plistFile = path.join(agents, `${LABEL}.plist`);
+  const pristine = fs.readFileSync(launchSrc, 'utf8');
+  const before = current();
+  const calls = launchctlCalls().length;
+  fs.writeFileSync(launchSrc, pristine + '\n// staged\n');
+  commit({ v: 'staged launch' }, 'launch.mjs change to stage');
+  // Busy doesn't matter: nothing is stopped.
+  setBusy(['t-9']);
+  fs.rmSync(plistFile);
+  let r = sh('install-runner.sh', ['--home', home, '--label', LABEL, '--port', '0', '--path', '/usr/bin:/bin', '--stage']);
+  assert.equal(r.status, 0, out(r));
+  assert.match(r.stdout, /nothing was stopped/);
+  assert.equal(fs.readFileSync(installed, 'utf8'), pristine + '\n// staged\n', 'launch.mjs staged');
+  assert.ok(fs.existsSync(plistFile), 'plist written');
+  assert.equal(spawnSync('plutil', ['-lint', plistFile]).status, 0);
+  assert.equal(current(), before, 'no release built or switched');
+  assert.deepEqual(launchctlCalls().slice(calls).filter((c) => c[0] !== 'print'), [], 'no bootout, bootstrap or kickstart');
+  assert.equal(launchctl('print', TARGET), 0, 'still loaded, still running');
+  // Only with a plain install: never quietly printing or uninstalling instead.
+  r = sh('install-runner.sh', ['--home', home, '--label', LABEL, '--stage', '--print']);
+  assert.equal(r.status, 1, out(r));
+  r = sh('install-runner.sh', ['--home', home, '--label', LABEL, '--stage', '--uninstall']);
+  assert.equal(r.status, 1, out(r));
+  assert.match(r.stderr, /only goes with a plain install/);
+  assert.equal(launchctl('print', TARGET), 0, 'still installed');
+  // Another Node: a full reinstall's job, as the running supervisor would
+  // go on starting releases on the old one until the next login.
+  const otherNode = fs.mkdtempSync(path.join(os.tmpdir(), 'tb-other-node-'));
+  fs.symlinkSync(NODE, path.join(otherNode, 'node'));
+  r = sh('install-runner.sh', ['--home', home, '--label', LABEL, '--port', '0', '--path', '/usr/bin:/bin', '--stage', '--node', path.join(otherNode, 'node')]);
+  fs.rmSync(otherNode, { recursive: true, force: true });
+  assert.equal(r.status, 1, out(r));
+  assert.match(r.stderr, /Changing the Node needs a full reinstall/);
+  // A LaunchAgents folder it can't write to: refused before the app or
+  // launch.mjs change, so the runner's check still sees it behind.
+  fs.writeFileSync(launchSrc, pristine + '\n// unwritable\n');
+  commit({ v: 'unwritable' }, 'launch.mjs change for an unwritable folder');
+  fs.chmodSync(agents, 0o555);
+  try {
+    r = sh('install-runner.sh', ['--home', home, '--label', LABEL, '--port', '0', '--path', '/usr/bin:/bin', '--stage']);
+  } finally {
+    fs.chmodSync(agents, 0o755);
+  }
+  assert.equal(r.status, 1, out(r));
+  assert.match(r.stderr, /nothing was changed/);
+  assert.equal(fs.readFileSync(installed, 'utf8'), pristine + '\n// staged\n', 'launch.mjs left as it was');
+  assert.deepEqual(fs.readdirSync(agents).filter((f) => f.includes('.plist.')), [], 'no temp plist left behind');
+  // Back as it was for the tests below.
+  setBusy([]);
+  fs.writeFileSync(launchSrc, pristine);
+  commit({ v: 'unstaged' }, 'launch.mjs back');
+  r = sh('install-runner.sh', ['--home', home, '--label', LABEL, '--port', '0', '--path', '/usr/bin:/bin', '--stage']);
+  assert.equal(r.status, 0, out(r));
+  assert.equal(fs.readFileSync(installed, 'utf8'), pristine);
 });
 
 test('reinstalling checks everything first, builds from HEAD, and puts the old setup back if the new one fails', { timeout: 240_000 }, async () => {
@@ -1086,7 +1188,7 @@ test('reinstalling checks everything first, builds from HEAD, and puts the old s
   commit({ v: 'launch change', goodAfterMs: 1500 }, 'launch.mjs change');
   setBusy(['t-9']);
   let r = install();
-  assert.equal(r.status, 1, out(r));
+  assert.equal(r.status, 75, out(r));
   assert.match(r.stderr, /while threads are busy/);
   assert.equal(fs.readFileSync(installed, 'utf8'), oldLaunch, 'launch.mjs untouched');
   assert.equal(current(), before, 'no release built');

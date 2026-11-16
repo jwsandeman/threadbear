@@ -60,6 +60,59 @@ pub struct Experiment {
     pub on: bool,
 }
 
+/// One reviewer in Settings > General > Code review, in Mike's order
+/// (runner/src/lab-reviewers.ts): a provider, with the model and effort it
+/// reviews on when it names them (else the provider's default, at high).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LabReviewer {
+    pub provider: String,
+    pub model: Option<String>,
+    pub effort: Option<String>,
+}
+
+impl LabReviewer {
+    pub fn new(provider: &str) -> LabReviewer {
+        LabReviewer { provider: provider.to_owned(), model: None, effort: None }
+    }
+
+    fn decode(v: &Value) -> Option<LabReviewer> {
+        let provider = v["provider"].as_str().filter(|p| !p.is_empty())?.to_owned();
+        let text = |k: &str| v[k].as_str().filter(|s| !s.is_empty()).map(str::to_owned);
+        Some(LabReviewer { provider, model: text("model"), effort: text("effort") })
+    }
+
+    pub fn json(&self) -> Value {
+        let mut v = serde_json::json!({ "provider": self.provider });
+        if let Some(model) = &self.model {
+            v["model"] = Value::from(model.clone());
+        }
+        if let Some(effort) = &self.effort {
+            v["effort"] = Value::from(effort.clone());
+        }
+        v
+    }
+}
+
+/// The change `settings.update` takes for a whole list.
+pub fn reviewers_change(list: &[LabReviewer]) -> Value {
+    serde_json::json!({ "labReviewers": list.iter().map(LabReviewer::json).collect::<Vec<_>>() })
+}
+
+/// The list with the reviewer `dragged` dropped on `onto`'s row: it takes
+/// that place and the rest close up, as a runner card dropped on another
+/// does. None when nothing moves.
+pub fn reviewer_dropped(list: &[LabReviewer], dragged: &str, onto: &str) -> Option<Vec<LabReviewer>> {
+    let from = list.iter().position(|r| r.provider == dragged)?;
+    let to = list.iter().position(|r| r.provider == onto)?;
+    if from == to {
+        return None;
+    }
+    let mut out = list.to_vec();
+    let moved = out.remove(from);
+    out.insert(to, moved);
+    Some(out)
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct RunnerSettings {
     pub default_cwd: String,
@@ -68,9 +121,15 @@ pub struct RunnerSettings {
     /// Whether the runner sends `labReview` at all; an older one doesn't, and
     /// Settings then shows no switch.
     pub lab_review_supported: bool,
+    /// Who reviews, in order. None from a runner from before the list, and
+    /// Settings then shows only the switch.
+    pub lab_reviewers: Option<Vec<LabReviewer>>,
     /// Keep the Mac out of idle sleep while threads work. None from a runner
     /// that isn't on a Mac (or is too old), and Settings then hides it.
     pub keep_awake: Option<bool>,
+    /// Full sync (runner.json's sync.full), as it'll be from the runner's next
+    /// start. None from a runner from before it, and Settings then hides it.
+    pub full_sync: Option<bool>,
     pub bring_in: BringIn,
     pub bring_in_supported: bool,
     /// The pool whose Claude logins answer small jobs (titles, the
@@ -97,7 +156,9 @@ impl RunnerSettings {
             default_cwd: v["defaultCwd"].as_str().unwrap_or("").to_owned(),
             lab_review: v["labReview"].as_bool().unwrap_or(true),
             lab_review_supported: v.get("labReview").is_some_and(Value::is_boolean),
+            lab_reviewers: v["labReviewers"].as_array().map(|list| list.iter().filter_map(LabReviewer::decode).collect()),
             keep_awake: v["keepAwake"].as_bool(),
+            full_sync: v["fullSync"].as_bool(),
             bring_in_supported: bring_in.is_some(),
             bring_in: bring_in.unwrap_or(BringIn::STANDARD),
             pool: models["pool"].as_str().filter(|p| !p.is_empty()).map(str::to_owned),
@@ -159,12 +220,13 @@ mod tests {
     #[test]
     fn settings_read_leniently() {
         let s = RunnerSettings::decode(&json!({
-            "defaultCwd": "/Users/m/dev/me/misc", "labReview": false, "keepAwake": true, "bringIn": "important",
+            "defaultCwd": "/Users/alex/code/misc", "labReview": false, "keepAwake": true, "fullSync": false, "bringIn": "important",
             "models": { "pool": "claude", "privateFolders": ["~/private"] },
             "experiments": [{ "id": "gpuiApp", "name": "GPUI app", "does": "The `GPUI`  app.", "on": true }, { "id": "bare" }],
         }));
         assert!(!s.lab_review && s.lab_review_supported);
         assert_eq!(s.keep_awake, Some(true));
+        assert_eq!(s.full_sync, Some(false));
         assert_eq!(s.bring_in, BringIn::Important);
         assert_eq!(s.pool.as_deref(), Some("claude"));
         assert_eq!(s.private_folders, vec!["~/private"]);
@@ -173,6 +235,7 @@ mod tests {
         let old = RunnerSettings::decode(&json!({ "defaultCwd": "/x", "models": {} }));
         assert!(old.lab_review && !old.lab_review_supported, "an older runner shows no Code review switch");
         assert!(!old.pool_supported && old.keep_awake.is_none() && !old.bring_in_supported);
+        assert!(old.full_sync.is_none(), "an older runner shows no Full sync switch");
         let none = RunnerSettings::decode(&json!({ "models": { "pool": null } }));
         assert!(none.pool_supported && none.pool.is_none(), "null is None, and the runner has the setting");
     }
@@ -181,5 +244,21 @@ mod tests {
     fn bring_in_keeps_a_custom_number_of_days() {
         let titles: Vec<String> = BringIn::choices(BringIn::Every(10)).into_iter().map(BringIn::title).collect();
         assert_eq!(titles, vec!["Every day", "Every 3 days", "Every 5 days", "Every week", "Every 10 days", "Every 2 weeks", "Only important ones", "Never"]);
+    }
+
+    #[test]
+    fn reviewers_read_save_and_reorder() {
+        let s = RunnerSettings::decode(&json!({ "labReviewers": [{ "provider": "grok", "model": "grok-4.7", "effort": "high" }, { "provider": "" }, { "provider": "codex" }] }));
+        let list = s.lab_reviewers.expect("sent, so shown");
+        assert_eq!(list, vec![LabReviewer { provider: "grok".into(), model: Some("grok-4.7".into()), effort: Some("high".into()) }, LabReviewer::new("codex")], "one with no provider is left out");
+        assert_eq!(reviewers_change(&list), json!({ "labReviewers": [{ "provider": "grok", "model": "grok-4.7", "effort": "high" }, { "provider": "codex" }] }), "a reviewer with no model or effort sends neither");
+        assert!(RunnerSettings::decode(&json!({})).lab_reviewers.is_none(), "an older runner: no list");
+
+        let three = vec![LabReviewer::new("codex"), LabReviewer::new("claude"), LabReviewer::new("grok")];
+        let order = |l: Vec<LabReviewer>| l.into_iter().map(|r| r.provider).collect::<Vec<_>>();
+        assert_eq!(order(reviewer_dropped(&three, "grok", "codex").unwrap()), vec!["grok", "codex", "claude"], "dropped on the first: goes first");
+        assert_eq!(order(reviewer_dropped(&three, "codex", "grok").unwrap()), vec!["claude", "grok", "codex"], "dropped on the last: goes last");
+        assert!(reviewer_dropped(&three, "codex", "codex").is_none());
+        assert!(reviewer_dropped(&three, "gemini", "codex").is_none());
     }
 }

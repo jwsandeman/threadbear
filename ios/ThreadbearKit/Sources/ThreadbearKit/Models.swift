@@ -561,7 +561,10 @@ public struct PhoneSchedule: Codable, Sendable, Hashable, Identifiable {
 
 public struct PhoneMessage: Codable, Sendable, Hashable, Identifiable {
     /// `tool` is one line for a tool call (backend API 2, phone:messages).
-    public enum Role: String, Codable, Sendable { case user, assistant, tool }
+    /// `note` is the line a thread writes when its login runs out and it
+    /// moves to another or waits for room (backend API 79, asked for with
+    /// `notes`): a quiet line of its own, never part of a turn's work.
+    public enum Role: String, Codable, Sendable { case user, assistant, tool, note }
 
     public var id: Int { seq }
     public var seq: Int
@@ -725,6 +728,10 @@ public struct ThreadPictures: Sendable, Hashable {
             }
             .sorted { $0.0 < $1.0 }
             .map(\.1)
+            // Each is a download and a bitmap: one message's are held to the
+            // same count as its Markdown pictures (Daybreak finding 130).
+            .prefix(MarkdownBlock.maxPictures)
+            .map { $0 }
     }
 
     /// His message's words for the bubble, with the runner's "[2 pictures]"
@@ -747,11 +754,18 @@ public struct ThreadPictures: Sendable, Hashable {
         return n
     }
 
-    /// A web picture needs nothing uploaded. Anything else unmatched is on
-    /// the Mac.
-    public static func webURL(_ src: String) -> URL? {
-        guard src.lowercased().hasPrefix("https://") else { return nil }
-        return URL(string: src)
+    /// A web address written as a picture that isn't one of the thread's
+    /// own: shown as a link to open, never fetched by the app. Only pictures
+    /// Threadbear stored (`image(src:seq:)`, URLs into the backend's file
+    /// storage) load by themselves; an agent's or another Mac's address
+    /// could be anyone's server or one on Mike's own network, and loading it
+    /// would tell them he's reading (Daybreak findings 129 and 133, 15 Nov
+    /// 2026; SECURITY.md, "Pictures in replies"). Anything else unmatched is
+    /// on the Mac.
+    public static func webLink(_ src: String) -> URL? {
+        let lower = src.lowercased()
+        guard lower.hasPrefix("https://") || lower.hasPrefix("http://"), let url = URL(string: src), url.host?.isEmpty == false else { return nil }
+        return url
     }
 
     /// Pinned pictures by the message they go under: the turn's reply, the
@@ -763,10 +777,13 @@ public struct ThreadPictures: Sendable, Hashable {
         }
         var under: [Int: [MessageImage]] = [:]
         var trailing: [MessageImage] = []
+        // At most maxPictures under one reply, or trailing: a runner key can
+        // pin hundreds of stored pictures to one message, and each is a
+        // download and a bitmap (Daybreak finding 130).
         for image in images where image.pinned == true {
             if let reply = replies.first(where: { $0 >= image.seq }) {
-                under[reply, default: []].append(image)
-            } else {
+                if under[reply, default: []].count < MarkdownBlock.maxPictures { under[reply, default: []].append(image) }
+            } else if trailing.count < MarkdownBlock.maxPictures {
                 trailing.append(image)
             }
         }
@@ -785,10 +802,14 @@ public enum ThreadItem: Identifiable, Hashable, Sendable {
     /// "6 min later · Mine the repo finished" before a turn the agent
     /// started by itself (Turns.fold).
     case gap(TurnGap)
+    /// "Moved to alex@example.org: mike@example.net hit its 5-hour limit":
+    /// the runner's line when a thread's login ran out (Turns.fold).
+    case note(PhoneMessage)
 
     public var id: Int {
         switch self {
         case let .message(m): m.seq
+        case let .note(m): m.seq
         case let .tools(items): items.first?.seq ?? 0
         // Negative, so it never meets the seq of the message it folds.
         case let .worked(w): -(w.items.first?.id ?? 0) - 1
@@ -800,7 +821,9 @@ public enum ThreadItem: Identifiable, Hashable, Sendable {
     public static func group(_ messages: [PhoneMessage]) -> [ThreadItem] {
         var out: [ThreadItem] = []
         for m in messages {
-            if m.role == .tool {
+            if m.role == .note {
+                out.append(.note(m))
+            } else if m.role == .tool {
                 if case var .tools(items)? = out.last {
                     items.append(m)
                     out[out.count - 1] = .tools(items)
@@ -928,6 +951,8 @@ public enum BackendCompatibility {
     /// an older backend still gets phone:thread and the runner's paging.
     public static let currentAPIVersion = 35
     public static let messagePagesAPIVersion = 2
+    /// From 79 phone:messages gives a login's notes to an app that asks.
+    public static let loginNotesAPIVersion = 79
     /// From 3 each phone chooses when it's notified (phone:setNotifications).
     public static let notificationSettingAPIVersion = 3
     /// From 4 registerDevice takes the phone's relay key.

@@ -103,7 +103,7 @@ test('editing during a turn stops it first; messages queued behind it go, ones s
   assert.deepEqual(after, ['Edited', 'sent during the edit']);
 });
 
-test('only Mike\'s own messages that started a turn can be edited', async () => {
+test('only Alex\'s own messages that started a turn can be edited', async () => {
   const h = makeHarness();
   const { thread, s, seq } = await twoTurns(h);
   const bad = async (seqToEdit: number, re: RegExp) => {
@@ -114,8 +114,8 @@ test('only Mike\'s own messages that started a turn can be edited', async () => 
   h.runner.send(thread.id, 'steered in');
   const steered = log(h, thread.id).find((e) => e.type === 'user.message' && e.text === 'steered in')!.seq;
   await bad(steered, /already running/);
-  h.runner.interrupt(thread.id);
-  s.result('interrupted');
+  // Finish both inputs: an early Stop holds later automatic messages.
+  s.result('completed', undefined, undefined, { answered: [...h.runner.mustGet(thread.id).rt.turn!.messages] });
   // Not a message at all, and one from the runner.
   await bad(seq + 1, /no message/);
   h.runner.send(thread.id, 'Runner restarted, carry on', [], { origin: 'runner' });
@@ -228,4 +228,33 @@ test('an edit into a slash command the runner answers: messages sent meanwhile s
   // The message sent meanwhile started a CLI, cut at the edit.
   assert.equal(next.sent.at(-1)?.text, 'sent during the edit');
   assert.equal(next.opts.resumeAt, 'entry-1');
+});
+
+// A handover that began while an edit was cutting the session back let the
+// thread go (an edit didn't count as busy there or for the restart), so
+// the files were put back but thread.rewound was never written and the
+// next runner resumed the uncut session (13 Nov 2026, the implicit state
+// machines scan). The edit now keeps the thread until it's done.
+test('a handover that begins while an edit cuts the session back keeps the thread until the edit is done', async () => {
+  const h = makeHarness();
+  let release: (() => void) | undefined;
+  const { thread, file, seq } = await twoTurns(h, async () => {
+    await new Promise<void>((r) => (release = r));
+    return { resumeAt: 'entry-1' };
+  });
+  const editing = h.runner.editMessage(thread.id, seq, 'Write it to plan.txt instead');
+  for (let i = 0; !release; i++) {
+    assert.ok(i < 200, 'the rewind never started');
+    await tick();
+  }
+  const handedOver: string[] = [];
+  const drain = h.runner.beginDrain([], { onHandedOver: (id) => handedOver.push(id) });
+  await tick(5);
+  assert.ok(h.runner.threads.has(thread.id), 'kept while the edit runs');
+  release!();
+  const r = await editing;
+  await drain;
+  assert.ok(log(h, thread.id).some((e) => e.type === 'thread.rewound'));
+  assert.equal(fs.readFileSync(file, 'utf8'), 'first\n');
+  assert.ok(r.turnId);
 });

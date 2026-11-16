@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { PersistedEvent } from '../../src/protocol.ts';
-import { runCommandProblem, offersToTakeItBack, TRY_IT_FIRST, archiveFromTool, snoozeFromTool, bylineFromTool, endedThisTurn, CODEX_END_TURN_DESCRIPTION, CODEX_ONE_REPLY_DESCRIPTION, END_TURN_DESCRIPTION, END_TURN_FULL_NAME, endTurnDescription, needsFromText, needsFromTool, ONE_REPLY_DESCRIPTION, replyWithoutRepeat, splitReplySection, summaryFromTool, summaryMarkdown, turnReply } from '../../src/needs.ts';
+import { offersToTakeItBack, TRY_IT_FIRST, archiveFromTool, snoozeFromTool, bylineFromTool, endedThisTurn, CODEX_END_TURN_DESCRIPTION, CODEX_ONE_REPLY_DESCRIPTION, END_TURN_DESCRIPTION, END_TURN_FULL_NAME, endTurnDescription, needsFromText, needsFromTool, ONE_REPLY_DESCRIPTION, replyAsks, replyAsksNudge, replyWithoutRepeat, splitReplySection, summaryFromTool, summaryMarkdown, turnReply } from '../../src/needs.ts';
 import { END_TURN_TOOL } from '../../src/needs.ts';
 import { SERVER_NAME } from '../../src/threadbear-mcp.ts';
 import { ClaudeNormalizer, fileContext } from '../../src/adapters/claude/normalize.ts';
@@ -31,9 +31,9 @@ test('end_turn input: nothing, you with asks, and junk falls back', () => {
 
 test('end_turn input: next steps go with needs nothing only', () => {
   // Mike, 30 Oct: follow-ups in the prose got lost under a done card.
-  assert.deepEqual(needsFromTool({ needs: 'nothing', next: [' Show Bruce pictures ', '', 7, 'Show Bruce pictures', 'Start Bruce threads'] }), {
+  assert.deepEqual(needsFromTool({ needs: 'nothing', next: [' Show Mac mini pictures ', '', 7, 'Show Mac mini pictures', 'Start Mac mini threads'] }), {
     needs: 'nothing',
-    next: ['Show Bruce pictures', 'Start Bruce threads'],
+    next: ['Show Mac mini pictures', 'Start Mac mini threads'],
   });
   assert.deepEqual(needsFromTool({ summary: ['Done.'], next: ['Do the next bit'] }), { needs: 'nothing', next: ['Do the next bit'] });
   assert.equal(needsFromTool({ needs: 'nothing', next: ['a', 'b', 'c', 'd'] })!.next!.length, 3);
@@ -158,15 +158,15 @@ test('the section: follow-ups listed after "nothing needed" are the done card\'s
     '',
     'So everything from this thread is now live:',
     '- **On your Mac:** the app records calls again.',
-    '- **On Bruce:** new calls get their speakers labelled by Nemotron 3 Diarization.',
+    '- **On Mac mini:** new calls get their speakers labelled by Nemotron 3 Diarization.',
     '',
     'Nothing needed from you right now; the work is finished. Two follow-ups are worth doing:',
-    "- **Check your next call:** confirm Bruce actually used Nemotron on it. Its background service is the one setup I couldn't test before deploying.",
+    "- **Check your next call:** confirm Mac mini actually used Nemotron on it. Its background service is the one setup I couldn't test before deploying.",
     '- **Try a bigger Whisper model:** the transcribed words are now the weaker part of the notes.',
   ].join('\n');
   assert.deepEqual(needsFromText(text), {
     needs: 'nothing',
-    next: ['Check your next call: confirm Bruce actually used Nemotron on it', 'Try a bigger Whisper model: the transcribed words are now the weaker part of the notes'],
+    next: ['Check your next call: confirm Mac mini actually used Nemotron on it', 'Try a bigger Whisper model: the transcribed words are now the weaker part of the notes'],
   });
   // A line of lead-in, a cap of three, and long ones cut at a word.
   const many = ['Nothing needed from you right now.', '', 'Worth doing next:', '', '1. One', '2. Two', '3. Three', '4. Four'].join('\n');
@@ -275,7 +275,7 @@ test("turnReply: the thread's own tools after the message don't count as work, n
   assert.deepEqual(turnReply(log(user(), started, call('b1', 'Bash'), text('Started the build; back when it finishes.'), call('e1', END))), { landed: true, replied: true });
 });
 
-test('turnReply: only the current turn counts, and a message from Mike mid-turn wants a reply of its own', () => {
+test('turnReply: only the current turn counts, and a message from Alex mid-turn wants a reply of its own', () => {
   // Last turn's answer doesn't carry over.
   assert.deepEqual(turnReply(log(user(), { type: 'turn.started', turnId: 'turn-0' }, text('Earlier answer.'), { type: 'turn.completed', turnId: 'turn-0', outcome: 'completed', durationMs: 1 }, user('again'), started, call('e1', END))), { landed: true, replied: false });
   assert.deepEqual(turnReply(log(user(), started, text('Working on it.'), user('also do X'), call('e1', END))), { landed: true, replied: false });
@@ -406,7 +406,7 @@ test('one reply: a closing section comes off the reply, bold, # or a bare line',
 // write the card out again, and that looked like not using the card at all.
 test('one reply: a section repeating the card comes off the reply, and one saying more stays', () => {
   const card = { needs: 'you' as const, asks: [{ action: 'Press Bring Them In.' }] };
-  const repeat = 'It is ready.\n\n**What I need from you**\n1. On Tinker Desk, press Bring Them In, then tell me.';
+  const repeat = 'It is ready.\n\n**What I need from you**\n1. On build-box, press Bring Them In, then tell me.';
   assert.equal(replyWithoutRepeat(repeat, card), 'It is ready.');
   // What comes after the list isn't on the card, so it stays.
   assert.equal(replyWithoutRepeat(`${repeat}\n  Say how it went.\n\nOne follow-up: try a clash next.`, card), 'It is ready.\n\nOne follow-up: try a clash next.');
@@ -421,8 +421,8 @@ test('one reply: a section repeating the card comes off the reply, and one sayin
   assert.equal(replyWithoutRepeat(repeat, { needs: 'nothing', next: ['Try it'] }), repeat);
 });
 
-// Mike pressed ? on rows in the agent's shorthand, with no reason given
-// (~/dev/me/misc/end-turn-eval/next-rows). Every form of end_turn has to say
+// Alex pressed ? on rows in the agent's shorthand, with no reason given
+// (~/code/misc/end-turn-eval/next-rows). Every form of end_turn has to say
 // how to write one, as agents are on all of them.
 test('every form of end_turn says how to write a follow-up row', () => {
   for (const provider of ['claude', 'codex'] as const) {
@@ -453,14 +453,11 @@ test('offersToTakeItBack knows the answers real cards used, and leaves others al
   assert.ok(!offersToTakeItBack([{ action: 'Can you do it?' }]));
 });
 
-test('a command on an ask has to be what it looks like', () => {
-  const asks = (run: string) => needsFromTool({ needs: 'you', asks: [{ question: 'Run it?', run }] })?.asks;
-  assert.equal(asks('npm test\n')?.[0].run?.command, 'npm test');
-  assert.equal(asks('a\n\tb')?.[0].run?.command, 'a\n\tb');
-  for (const bad of ['echo\u001b[201~', 'rm​ x', 'echo ‮oc', 'a b', ' ', 'x'.repeat(8001)]) {
-    assert.ok(runCommandProblem(bad), JSON.stringify(bad));
-    assert.equal(asks(bad)?.[0].run, undefined);
-  }
+// Run on the card was taken out (14 Nov 2026): a session that loaded
+// end_turn while it was on can still pass asks[].run, which is ignored.
+test("an ask's old run argument is dropped", () => {
+  const asks = needsFromTool({ needs: 'you', asks: [{ question: 'Run it?', run: 'npm test' }] })?.asks;
+  assert.deepEqual(asks, [{ action: 'Run it?' }]);
 });
 
 // Thread dcdc60a3 (11 Nov 2026), and Codex's review of the fix: a notice
@@ -505,4 +502,39 @@ test('WakeRead: a notice handed over with "Now write your reply" opens the turn 
   v.see(note);
   v.see(other);
   assert.equal(v.see({ type: 'assistant.text', itemId: 'm2' }), true);
+});
+
+// The two real ones from the week to 13 Nov 2026 (threads 0222c475, 7a98a6fd),
+// and what the check must leave alone: over 2,935 done replies it found only
+// those two, once a quoted question stopped counting.
+test("replyAsks: a reply's closing question or go-ahead, and nothing softer", () => {
+  const go = "Yes, I think it's ready to go live:\n- **Approved:** Alex Wheaton approved it.\n- **Cost:** about $9 a day.\n\nSay go and I'll merge main into prod, then check on convex.dev that /examples loads.";
+  assert.equal(replyAsks(go), "Say go and I'll merge main into prod, then check on convex.dev that /examples loads.");
+  assert.equal(replyAsks('Four fork fixes are in. Plan and Ask (#8) overlaps the mode you already have. Which do you want to start with?'), 'Which do you want to start with?');
+  // Put to the user mid-paragraph, with a line after it.
+  assert.equal(replyAsks('The fix is on main.\n\nWant me to deploy it now? It takes about two minutes.'), 'Want me to deploy it now?');
+  assert.equal(replyAsks("It's built and tested. I'll release it once you say **go**."), "I'll release it once you say **go**.");
+  assert.equal(replyAsks('Both are ready:\n1. The quick one\n2. The thorough one\n\n**Which should I run?**'), 'Which should I run?');
+  // The agent's own view, an optional offer, a "tell me if it's off" line.
+  assert.equal(replyAsks("It keeps what you'd already got right. I'd say yes, and mention the trust change."), undefined);
+  assert.equal(replyAsks("With 2 failures in 4 days, neither is urgent. Tell me if you want the Cloudflare rule and I'll set it up."), undefined);
+  assert.equal(replyAsks("If the bars are too jumpy, tell me and I'll tune them."), undefined);
+  assert.equal(replyAsks("I won't post anything until you say so."), undefined);
+  // The agent talking, and words it quotes.
+  assert.equal(replyAsks('Why does this matter? Because the deploy sends everything on main. It is all there now.'), undefined);
+  assert.equal(replyAsks('Worth a quick look before someone asks "how is this different?"'), undefined);
+  // A draft for someone else isn't the agent asking.
+  assert.equal(replyAsks("Here's the reply for Keith:\n\n```draft\nDoes Thursday work for you?\n```"), undefined);
+  assert.equal(replyAsks('He wrote:\n\n> Can you ship it today?'), undefined);
+  assert.equal(replyAsks('Done. It is on convex.dev now.'), undefined);
+  assert.equal(replyAsks(''), undefined);
+  // The dot in a name isn't a sentence's end.
+  assert.equal(replyAsks('Release it to convex.dev now, or after v1.2 is out?'), 'Release it to convex.dev now, or after v1.2 is out?');
+});
+
+test('replyAsksNudge quotes the sentence, clipped, and says the reply stands', () => {
+  const n = replyAsksNudge('Which do you want to start with?');
+  assert.match(n, /^Your reply closes by asking the user something \("Which do you want to start with\?"\)/);
+  assert.match(n, /Your message above is the reply: don't write it again/);
+  assert.ok(replyAsksNudge(`Should I ${'really '.repeat(60)}do it?`).length < 800);
 });

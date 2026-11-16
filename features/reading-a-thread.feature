@@ -87,8 +87,8 @@ Feature: Reading a thread
   Scenario: Wait lines sit between the replies, not over them
     Given a thread the agent picked up twice as background jobs finished, called "Land the folder it runs in"
     When I open the thread "Land the folder it runs in"
-    Then the transcript shows a wait line starting "44s later · /Users/mike/.delegate/runs/"
-    And the transcript shows a wait line starting "3 min later · cd /Users/mike/dev/me/threadbear-threads/slot-5"
+    Then the transcript shows a wait line starting "44s later · /Users/alex/.delegate/runs/"
+    And the transcript shows a wait line starting "3 min later · cd /Users/alex/code/threadbear-threads/slot-5"
     And each wait line's words are one line inside its own row
 
   @transcript.rowmenu
@@ -104,9 +104,3 @@ Feature: Reading a thread
     And another Mac's thread with a bash block is open in a panel of its own
     Then that panel's block has its copy icon and no play icon
     And a block in another of this Mac's threads open in a panel of its own has no play icon either
-
-  @manual @gpui-pending @terminal.panel
-  Scenario: A link clicked in the Terminal is checked like a link in a reply
-    When the Terminal shows a hyperlink to a ".command" file
-    And I click the link
-    Then Threadbear asks before opening it

@@ -56,7 +56,7 @@ function toolResult(s: ReturnType<typeof makeHarness>['adapter']['last'], itemId
 // ------------------------------------------------------------ transcripts
 
 test('projectDirName matches how the CLI names folders', () => {
-  assert.equal(projectDirName('/Users/m5-mike/dev/me/misc'), '-Users-m5-mike-dev-me-misc');
+  assert.equal(projectDirName('/Users/alex/code/misc'), '-Users-alex-code-misc');
   assert.equal(projectDirName('/Users/x/.agents/a_b c'), '-Users-x--agents-a-b-c');
 });
 
@@ -220,7 +220,7 @@ test('list, read and account tools', async () => {
   const self = await t.call('read_thread');
   assert.match(self.text, /User \(.*\):\nFirst thread/);
   assert.match(self.text, /Agent \(.*\):\nHello from the agent/);
-  // The runner's resume after a restart isn't Mike's.
+  // The runner's resume after a restart isn't Alex's.
   h.runner.send(a.id, 'The runner restarted on release R. Check your change.', [], { origin: 'runner' });
   const resumed = await t.call('read_thread');
   assert.match(resumed.text, /Runner \(.*\):\nThe runner restarted on release R/);
@@ -297,14 +297,14 @@ test('move_thread on itself switches folder after the turn and carries on with `
   assert.equal((await t.call('move_thread', { folder: '/definitely/not/here' })).error, true);
 });
 
-test("move_thread's `then` to another login isn't taken for Mike: the turn finishes, then it carries on there", async () => {
+test("move_thread's `then` to another login isn't taken for Alex: the turn finishes, then it carries on there", async () => {
   const h = makeHarness(undefined, {}, { accounts: new FakeAccounts(withCodex()) });
   const { thread: me, s } = start(h, 'Move me');
   const t = tools(h, me.id);
   const r = await t.call('move_thread', { folder: '.', account: 'codex-main', then: 'Carry on with the tests' });
   assert.equal(r.error, false, r.text);
   await tick();
-  // As Mike's message it stopped the turn that sent it ("Stopped here so … can take over").
+  // As Alex's message it stopped the turn that sent it ("Stopped here so … can take over").
   assert.equal(s.interrupts, 0, 'the running turn is left alone');
   s.result();
   await tick();
@@ -341,7 +341,7 @@ test('`id` works as a thread id, and a missing one is an error rather than "this
   assert.equal(h.runner.list().length, 2);
 });
 
-test("update_thread leaves a title Mike gave alone unless he asked for the new one", async () => {
+test("update_thread leaves a title Alex gave alone unless he asked for the new one", async () => {
   const h = makeHarness();
   const { thread: me } = start(h, 'Me');
   const { thread: other } = start(h, 'Other');
@@ -350,15 +350,15 @@ test("update_thread leaves a title Mike gave alone unless he asked for the new o
   await t.call('update_thread', { id: other.id, title: 'Agent name' });
   await t.call('update_thread', { id: other.id, title: 'Better agent name' });
   assert.equal(h.runner.get(other.id).title, 'Better agent name');
-  // Mike renames it in the app (threads.update, no titleBy).
-  h.runner.update({ threadId: other.id, title: 'Mike name' });
+  // Alex renames it in the app (threads.update, no titleBy).
+  h.runner.update({ threadId: other.id, title: 'Alex name' });
   const refused = await t.call('update_thread', { id: other.id, title: 'Agent again', snooze: '2h' });
   assert.equal(refused.error, true);
-  assert.match(refused.text, /The user named this thread "Mike name" themselves/);
-  assert.equal(h.runner.get(other.id).title, 'Mike name');
+  assert.match(refused.text, /The user named this thread "Alex name" themselves/);
+  assert.equal(h.runner.get(other.id).title, 'Alex name');
   assert.equal(h.runner.get(other.id).snoozedUntil, undefined, 'nothing else in the refused call changed');
   // The same title, or one Mike asked for, goes through.
-  assert.equal((await t.call('update_thread', { id: other.id, title: 'Mike name', snooze: 'off' })).error, false);
+  assert.equal((await t.call('update_thread', { id: other.id, title: 'Alex name', snooze: 'off' })).error, false);
   assert.equal((await t.call('update_thread', { id: other.id, title: 'Asked for', mikeAsked: true })).error, false);
   assert.equal(h.runner.get(other.id).title, 'Asked for');
   assert.equal((await t.call('update_thread', { id: other.id, title: 'Sneaky' })).error, true, 'still his');
@@ -394,7 +394,7 @@ test('parseWhen and tool titles', () => {
 test('list_accounts shows each login\'s provider, note, room left and models; create and move take Codex accounts', async () => {
   const usage = { windows: [{ kind: 'five_hour' as const, title: '5-hour', remainingPercent: 89 }, { kind: 'weekly' as const, title: 'Weekly', remainingPercent: 78 }], readAt: '2026-10-26T12:00:00Z', source: 'tokenStats' as const };
   const accounts = withCodex().map((a) =>
-    a.id === 'claude-3' ? { ...a, note: 'Convex work only', email: 'three@example.com', usage } : a.id === 'claude-main' ? { ...a, email: 'main@example.com' } : a,
+    a.id === 'claude-3' ? { ...a, note: 'Work only', email: 'three@example.com', usage } : a.id === 'claude-main' ? { ...a, email: 'main@example.com' } : a,
   );
   const h = makeHarness(undefined, { defaults: { cwd: '', models: { codex: 'gpt-6-luna' } } }, { accounts: new FakeAccounts(accounts) });
   h.cfg.defaults.cwd = path.join(h.home, 'work');
@@ -403,7 +403,7 @@ test('list_accounts shows each login\'s provider, note, room left and models; cr
   const t = tools(h, me.id);
   const list = (await t.call('list_accounts')).text;
   assert.match(list, /claude-main {2}main@example\.com {2}\[Claude; usage unknown; default for new threads\]/);
-  assert.match(list, /claude-3 {2}three@example\.com {2}\[Claude; Convex work only; 5-hour 89% left, weekly 78% left\]/);
+  assert.match(list, /claude-3 {2}three@example\.com {2}\[Claude; Work only; 5-hour 89% left, weekly 78% left\]/);
   assert.match(list, /codex-main {2}Codex · main@example\.com {2}\[Codex; usage unknown\]\n {4}models: gpt-6\.1-sol \(default\), gpt-6-luna/);
 
   // claude-main and codex-main share an email: that's refused, not guessed.
@@ -488,11 +488,11 @@ test('end_turn only acknowledges; its description says when to call it', async (
 
 // An agent drafted its answer in thinking, ran two commands and called
 // end_turn; Mike saw a folded work group and a card, twice (28 Oct 2026).
-test('end_turn is refused until the turn has replied to Mike in text', async () => {
+test('end_turn is refused until the turn has replied to Alex in text', async () => {
   const h = makeHarness();
   const { thread, s } = start(h);
   const { call, slept } = tools(h, thread.id);
-  toolCall(s, 'b1', 'Bash', { command: 'grep sammy' });
+  toolCall(s, 'b1', 'Bash', { command: 'grep garden' });
   toolResult(s, 'b1');
   toolCall(s, 'e1', END_TURN, { needs: 'nothing' });
   let r = await call('end_turn', { needs: 'nothing' });
@@ -569,6 +569,243 @@ test('end_turn is taken once a turn', async () => {
   const r2 = await call('end_turn', { summary: ['Done again.'] });
   assert.equal(r2.error, true);
   assert.match(r2.text, /Already ended/);
+});
+
+// Thread 0222c475 (13 Nov 2026): Mike's "Should we get it into production?"
+// landed just before the end_turn that closed off his last answers, and the
+// agent read it with that call's result. Its reply asked for a go over a
+// done card, and a second end_turn would have been "Already ended".
+test('end_turn written before the agent could read a new message is refused, and the next is taken', async () => {
+  for (const oneReply of [true, false]) {
+    const h = makeHarness();
+    const { thread, s } = start(h, 'Not yet');
+    const { call } = tools(h, thread.id, undefined, () => oneReply);
+    const send = async (itemId: string, input: Record<string, unknown>) => {
+      toolCall(s, itemId, END_TURN, input);
+      const r = await call('end_turn', input);
+      s.out({ kind: 'event', event: { type: 'tool.result', itemId, ok: !r.error, text: r.text, truncated: false, images: [] } });
+      return r;
+    };
+    s.text('m1', 'Noted, not releasing yet.');
+    // The message is in the events, and the CLI hasn't started on it.
+    h.runner.send(thread.id, 'Should we get it into production?');
+    let unread = true;
+    s.unreadMessage = () => {
+      const was = unread;
+      unread = false;
+      return was;
+    };
+    const first = await send('e1', oneReply ? { headline: 'Not released yet', needs: 'nothing' } : { needs: 'nothing', summary: ['Left it on main.'] });
+    assert.equal(first.error, true, `${oneReply}: ${first.text}`);
+    assert.match(first.text, /^Not ended: the user sent a message while you were writing this call/);
+    assert.doesNotMatch(first.text, /answer it/i, 'with one reply the answer comes after end_turn');
+    // It reads the message with that refusal, and asks.
+    s.text('m2', 'Yes, I think it is ready to go live.');
+    const ask = oneReply
+      ? { headline: 'Ready to release', needs: 'you', asks: [{ question: 'Release the examples page to convex.dev?', options: [{ label: 'Go' }, { label: 'Not yet' }] }] }
+      : { needs: 'you', summary: ['It is ready to go live.'], asks: [{ action: 'Release the examples page to convex.dev?', why: 'It is approved and on main.', options: ['Go', 'Not yet'] }] };
+    const second = await send('e2', ask);
+    assert.equal(second.error, false, `${oneReply}: ${second.text}`);
+    assert.match(second.text, /Needs you/);
+    if (oneReply) s.text('m3', 'It is approved, on main, and the only commit that would go out.');
+    // The CLI folded the message into the turn, so one result answers both.
+    const ids = s.sent.map((m) => m.id!);
+    s.result('completed', undefined, undefined, { answered: ids, answers: ids[1], queuedTurns: 0 });
+    await tick();
+    assert.equal(h.runner.get(thread.id).needs, 'you', `${oneReply}: the card is the second call's`);
+  }
+});
+
+// From Codex's review of that fix. A sub-agent shares the handler, and its
+// call never reaches the thread's events: it mustn't use up the refusal.
+test("a sub-agent's end_turn does not use up the refusal for a message its parent has not read", async () => {
+  const h = makeHarness();
+  const { thread, s } = start(h);
+  const { call } = tools(h, thread.id, undefined, () => true);
+  let asked = 0;
+  s.unreadMessage = () => {
+    asked++;
+    return true;
+  };
+  h.runner.send(thread.id, 'One more thing');
+  // No tool.call for it in the thread: the sub-agent's.
+  const sub = await call('end_turn', { headline: 'Sub-agent done', needs: 'nothing' });
+  assert.equal(asked, 0);
+  assert.doesNotMatch(sub.text, /the user sent a message/);
+  toolCall(s, 'e1', END_TURN, { headline: 'Done', needs: 'nothing' });
+  const own = await call('end_turn', { headline: 'Done', needs: 'nothing' });
+  assert.equal(asked, 1);
+  assert.match(own.text, /^Not ended: the user sent a message/);
+});
+
+// And a first call's arguments stand as the card of a turn that ends with no
+// other (a refused one that had no reply yet, say). Not this one's: they are
+// about the turn before the message.
+test('an end_turn refused for an unread message does not leave its card behind', async () => {
+  const h = makeHarness();
+  const { thread, s } = start(h);
+  const { call } = tools(h, thread.id, undefined, () => true);
+  s.text('m1', 'Noted, not releasing yet.');
+  h.runner.send(thread.id, 'Should we get it into production?');
+  s.unreadMessage = () => true;
+  const input = { headline: 'Not released yet', needs: 'nothing', archive: true };
+  toolCall(s, 'e1', END_TURN, input);
+  const r = await call('end_turn', input);
+  assert.equal(r.error, true);
+  s.out({ kind: 'event', event: { type: 'tool.result', itemId: 'e1', ok: false, text: r.text, truncated: false, images: [] } });
+  // It answers, asking in words, and stops without another end_turn.
+  s.text('m2', 'Yes, it is ready.\n\n**What I need from you**\n1. Say go and I will merge main into prod.');
+  const ids = s.sent.map((m) => m.id!);
+  s.result('completed', undefined, undefined, { answered: ids, answers: ids[1], queuedTurns: 0 });
+  await tick();
+  const t = h.runner.get(thread.id);
+  assert.equal(t.needs, 'you', "the reply's own ask, not the refused call's done card");
+  assert.equal(t.archivedAt, undefined, 'nor its archive');
+});
+
+// The Stop hook found the reply asking over a done card and sent the turn
+// back (adapter.ts, onStop; needs.ts, REPLY_ASKS). The end_turn that follows
+// is the card, the reply already written stands, and anything else the agent
+// writes on the way is dropped.
+test('one reply: a turn sent back for a card its reply asked for takes one more end_turn, and keeps its reply', async () => {
+  const h = makeHarness();
+  const { thread, s } = start(h);
+  const { call } = tools(h, thread.id, undefined, () => true);
+  const send = async (itemId: string, input: Record<string, unknown>) => {
+    toolCall(s, itemId, END_TURN, input);
+    const r = await call('end_turn', input);
+    s.out({ kind: 'event', event: { type: 'tool.result', itemId, ok: !r.error, text: r.text, truncated: false, images: [] } });
+    return r;
+  };
+  const first = await send('e1', { headline: 'Ready to go live', needs: 'nothing' });
+  assert.match(first.text, /Now write your reply/);
+  s.text('m1', "Yes, it's ready.\n\nSay go and I'll merge main into prod.");
+  s.out({ kind: 'endTurnNudge', reopen: true });
+  // Words on the way to the card aren't a second reply.
+  s.out({ kind: 'event', event: { type: 'reasoning', itemId: 'r1', text: 'Right, that needs a card.' } });
+  s.text('m2', 'Adding the card.');
+  const second = await send('e2', { headline: 'Release the examples page?', needs: 'you', asks: [{ question: 'Release the examples page to convex.dev?', options: [{ label: 'Go' }, { label: 'Not yet' }] }] });
+  assert.equal(second.error, false, second.text);
+  assert.match(second.text, /will wait in Needs you/);
+  assert.match(second.text, /your message above is the reply/);
+  s.text('m3', 'Card added.');
+  // Only that one: the next is a repeat again.
+  const third = await send('e3', { headline: 'Again', needs: 'nothing' });
+  assert.match(third.text, /Already ended/);
+  s.result('completed');
+  await tick();
+  // The apps take a turn's reply from after its last card, so the reply is
+  // written again under the new one (from Codex's review: left where it was,
+  // the Mac apps showed it with whatever the agent said before its first
+  // end_turn).
+  const texts = h.events(thread.id).filter((e) => e.type === 'assistant.text').map((e) => e.type === 'assistant.text' && [e.itemId, e.final, e.text]);
+  const reply = "Yes, it's ready.\n\nSay go and I'll merge main into prod.";
+  assert.deepEqual(texts, [['m1', true, reply], ['e2.reply', true, reply]], 'the reply, and nothing the agent wrote on the way');
+  const order = h.events(thread.id).filter((e) => (e.type === 'tool.result' && e.itemId === 'e2') || (e.type === 'assistant.text' && e.itemId === 'e2.reply')).map((e) => e.type);
+  assert.deepEqual(order, ['tool.result', 'assistant.text'], 'under the card it belongs to');
+  assert.ok(!h.events(thread.id).some((e) => e.type === 'reasoning'));
+  const t = h.runner.get(thread.id);
+  assert.equal(t.needs, 'you');
+  assert.equal(t.preview, 'Release the examples page?');
+});
+
+// From Codex's review: the card's first try is refused, the agent does the
+// step itself, and by its next try the reply is behind that work. It's asked
+// for a whole reply, which takes the first one's place.
+test('one reply: a reopened turn that worked before its card is asked for its reply whole', async () => {
+  const h = makeHarness();
+  const { thread, s } = start(h);
+  const { call } = tools(h, thread.id, undefined, () => true);
+  const send = async (itemId: string, input: Record<string, unknown>) => {
+    toolCall(s, itemId, END_TURN, input);
+    const r = await call('end_turn', input);
+    s.out({ kind: 'event', event: { type: 'tool.result', itemId, ok: !r.error, text: r.text, truncated: false, images: [] } });
+    return r;
+  };
+  await send('e1', { headline: 'Ready', needs: 'nothing' });
+  s.text('m1', "It's ready, and here is why in full.\n\nSay go and I'll merge main into prod.");
+  s.out({ kind: 'endTurnNudge', reopen: true });
+  const offer = { headline: 'Release?', needs: 'you', asks: [{ question: 'Merge main into prod?', options: [{ label: 'Done' }, { label: 'Can you do it?' }] }] };
+  const refused = await send('e2', offer);
+  assert.match(refused.text, /^Not ended: this card offers to have you do a step yourself/);
+  toolCall(s, 'b1', 'Bash', { command: 'git push origin main:prod' });
+  toolResult(s, 'b1');
+  const third = await send('e3', { headline: 'Released', needs: 'nothing' });
+  assert.equal(third.error, false, third.text);
+  assert.match(third.text, /Now write your reply/);
+  assert.match(third.text, /Give a self-contained answer/);
+  s.text('m2', 'Released: main is on prod, and /examples loads.');
+  s.result('completed');
+  await tick();
+  const finals = h.events(thread.id).filter((e) => e.type === 'assistant.text' && e.final).map((e) => e.type === 'assistant.text' && e.itemId);
+  assert.deepEqual(finals, ['m1', 'm2'], 'no copy of the first reply: the new one is the reply');
+  assert.equal(h.runner.get(thread.id).needs, 'nothing');
+});
+
+// From Codex's second review. A reply written as two blocks is two final
+// texts, and both go under the corrected card, not just the closing question.
+test('one reply: a reply in two blocks is written whole under the corrected card', async () => {
+  const h = makeHarness();
+  const { thread, s } = start(h);
+  const { call } = tools(h, thread.id, undefined, () => true);
+  const send = async (itemId: string, input: Record<string, unknown>) => {
+    toolCall(s, itemId, END_TURN, input);
+    const r = await call('end_turn', input);
+    s.out({ kind: 'event', event: { type: 'tool.result', itemId, ok: !r.error, text: r.text, truncated: false, images: [] } });
+    return r;
+  };
+  await send('e1', { headline: 'Two ways to do it', needs: 'nothing' });
+  s.text('m1', 'There are two ways: the quick one and the thorough one, and here is each in full.');
+  s.text('m2', 'Which should we use?');
+  s.out({ kind: 'endTurnNudge', reopen: true });
+  await send('e2', { headline: 'Pick one', needs: 'you', asks: [{ question: 'Which way?', options: [{ label: 'Quick' }, { label: 'Thorough' }] }] });
+  const copy = h.events(thread.id).find((e) => e.type === 'assistant.text' && e.itemId === 'e2.reply');
+  assert.equal(copy?.type === 'assistant.text' && copy.text, 'There are two ways: the quick one and the thorough one, and here is each in full.\n\nWhich should we use?');
+});
+
+// ...and a message Alex sends between the nudge and the card gets its own
+// answer and card: the reply from before it isn't written again as if it
+// answered him.
+test('one reply: a message sent after the nudge takes over from the card it asked for', async () => {
+  const h = makeHarness();
+  const { thread, s } = start(h);
+  const { call } = tools(h, thread.id, undefined, () => true);
+  const send = async (itemId: string, input: Record<string, unknown>) => {
+    toolCall(s, itemId, END_TURN, input);
+    const r = await call('end_turn', input);
+    s.out({ kind: 'event', event: { type: 'tool.result', itemId, ok: !r.error, text: r.text, truncated: false, images: [] } });
+    return r;
+  };
+  await send('e1', { headline: 'Ready', needs: 'nothing' });
+  s.text('m1', "It's ready. Say go and I'll merge main into prod.");
+  s.out({ kind: 'endTurnNudge', reopen: true });
+  h.runner.send(thread.id, 'Actually, hold off until Monday.');
+  assert.equal(h.runner.cardReopened(thread.id), false);
+  s.text('m2', "Holding off: I'll leave it on main until Monday.");
+  const r = await send('e2', { headline: 'Held until Monday', needs: 'nothing' });
+  assert.equal(r.error, false, r.text);
+  assert.ok(!h.events(thread.id).some((e) => e.type === 'assistant.text' && e.itemId === 'e2.reply'), 'the old reply is not written again');
+  assert.ok(h.events(thread.id).some((e) => e.type === 'assistant.text' && e.itemId === 'm2'), 'his answer shows');
+});
+
+// Without that nudge a second end_turn is still a repeat, and one that came
+// before any end_turn changes nothing.
+test('one reply: only a turn that had its end_turn is reopened for a card', async () => {
+  const h = makeHarness();
+  const { thread, s } = start(h);
+  const { call } = tools(h, thread.id, undefined, () => true);
+  s.text('m0', 'Which do you want first?');
+  // The plain nudge (no end_turn yet) doesn't reopen anything.
+  s.out({ kind: 'endTurnNudge' });
+  assert.equal(h.runner.cardReopened(thread.id), false);
+  s.out({ kind: 'endTurnNudge', reopen: true });
+  assert.equal(h.runner.cardReopened(thread.id), false, 'nothing to reopen before an end_turn is taken');
+  toolCall(s, 'e1', END_TURN, { headline: 'Pick one', needs: 'nothing' });
+  const r = await call('end_turn', { headline: 'Pick one', needs: 'nothing' });
+  s.out({ kind: 'event', event: { type: 'tool.result', itemId: 'e1', ok: !r.error, text: r.text, truncated: false, images: [] } });
+  toolCall(s, 'e2', END_TURN, { headline: 'Pick one', needs: 'you', asks: [{ question: 'Which first?' }] });
+  const again = await call('end_turn', { headline: 'Pick one', needs: 'you', asks: [{ question: 'Which first?' }] });
+  assert.match(again.text, /Already ended/);
 });
 
 // Thread 46de9389 (7 Nov 2026): a `tb land` sent to the background finished
@@ -786,7 +1023,7 @@ test('one reply: a reply that writes its card out again keeps the card and loses
   const h = makeHarness();
   const { thread, s } = start(h);
   const { call } = tools(h, thread.id, undefined, () => true);
-  const input = { headline: 'Ready', asks: [{ question: 'Press Bring Them In on Tinker Desk.' }] };
+  const input = { headline: 'Ready', asks: [{ question: 'Press Bring Them In on build-box.' }] };
   toolCall(s, 'e1', END_TURN, input);
   const r = await call('end_turn', input);
   s.out({ kind: 'event', event: { type: 'tool.result', itemId: 'e1', ok: !r.error, text: r.text, truncated: false, images: [] } });
@@ -797,7 +1034,7 @@ test('one reply: a reply that writes its card out again keeps the card and loses
   assert.equal(reply.final, true);
   const t = h.runner.get(thread.id);
   assert.equal(t.needs, 'you');
-  assert.deepEqual(t.asks?.map((a: { action: string }) => a.action), ['Press Bring Them In on Tinker Desk.']);
+  assert.deepEqual(t.asks?.map((a: { action: string }) => a.action), ['Press Bring Them In on build-box.']);
   assert.equal(h.events(thread.id).at(-1).needsFrom, 'tool');
 });
 
@@ -889,7 +1126,7 @@ test('end_turn refuses snooze "off" and over-long words, in both forms, so the a
   }
 });
 
-test('a repeat end_turn cannot archive a turn that is waiting on Mike', async () => {
+test('a repeat end_turn cannot archive a turn that is waiting on Alex', async () => {
   const h = makeHarness();
   const { thread, s } = start(h);
   const { call } = tools(h, thread.id, undefined, () => true);
@@ -1072,7 +1309,7 @@ test('bullets with no message since the last step: end_turn says stop without as
   // Thinking, as Opus did, then the details, streamed then whole.
   s.out({ kind: 'event', event: { type: 'reasoning', itemId: 'm2:0', text: 'The user has not got the details yet.' } });
   s.out({ kind: 'delta', delta: { type: 'assistant.text.delta', itemId: 'm2:1', text: '**Phone:**' } });
-  s.text('m2:1', '**Phone:** 13 13 13\n\n**Bookings:** EXBEEI (you), E9SMYP (Kelsie and Joshua), last name CANN');
+  s.text('m2:1', '**Phone:** 13 13 13\n\n**Bookings:** ABC123 (you), XYZ789 (Sam and Jo), last name EXAMPLE');
   // Anything after that is a repeat again.
   s.text('m3:0', 'Over to you. ' + 'x'.repeat(100));
   const texts = h.events(thread.id).filter((e) => e.type === 'assistant.text');
@@ -1080,7 +1317,7 @@ test('bullets with no message since the last step: end_turn says stop without as
     texts.map((e) => [e.itemId, e.text]),
     [
       ['e1.summary', "- Put together the details you'll need for the Qantas call."],
-      ['m2:1', '**Phone:** 13 13 13\n\n**Bookings:** EXBEEI (you), E9SMYP (Kelsie and Joshua), last name CANN'],
+      ['m2:1', '**Phone:** 13 13 13\n\n**Bookings:** ABC123 (you), XYZ789 (Sam and Jo), last name EXAMPLE'],
     ],
   );
   assert.ok(!h.events(thread.id).some((e) => e.type === 'reasoning' && e.itemId === 'm2:0'), 'thinking after end_turn still goes');
@@ -1380,7 +1617,7 @@ test("end_turn waits for its own call to land, and takes a call that never lands
 // The CLI defers MCP tools (an agent sees only their names), so the server's
 // instructions are the one place sure to tell an agent when to reach for
 // show_options and pin. Without them an agent pinned three mockups and asked
-// Mike to choose in chat.
+// Alex to choose in chat.
 test('both instruction texts say when to use show_options and pin', async () => {
   const { threadbearMcpServer } = await import('../../src/threadbear-mcp.ts');
   const { TOOL_GUIDANCE } = await import('../../src/adapters/codex/tools.ts');
@@ -1473,7 +1710,7 @@ test('one reply: an end_turn the Stop hook asked for keeps the message already w
   assert.match(r.text, /^Noted: this thread is done/);
   s.out({ kind: 'event', event: { type: 'tool.result', itemId: 'e1', ok: true, text: r.text, truncated: false, images: [] } });
   assert.equal(h.runner.get(thread.id).preview, 'Tests pass');
-  // Anything it writes anyway is a repeat, and doesn't reach Mike.
+  // Anything it writes anyway is a repeat, and doesn't reach Alex.
   s.text('m2', 'All done.');
   assert.ok(!h.events(thread.id).some((e) => e.type === 'assistant.text' && e.itemId === 'm2'));
   assert.ok(!h.events(thread.id).some((e) => e.type === 'assistant.text' && e.final));
@@ -1525,13 +1762,13 @@ test('one reply: a nudged end_turn with no message to keep still asks for the re
 test('one reply: after hidden text, end_turn asks for the answer and evidence, including drafts', async () => {
   const h = makeHarness();
   const again = /self-contained answer with the result and supporting evidence/;
-  const input = { headline: 'Draft update for Jamie ready to send', asks: [{ question: 'Send the Hetzner update to Jamie in your Slack DM?', options: [{ label: 'Send it' }, { label: "I'll edit and send" }] }] };
+  const input = { headline: 'Draft update for Jamie ready to send', asks: [{ question: 'Send the Cloud box update to Jamie in your Slack DM?', options: [{ label: 'Send it' }, { label: "I'll edit and send" }] }] };
   // The draft as narration, straight before the call.
   const first = start(h);
   const one = tools(h, first.thread.id, undefined, () => true);
   toolCall(first.s, 'b1', 'Bash', { command: 'slack-read D081T2X5SG6' });
   toolResult(first.s, 'b1');
-  first.s.out({ kind: 'event', event: { type: 'assistant.text', itemId: 'n1', text: 'The Hetzner Linux runner is up and sits in threadbear beside your Mac and Bruce.', narration: true } });
+  first.s.out({ kind: 'event', event: { type: 'assistant.text', itemId: 'n1', text: 'The Cloud box Linux runner is up and sits in threadbear beside your Mac and Mac mini.', narration: true } });
   toolCall(first.s, 'e1', END_TURN, input);
   let r = await one.call('end_turn', input);
   assert.equal(r.error, false, r.text);
@@ -1830,19 +2067,19 @@ test('move_thread with a runner asks the main Mac to move the thread whole, and 
     list: async () => ({ runners: [], threads: [] }),
     call: async () => undefined,
     runners: async () => [
-      { id: 'm5runner0001', name: 'M5' },
-      { id: 'legitcloud01', name: 'Hetzner Cloud' },
+      { id: 'laptop000001', name: 'Laptop' },
+      { id: 'legitcloud01', name: 'Cloud box' },
     ],
     move: async (p) => {
       asked.push(p);
-      return 'Moving it to Hetzner Cloud.';
+      return 'Moving it to Cloud box.';
     },
   };
   const call = toolsWith(h, me.id, control);
-  const r = await call('move_thread', { runner: 'cloud', folder: '/home/mike/x' });
+  const r = await call('move_thread', { runner: 'cloud', folder: '/home/alex/x' });
   assert.equal(r.error, false, r.text);
-  assert.match(r.text, /Moving it to Hetzner Cloud/);
-  assert.deepEqual(asked, [{ threadId: me.id, runnerId: 'legitcloud01', runnerName: 'Hetzner Cloud', cwd: '/home/mike/x' }]);
+  assert.match(r.text, /Moving it to Cloud box/);
+  assert.deepEqual(asked, [{ threadId: me.id, runnerId: 'legitcloud01', runnerName: 'Cloud box', cwd: '/home/alex/x' }]);
   // `then` is for folder moves; neither folder nor runner is an error.
   assert.equal((await call('move_thread', { runner: 'cloud', then: 'go' })).error, true);
   assert.equal((await call('move_thread', {})).error, true);

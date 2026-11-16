@@ -157,7 +157,7 @@ pub struct Tasks {
 }
 
 impl Tasks {
-    fn decode(v: &Value) -> Option<Tasks> {
+    pub fn decode(v: &Value) -> Option<Tasks> {
         if !v.is_object() {
             return None;
         }
@@ -560,6 +560,16 @@ fn newest_first(a: &ThreadSummary, b: &ThreadSummary) -> Ordering {
     b.activity_ms().cmp(&a.activity_ms()).then_with(|| a.id.cmp(&b.id))
 }
 
+/// Sorts as `newest_first` does, reading each thread's time once: comparing
+/// read both times again each time, and the Projects list sorts every
+/// project's threads, archived ones too (1,150 of Mike's), as it draws.
+fn sort_newest_first<'a>(threads: &mut [&'a ThreadSummary]) {
+    threads.sort_by_cached_key(|t| {
+        let t: &'a ThreadSummary = t;
+        (std::cmp::Reverse(t.activity_ms()), t.id.as_str())
+    });
+}
+
 impl<'a> Sections<'a> {
     /// Archived projects are left out, and so are archived and hibernating
     /// threads, as in the inbox (archived ones go in `archived`). A thread in
@@ -594,11 +604,11 @@ impl<'a> Sections<'a> {
             .into_iter()
             .map(|project| {
                 let mut threads = members.remove(project.id.as_str()).unwrap_or_default();
-                threads.sort_by(|a, b| newest_first(a, b));
+                sort_newest_first(&mut threads);
                 // A thread in a project twice (a summary a moment behind) is listed once.
                 threads.dedup_by(|a, b| a.id == b.id);
                 let mut put_away = archived.remove(project.id.as_str()).unwrap_or_default();
-                put_away.sort_by(|a, b| newest_first(a, b));
+                sort_newest_first(&mut put_away);
                 put_away.dedup_by(|a, b| a.id == b.id);
                 let own = project.last_activity_ms.unwrap_or(project.updated_ms);
                 let last_activity_ms = newest.get(project.id.as_str()).copied().unwrap_or(i64::MIN).max(own);
@@ -606,7 +616,7 @@ impl<'a> Sections<'a> {
             })
             .collect();
         sections.sort_by(|a, b| b.last_activity_ms.cmp(&a.last_activity_ms).then_with(|| standard_compare(&a.project.title, &b.project.title)));
-        unfiled.sort_by(|a, b| newest_first(a, b));
+        sort_newest_first(&mut unfiled);
         Sections::with_parts(sections, unfiled)
     }
 
@@ -653,7 +663,7 @@ impl<'a> Sections<'a> {
     pub fn threads_with_parts(&self, section: &Section<'a>) -> Vec<&'a ThreadSummary> {
         let mut seen = HashSet::new();
         let mut out: Vec<&ThreadSummary> = std::iter::once(section).chain(self.parts_of(section.id())).flat_map(|s| s.threads.iter().copied()).filter(|t| seen.insert(t.id.as_str())).collect();
-        out.sort_by(|a, b| newest_first(a, b));
+        sort_newest_first(&mut out);
         out
     }
 
@@ -671,7 +681,7 @@ impl<'a> Sections<'a> {
 /// its page.
 pub fn threads_in<'a>(project_id: &str, threads: impl IntoIterator<Item = &'a ThreadSummary>) -> Vec<&'a ThreadSummary> {
     let mut out: Vec<&ThreadSummary> = threads.into_iter().filter(|t| t.projects.iter().flatten().any(|m| m.id == project_id)).collect();
-    out.sort_by(|a, b| newest_first(a, b));
+    sort_newest_first(&mut out);
     out
 }
 
@@ -729,6 +739,62 @@ pub fn fold_layout(sections: &Sections, open: &HashSet<String>) -> Vec<String> {
     rows
 }
 
+// ---------------------------------------------------------------- the page's tabs
+
+/// A project's page in two tabs (the projectDecisions experiment), a port of
+/// ThreadbearCore's ProjectTabs.swift: its decisions, and everything else
+/// about it. Mike, 12 Nov 2026: "tabbed at the top so you can swap between
+/// coordinator and project info".
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ProjectTab {
+    Decisions,
+    Project,
+}
+
+impl ProjectTab {
+    pub const ALL: [ProjectTab; 2] = [ProjectTab::Decisions, ProjectTab::Project];
+
+    pub fn title(self) -> &'static str {
+        match self {
+            ProjectTab::Decisions => "Decisions",
+            ProjectTab::Project => "Project",
+        }
+    }
+
+    /// The name a script and the dump use: "decisions" or "project".
+    pub fn name(self) -> &'static str {
+        match self {
+            ProjectTab::Decisions => "decisions",
+            ProjectTab::Project => "project",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<ProjectTab> {
+        ProjectTab::ALL.into_iter().find(|t| t.name() == name)
+    }
+
+    /// The tab a page opens on when none has been picked for it: Decisions
+    /// when something's waiting, else Project.
+    pub fn opening(decisions: usize) -> ProjectTab {
+        if decisions > 0 { ProjectTab::Decisions } else { ProjectTab::Project }
+    }
+
+    /// The tab showing: the one last picked for this project, else the one
+    /// it opened on this visit. Never worked out again from the decisions
+    /// while it's open, so the page doesn't jump under the pointer as they
+    /// come and go.
+    pub fn current(picked: Option<ProjectTab>, opened_on: Option<ProjectTab>, decisions: usize) -> ProjectTab {
+        picked.or(opened_on).unwrap_or_else(|| ProjectTab::opening(decisions))
+    }
+
+    /// The tab beside this one, for ⇧⌘[ (-1) and ⇧⌘] (1): they stop at the
+    /// ends rather than wrapping, as there are only two.
+    pub fn step(self, by: i32) -> ProjectTab {
+        let at = ProjectTab::ALL.iter().position(|t| *t == self).unwrap_or(0) as i32;
+        ProjectTab::ALL[(at + by).clamp(0, ProjectTab::ALL.len() as i32 - 1) as usize]
+    }
+}
+
 // ---------------------------------------------------------------- decisions
 
 /// The thread is waiting on Mike with a card of asks he hasn't finished
@@ -752,7 +818,7 @@ pub fn open_asks(t: &ThreadSummary) -> usize {
 /// threads, which already leave out archived and hibernating ones.
 pub fn decision_threads<'a>(threads: &[&'a ThreadSummary]) -> Vec<&'a ThreadSummary> {
     let mut out: Vec<&ThreadSummary> = threads.iter().copied().filter(|t| is_waiting(t)).collect();
-    out.sort_by(|a, b| newest_first(a, b));
+    sort_newest_first(&mut out);
     out
 }
 
@@ -1269,6 +1335,27 @@ mod tests {
     use crate::inbox::{iso_time, OpenAsk};
     use chrono::FixedOffset;
 
+    #[test]
+    fn a_page_opens_on_its_decisions_when_something_waits() {
+        assert_eq!(ProjectTab::opening(3), ProjectTab::Decisions);
+        assert_eq!(ProjectTab::opening(0), ProjectTab::Project);
+        // What it opened on holds while the decisions come and go.
+        assert_eq!(ProjectTab::current(None, Some(ProjectTab::Decisions), 0), ProjectTab::Decisions);
+        // A tab picked wins over both.
+        assert_eq!(ProjectTab::current(Some(ProjectTab::Project), Some(ProjectTab::Decisions), 4), ProjectTab::Project);
+        assert_eq!(ProjectTab::current(None, None, 2), ProjectTab::Decisions);
+    }
+
+    #[test]
+    fn the_tab_keys_stop_at_the_ends() {
+        assert_eq!(ProjectTab::Decisions.step(1), ProjectTab::Project);
+        assert_eq!(ProjectTab::Project.step(1), ProjectTab::Project);
+        assert_eq!(ProjectTab::Project.step(-1), ProjectTab::Decisions);
+        assert_eq!(ProjectTab::Decisions.step(-1), ProjectTab::Decisions);
+        assert_eq!(ProjectTab::from_name("project"), Some(ProjectTab::Project));
+        assert_eq!(ProjectTab::from_name("other"), None);
+    }
+
     const NOW: i64 = 1_000_000_000;
 
     fn minutes_ago(m: f64) -> String {
@@ -1310,14 +1397,14 @@ mod tests {
     #[test]
     fn a_project_reads_whole_and_tolerates_what_it_doesnt_know() {
         let p = Project::decode(&json!({
-            "id": "p_3b1d9e20", "title": "Threadbear", "folders": ["/Users/mike/dev/me/threadbear", 5, "/Users/mike/dev/me/notes"],
-            "goals": "Mike's own agent app.", "createdBy": "librarian", "createdByThread": "th1",
+            "id": "p_3b1d9e20", "title": "Threadbear", "folders": ["/Users/alex/code/threadbear", 5, "/Users/alex/code/notes"],
+            "goals": "An agent app.", "createdBy": "librarian", "createdByThread": "th1",
             "createdAt": "2026-10-20T10:00:00Z", "updatedAt": "2026-10-27T10:00:00Z", "threadCount": "7",
             "lastActivityAt": "2026-10-27T11:00:00Z", "colour": "teal", "parentId": "",
             "links": [{ "title": "Live site", "url": "https://cruise.example/" }, { "url": "https://www.cruise.example/admin/" }, { "title": "no url" }, "https://loose.example"],
         }))
         .unwrap();
-        assert_eq!(p.folders, ["/Users/mike/dev/me/threadbear", "/Users/mike/dev/me/notes"], "a folder that isn't a string is skipped");
+        assert_eq!(p.folders, ["/Users/alex/code/threadbear", "/Users/alex/code/notes"], "a folder that isn't a string is skipped");
         assert_eq!(p.created_by, Author::Librarian);
         assert_eq!(p.thread_count, 7);
         assert_eq!(p.last_activity_ms, parse_ms("2026-10-27T11:00:00Z"));
@@ -1561,8 +1648,8 @@ mod tests {
     #[test]
     fn searching_cards_looks_through_what_a_project_is_about() {
         let projects = vec![
-            Project { state: "The deterrent speaks through a Pi".into(), ..project("state", "Sammy Cam") },
-            Project { folders: vec!["/Users/mike/dev/me/mike-pod-site".into()], ..project("folder", "Podcast site") },
+            Project { state: "The deterrent speaks through a Pi".into(), ..project("state", "Porch Cam") },
+            Project { folders: vec!["/Users/alex/code/alex-pod-site".into()], ..project("folder", "Podcast site") },
             Project { goals: "Sell coffee".into(), ..project("goals", "Café") },
             Project { notes: "Moored by the café".into(), ..project("notes", "Boat") },
             Project { links: vec![Link { title: "Admin".into(), url: "https://example.com/x".into() }], ..project("link", "Shop") },
@@ -1572,9 +1659,9 @@ mod tests {
         let found = |q: &str| matching(all.clone(), q).iter().map(|c| c.project.id.clone()).collect::<Vec<_>>();
         assert_eq!(found("  \n").len(), 6, "nothing typed leaves every card");
         assert_eq!(found("deterrent"), ["title", "state"], "a title match goes above one in the state");
-        assert_eq!(found("DETERRENT sammy"), ["state"], "every word has to match, in any field");
+        assert_eq!(found("DETERRENT porch"), ["state"], "every word has to match, in any field");
         assert_eq!(found("cafe"), ["goals", "notes"], "case and accents don't count");
-        assert_eq!(found("mike-pod"), ["folder"]);
+        assert_eq!(found("alex-pod"), ["folder"]);
         assert!(found("users").is_empty(), "a folder's name counts, not the path every project shares");
         assert_eq!(found("admin"), ["link"]);
         assert_eq!(match_count(3, 76), "3 of 76 projects");
@@ -1584,9 +1671,9 @@ mod tests {
 
     #[test]
     fn titles_sort_as_finder_does() {
-        let mut titles = vec!["poddle 10", "Poddle 2", "apple", "Walkies"];
+        let mut titles = vec!["kennel 10", "Kennel 2", "apple", "Walkies"];
         titles.sort_by(|a, b| standard_compare(a, b));
-        assert_eq!(titles, ["apple", "Poddle 2", "poddle 10", "Walkies"]);
+        assert_eq!(titles, ["apple", "Kennel 2", "kennel 10", "Walkies"]);
     }
 
     #[test]
@@ -1597,11 +1684,11 @@ mod tests {
         let p = Project { created_ms: created, created_by: Author::Librarian, thread_count: 5, ..project("p", "P") };
         assert_eq!(made_by(&p, 2, &now), "Made by the librarian on 20 Oct · 5 threads", "the runner's count when it knows more");
         assert_eq!(made_by(&Project { archived: true, created_by: Author::Mike, thread_count: 0, ..p.clone() }, 1, &now), "Made by you on 20 Oct · 1 thread · Archived");
-        assert_eq!(icon_help(&p, "/Users/mike"), "No icon yet: the librarian looks in the project's folders for one. Click to choose a picture.");
-        let found = Project { icon: Some(Icon { from: Some("/Users/mike/dev/x/icon.png".into()), ..Default::default() }), ..p.clone() };
-        assert_eq!(icon_help(&found, "/Users/mike"), "An agent chose this (from ~/dev/x/icon.png). Click to change it.");
+        assert_eq!(icon_help(&p, "/Users/alex"), "No icon yet: the librarian looks in the project's folders for one. Click to choose a picture.");
+        let found = Project { icon: Some(Icon { from: Some("/Users/alex/dev/x/icon.png".into()), ..Default::default() }), ..p.clone() };
+        assert_eq!(icon_help(&found, "/Users/alex"), "An agent chose this (from ~/dev/x/icon.png). Click to change it.");
         let symbol = Project { icon: Some(Icon { symbol: Some("film".into()), by: Author::Librarian, ..Default::default() }), ..p };
-        assert_eq!(icon_help(&symbol, "/Users/mike"), "The librarian found this (the film symbol) and keeps it up to date. Click to choose another.");
+        assert_eq!(icon_help(&symbol, "/Users/alex"), "The librarian found this (the film symbol) and keeps it up to date. Click to choose another.");
         let kept = Membership { pinned: true, ..member("a") };
         assert_eq!(put_here_by(&kept), "The librarian put it here and you kept it");
         assert_eq!(put_here_by(&Membership { by: "mike".into(), ..member("a") }), "You put it here");

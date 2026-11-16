@@ -85,8 +85,8 @@ export function isCodexLogin(dir: string): boolean {
   return store === 'keyring' || store === 'auto';
 }
 
-export type DiscoveryConfig = Pick<Config, 'claudeMainDir' | 'claudeMainJson' | 'tokenStatsAccountsDir'> &
-  Partial<Pick<Config, 'codexMainDir' | 'accountNotes' | 'accountsDir' | 'ompMainDir' | 'home' | 'cursorPath' | 'opencodePath'>>;
+export type DiscoveryConfig = Pick<Config, 'claudeMainDir' | 'claudeMainJson' | 'tokenStatsAccountsDir' | 'userHome' | 'pathEnv'> &
+  Partial<Pick<Config, 'codexMainDir' | 'accountNotes' | 'accountsDir' | 'ompMainDir' | 'home' | 'cursorPath' | 'opencodePath' | 'grokPath'>>;
 
 // claude-main is ~/.claude (its .claude.json sits at ~/.claude.json);
 // codex-main is ~/.codex. Token Stats' Accounts folder holds claude-N and
@@ -126,9 +126,7 @@ export function discoverAccounts(cfg: DiscoveryConfig): Account[] {
   if (cfg.home && cfg.ompMainDir && experimentOn(cfg.home, 'ohMyPi') && isDirectory(cfg.ompMainDir)) {
     out.push({ id: 'omp-main', provider: 'omp', title: 'Oh My Pi', configDir: cfg.ompMainDir });
   }
-  if (cfg.home && experimentOn(cfg.home, 'acpAgents')) {
-    out.push(...acpAccounts({ paths: { cursor: cfg.cursorPath, opencode: cfg.opencodePath } }));
-  }
+  out.push(...acpAccounts({ home: cfg.userHome, pathEnv: cfg.pathEnv, paths: { cursor: cfg.cursorPath, opencode: cfg.opencodePath, grok: cfg.grokPath } }));
   for (const a of out) {
     const note = cfg.accountNotes?.[a.id];
     if (note) a.note = note;

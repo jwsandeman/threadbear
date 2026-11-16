@@ -4,11 +4,12 @@
 
 export const PROTOCOL_VERSION = 1;
 
-// cursor and opencode run over ACP (adapters/acp/), behind the acpAgents
-// experiment, and omp (adapters/omp/) behind ohMyPi: activeProviders
+// cursor, opencode and grok run over ACP (adapters/acp/); each turns up as a
+// login only where its CLI is installed and logged in (adapters/acp/agents.ts).
+// omp (adapters/omp/) is behind the ohMyPi experiment: activeProviders
 // (providers.ts) is the list a runner offers.
-export type Provider = 'claude' | 'codex' | 'cursor' | 'opencode' | 'omp';
-export const PROVIDERS: readonly Provider[] = ['claude', 'codex', 'cursor', 'opencode', 'omp'];
+export type Provider = 'claude' | 'codex' | 'cursor' | 'opencode' | 'grok' | 'omp';
+export const PROVIDERS: readonly Provider[] = ['claude', 'codex', 'cursor', 'opencode', 'grok', 'omp'];
 
 // What a provider is called and can do (providers.ts holds the table). `id`
 // is a plain string as a client can be sent one it has never heard of.
@@ -287,6 +288,9 @@ export type ThreadSummary = {
   // Who started it, when that wasn't Mike (docs/protocol.md, "Who started
   // a thread"). Absent for his own threads.
   startedBy?: ThreadStartedBy;
+  // Started by another thread but kept out from under it in the sidebar
+  // (docs/protocol.md, "Nested threads").
+  detached?: true;
   // Mike's last message to it, one line, for the sidebar's "You: ..."
   // (docs/protocol.md, "What Mike last asked"). Absent until he's sent one.
   asked?: string;
@@ -318,7 +322,7 @@ export type ThreadSummary = {
 // remote's default branch. scheduled: a schedule that will message it
 // again (at: when), which doesn't stop an archive. Clients show any other
 // kind as its text.
-export type LooseEndKind = 'unlanded' | 'uncommitted' | 'unpushed' | 'unmerged' | 'thread' | 'open' | 'scheduled';
+export type LooseEndKind = 'unlanded' | 'uncommitted' | 'unpushed' | 'unmerged' | 'thread' | 'running' | 'scheduled';
 export type LooseEnd = { kind: LooseEndKind; text: string; threadId?: string; at?: string };
 
 export type ShareAccess = 'off' | 'link';
@@ -774,9 +778,6 @@ export type ReplyButtonStart = {
   why?: string;
 };
 export type ReplyButtonSend = { threadId: string; threadTitle: string; text: string };
-// A command on an ask card (end_turn's asks[].run): only the runner makes
-// one, from the ask, and its press runs the command once in `cwd`.
-export type ReplyButtonRun = { command: string; cwd: string };
 export type ReplyButton = {
   id: string;
   title: string;
@@ -784,12 +785,6 @@ export type ReplyButton = {
   turnId?: string;
   start?: ReplyButtonStart;
   send?: ReplyButtonSend;
-  run?: ReplyButtonRun;
-  // A run's command is going now.
-  running?: { at: string };
-  // How a run's command came out (with `pressed`). exitCode is absent when
-  // it was stopped, as a timeout does.
-  ran?: { ok: boolean; exitCode?: number; durationMs: number };
   pressed?: { at: string; threadId: string };
   failed?: { at: string; error: string };
 };
@@ -871,7 +866,11 @@ export type EventBody =
   // wake: a background task's notification that went into the running
   // turn, which opens a turn that's had its end_turn again (needs.ts,
   // takenEndTurn).
-  | { type: 'system.note'; text: string; wake?: true }
+  // login: the thread's login ran out and it moved, is waiting for room,
+  // or was told not to wait (runner/pools.ts). The only notes the backend
+  // gets (sync.ts toMessageDoc), so another Mac can say a thread changed
+  // login by itself.
+  | { type: 'system.note'; text: string; wake?: true; login?: true; savedMessage?: true; supersededReminder?: string }
   | { type: 'error'; message: string }
   // A command action that ran (patches.ts): its output, truncated like a
   // tool result. Outside any turn.
@@ -915,10 +914,7 @@ export type NeedsWho = 'you' | 'nothing';
 // (suggested, an index into options) marked; he can always write his own.
 // optionNotes: with one reply, what each option does if Mike picks it, in
 // the options' order ("" for none); the card draws them under the labels.
-// run: a command the card offers to run (docs/protocol.md, "Run on the card").
-export type Ask = { action: string; where?: string; reply?: string; why?: string; options?: string[]; optionNotes?: string[]; suggested?: number; links?: AskLink[]; run?: AskRun };
-// buttonId, cwd and the states are the runner's, added once the card is made.
-export type AskRun = { command: string; buttonId?: string; cwd?: string; running?: true; failed?: string };
+export type Ask = { action: string; where?: string; reply?: string; why?: string; options?: string[]; optionNotes?: string[]; suggested?: number; links?: AskLink[] };
 // Somewhere to go to do or judge an ask: a web page, or a file or folder
 // on this Mac (an absolute or ~ path). The app shows each as a button.
 export type AskLink = { title: string; url: string };
@@ -1037,6 +1033,7 @@ export const ErrorCode = {
   accountNotFound: -32010,
   busy: -32020,
   moved: -32030, // a draining runner has handed the thread over (Handovers)
+  notShownThere: -32031, // threads.send or threads.edit with a runnerId the thread isn't on
   convexSignedOut: -32040, // the runner's Convex CLI isn't signed in ("The Convex panel")
   convexNoAccess: -32041, // its Convex login can't reach the deployment
   backgroundRunning: -32050, // threads.edit without stopBackground while background work runs

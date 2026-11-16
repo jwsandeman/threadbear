@@ -1,28 +1,28 @@
 {
   "claude": {
     "instructions": 2984,
-    "tools": 39038,
-    "total": 42022
+    "tools": 39508,
+    "total": 42492
   },
   "codex": {
     "instructions": 2153,
-    "tools": 39137,
-    "total": 41290
+    "tools": 39607,
+    "total": 41760
   },
   "omp": {
     "instructions": 1930,
-    "tools": 39137,
-    "total": 41067
+    "tools": 39607,
+    "total": 41537
   },
   "worktreeInstructions": 608,
   "perTool": {
     "add_button": 1659,
     "ask_secret": 1241,
     "create_project": 1433,
-    "create_thread": 2376,
+    "create_thread": 2560,
     "delete_schedule": 267,
     "delete_thread": 445,
-    "end_turn": 8641,
+    "end_turn": 8927,
     "interrupt_thread": 335,
     "join_project": 524,
     "leave_project": 460,

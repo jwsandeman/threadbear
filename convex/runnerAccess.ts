@@ -166,6 +166,7 @@ export const ACCESS: Record<string, Access> = {
   // another. A runner key's scheduler lists only its own runner.
   runnersList: 'owner',
   issueToken: 'owner',
+  issuePairingCode: 'owner',
   listTokens: 'owner',
   revokeToken: 'owner',
   appendMessages: 'own',
@@ -355,6 +356,22 @@ export function holdThreadTimes(t: Record<string, any>, ok: (value: unknown) => 
   for (const f of ['snoozedUntil', 'archivedAt', 'starredAt']) if (t[f] !== undefined && !ok(t[f])) delete t[f];
   if (t.woke && !ok(t.woke.at)) delete t.woke;
   else if (t.woke?.since !== undefined && !ok(t.woke.since)) t.woke = { at: t.woke.at };
+}
+// A lab review's counts (rounds, a finding's id and round) are numbers a
+// client turns into an Int, and 1e20 there stopped the iPhone app on its
+// thread list, past any `try?` (Daybreak 109, 12 Nov 2026). Held to small
+// whole numbers on a runner key's write and again on every phone read, so a
+// row stored before the write was checked never reaches a phone that
+// converts unchecked: a bad count becomes 1, a finding with no real id goes.
+export function holdReviewNumbers(t: Record<string, any>): void {
+  const r = t.review;
+  if (!r || typeof r !== 'object') return;
+  const count = (n: unknown) => (wholeIn(n, 1_000_000) ? n : undefined);
+  t.review = {
+    ...r,
+    rounds: count(r.rounds) ?? 1,
+    findings: Array.isArray(r.findings) ? r.findings.filter((f: any) => count(f?.id) !== undefined).map((f: any) => ({ ...f, round: count(f.round) ?? 1 })) : [],
+  };
 }
 // A whole number from 0 to `most`.
 export function wholeIn(value: unknown, most: number): value is number {

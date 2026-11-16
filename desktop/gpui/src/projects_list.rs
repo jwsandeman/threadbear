@@ -16,7 +16,7 @@ use crate::sidebar::{icon, palette, tipped, Palette, CORNER, LEADING, OUTER_INSE
 use crate::{now_ms, style};
 // `tipped!` (sidebar.rs) needs TestSupportExt where it's used.
 use gpui_kit::base::TestSupportExt as _;
-use gpui_kit::component::spinner::Spinner;
+use crate::spinner::Spinner;
 use gpui_kit::component::{h_flex, v_flex, Sizable as _, StyledExt as _};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
@@ -25,7 +25,9 @@ use crate::style::px;
 use serde_json::{json, Value};
 use threadbear_core::inbox::ThreadSummary;
 use threadbear_core::projects::{self as rules, Project, Section, Sections, UNFILED_ID};
+use threadbear_core::nested::{self, Nesting};
 use threadbear_core::sidebar::RowLook;
+use crate::sidebar::Nest;
 
 /// How far a part sits in under its parent, with its threads.
 const PART_INDENT: f32 = 14.;
@@ -38,11 +40,28 @@ enum Item {
     Heading { project: Project, count: usize, part: bool },
     Fold { id: String, title: String, project: Option<Project>, count: usize, decisions: usize, part: bool },
     Unfiled,
-    /// `group` keeps a thread in two projects two rows.
-    Row { thread: ThreadSummary, section: &'static str, group: String, part: bool },
+    /// `group` keeps a thread in two projects two rows. `nest`: the head of
+    /// a group of nested threads, or one of them (nested threads).
+    Row { thread: ThreadSummary, section: &'static str, group: String, part: bool, nest: Nest },
     ArchivedFold { project: String, count: usize, open: bool, part: bool },
     ShowMore { project: String, more: usize, part: bool },
     Empty,
+}
+
+impl Item {
+    /// What the line is, the same from one frame to the next however the
+    /// lines around it change, for keeping its height (far_rows.rs).
+    fn key(&self) -> String {
+        match self {
+            Item::Heading { project, .. } => format!("heading:{}", project.id),
+            Item::Fold { id, .. } => format!("fold:{id}"),
+            Item::Unfiled => "unfiled".into(),
+            Item::Row { thread, group, .. } => format!("row:{group}:{}", thread.id),
+            Item::ArchivedFold { project, .. } => format!("archived:{project}"),
+            Item::ShowMore { project, .. } => format!("more:{project}"),
+            Item::Empty => "empty".into(),
+        }
+    }
 }
 
 /// The thread as its row under `heading` shows it: that project left out of
@@ -60,8 +79,7 @@ fn under(t: &ThreadSummary, heading: &str) -> ThreadSummary {
 
 impl Threadbear {
     /// What the list draws, top to bottom.
-    fn projects_list_items(&self, folding: bool) -> Vec<Item> {
-        let sections = Sections::build(&self.projects.list, self.threads.values(), now_ms());
+    fn projects_list_items(&self, sections: &Sections, folding: bool, nesting: Option<&Nesting>, now: i64) -> Vec<Item> {
         let open = &self.projects.open_rows;
         let shows = |id: &str| !folding || open.contains(id);
         let mut items = Vec::new();
@@ -76,7 +94,7 @@ impl Threadbear {
             if !shows(top.id()) {
                 continue;
             }
-            self.push_section_rows(&mut items, top, false);
+            self.push_section_rows(&mut items, top, false, nesting, now);
             // Its parts nest under it, indented, folding with it.
             for part in sections.parts_of(top.id()) {
                 if folding {
@@ -85,7 +103,7 @@ impl Threadbear {
                     items.push(Item::Heading { project: part.project.clone(), count: part.threads.len(), part: true });
                 }
                 if shows(part.id()) {
-                    self.push_section_rows(&mut items, part, true);
+                    self.push_section_rows(&mut items, part, true, nesting, now);
                 }
             }
         }
@@ -96,7 +114,7 @@ impl Threadbear {
                 items.push(Item::Unfiled);
             }
             if shows(UNFILED_ID) {
-                items.extend(sections.unfiled.iter().map(|t| Item::Row { thread: (*t).clone(), section: "inbox", group: UNFILED_ID.to_owned(), part: false }));
+                self.push_rows(&mut items, &sections.unfiled, UNFILED_ID, false, nesting, now, |t| (*t).clone());
             }
         }
         if sections.sections.is_empty() && sections.unfiled.is_empty() {
@@ -106,18 +124,51 @@ impl Threadbear {
     }
 
     /// A project's open threads, then its archived ones folded away.
-    fn push_section_rows(&self, items: &mut Vec<Item>, section: &Section, part: bool) {
+    fn push_section_rows(&self, items: &mut Vec<Item>, section: &Section, part: bool, nesting: Option<&Nesting>, now: i64) {
         let id = section.id();
-        items.extend(section.threads.iter().map(|t| Item::Row { thread: under(t, id), section: "inbox", group: id.to_owned(), part }));
+        self.push_rows(items, &section.threads, id, part, nesting, now, |t| under(t, id));
         if section.archived.is_empty() {
             return;
         }
         let shown = self.projects.archived_shown.get(id).copied().unwrap_or(0);
         items.push(Item::ArchivedFold { project: id.to_owned(), count: section.archived.len(), open: shown > 0, part });
         // Their own group: a row is a section's and a thread's.
-        items.extend(section.archived.iter().take(shown).map(|t| Item::Row { thread: under(t, id), section: "archived", group: format!("{id}/archived"), part }));
+        items.extend(section.archived.iter().take(shown).map(|t| Item::Row { thread: under(t, id), section: "archived", group: format!("{id}/archived"), part, nest: Nest::None }));
         if shown > 0 && section.archived.len() > shown {
             items.push(Item::ShowMore { project: id.to_owned(), more: ARCHIVED_STEP.min(section.archived.len() - shown), part });
+        }
+    }
+
+    /// A project's open threads as rows. With nested threads, as in the
+    /// inbox: a thread whose starter is in the same project sits under it,
+    /// indented, while the starter's group is open; one whose starter is
+    /// elsewhere keeps its own row here.
+    #[allow(clippy::too_many_arguments)]
+    fn push_rows(&self, items: &mut Vec<Item>, threads: &[&ThreadSummary], group: &str, part: bool, nesting: Option<&Nesting>, now: i64, shown: impl Fn(&ThreadSummary) -> ThreadSummary) {
+        let Some(nesting) = nesting.filter(|n| !n.is_empty()) else {
+            items.extend(threads.iter().map(|t| Item::Row { thread: shown(*t), section: "inbox", group: group.to_owned(), part, nest: Nest::None }));
+            return;
+        };
+        let here: std::collections::HashMap<&str, &ThreadSummary> = threads.iter().map(|t| (t.id.as_str(), *t)).collect();
+        for &t in threads {
+            if nesting.top_of(&t.id).is_some_and(|top| here.contains_key(top)) {
+                continue;
+            }
+            let Some(g) = nesting.group(&t.id) else {
+                items.push(Item::Row { thread: shown(t), section: "inbox", group: group.to_owned(), part, nest: Nest::None });
+                continue;
+            };
+            let open = self.group_shown(&t.id, g);
+            let nest = Nest::Starter { words: nested::group_words(g), tip: nested::toggle_tip(open, g), open, needs_you: g.needs_you > 0 };
+            items.push(Item::Row { thread: shown(t), section: "inbox", group: group.to_owned(), part, nest });
+            if !open {
+                continue;
+            }
+            for c in g.children.iter().filter_map(|id| here.get(id.as_str())) {
+                let (line, question) = nested::child_line(c, now);
+                let section = if c.snoozed(now) { "hibernating" } else { "running" };
+                items.push(Item::Row { thread: shown(*c), section, group: group.to_owned(), part, nest: Nest::Child { line, question } });
+            }
         }
     }
 
@@ -128,16 +179,33 @@ impl Threadbear {
         let now = now_ms();
         let clock = threadbear_core::sidebar::local_now();
         let folding = self.project_decisions_on();
-        let top_count = Sections::build(&self.projects.list, self.threads.values(), now).top_level().len();
-        let mut list = v_flex().px(px(OUTER_INSET)).pb(px(32.));
+        // Worked out once for the count and the rows: it sorts every
+        // project's threads.
+        let items = {
+            let sections = Sections::build(&self.projects.list, self.threads.values().map(|t| &**t), now);
+            let nesting = self.nested_threads_on().then(|| Nesting::build(self.threads.values(), now, &threadbear_core::inbox::wakes(&self.scheduled.list)));
+            (sections.top_level().len(), self.projects_list_items(&sections, folding, nesting.as_ref(), now))
+        };
+        let (top_count, items) = items;
+        let far = self.projects.list_far.clone();
+        far.begin(self.sidebar_view.as_ref().map(|v| v.entity_id()), &self.projects.list_scroll);
+        let mut list = v_flex().px(px(OUTER_INSET)).pb(px(32.)).child(far.marker());
         if self.sidebar.loaded {
-            for (n, item) in self.projects_list_items(folding).into_iter().enumerate() {
+            for (n, item) in items.into_iter().enumerate() {
+                // Far out of view it's a gap its height (far_rows.rs),
+                // unless the pointer's on it.
+                let key = item.key();
+                let hovered = matches!(&item, Item::Row { thread, .. } if self.sidebar.hovered.as_deref() == Some(thread.id.as_str()));
+                if let Some(gap) = far.far(&key).filter(|_| !hovered) {
+                    list = list.child(far.row(&key, None, gap));
+                    continue;
+                }
                 let el = match item {
                     Item::Heading { project, count, part } => self.render_project_heading(&project, count, part, &p, cx),
                     Item::Fold { id, title, project, count, decisions, part } => self.render_project_fold(&id, &title, project.as_ref(), count, decisions, part, &p, cx),
                     Item::Unfiled => self.section_heading("projects-unfiled", "Not in a project", "square.dashed", 0, false, false, None, &p, |_, _| {}, cx),
-                    Item::Row { thread, section, group, part } => {
-                        let row = self.render_row(&thread, section, None, now, &clock, &p, cx);
+                    Item::Row { thread, section, group, part, nest } => {
+                        let row = self.render_row_with(&thread, section, None, now, &clock, &p, nest, cx);
                         // Its own id per group, so the same thread under two
                         // projects is two rows to the window.
                         div().id(ElementId::Name(format!("projects-row-{group}-{n}").into())).when(part, |d| d.pl(px(PART_INDENT))).child(row).into_any_element()
@@ -146,7 +214,7 @@ impl Threadbear {
                     Item::ShowMore { project, more, part } => self.render_archived_more(&project, more, part, &p, cx),
                     Item::Empty => div().pl(px(LEADING)).pt(px(10.)).text_size(px(style::size::SIDEBAR_PREVIEW)).line_height(px(style::natural_line(style::size::SIDEBAR_PREVIEW))).text_color(p.secondary).child("No projects yet.").into_any_element(),
                 };
-                list = list.child(el);
+                list = list.child(far.row(&key, Some(el), 0.));
             }
             let archived: Vec<Project> = self.projects.list.iter().filter(|p| p.archived).cloned().collect();
             if !archived.is_empty() {
@@ -191,13 +259,15 @@ impl Threadbear {
 
     /// Notes the pointer over one of the view's own controls.
     fn hover_listener(&self, key: String, cx: &mut Context<Self>) -> Box<dyn Fn(&bool, &mut Window, &mut App) + 'static> {
-        Box::new(cx.listener(move |this, hovered: &bool, _, cx| {
+        Box::new(cx.listener(move |this, hovered: &bool, window, cx| {
             if *hovered {
+                crate::input_probe::input("hover", window);
                 this.projects.hovered = Some(key.clone());
             } else if this.projects.hovered.as_deref() == Some(key.as_str()) {
                 this.projects.hovered = None;
             }
-            cx.notify();
+            // Only the list draws it (the project page has hovers of its own).
+            this.notify_threads_panel(cx);
         }))
     }
 
@@ -385,7 +455,7 @@ impl Threadbear {
     /// says how many it has.
     #[cfg(feature = "automation")]
     pub(crate) fn projects_sidebar_dump(&self) -> Value {
-        let sections = Sections::build(&self.projects.list, self.threads.values(), now_ms());
+        let sections = Sections::build(&self.projects.list, self.threads.values().map(|t| &**t), now_ms());
         let folding = self.project_decisions_on();
         let thread = |t: &ThreadSummary| {
             let look = RowLook::of(t, None);

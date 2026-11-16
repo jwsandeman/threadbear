@@ -11,7 +11,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { ACCOUNTS, FakeAccounts, makeHarness, tick, tmpDir } from '../helpers/fakes.ts';
 import { loadPatchSet } from '../../src/patches.ts';
-import { PatchTrust, worktreeOf } from '../../src/patch-trust.ts';
+import { PatchTrust } from '../../src/patch-trust.ts';
 import type { Projects } from '../../src/projects.ts';
 import type { ThreadRecord } from '../../src/store.ts';
 import { ClaudeAdapter } from '../../src/adapters/claude/adapter.ts';
@@ -85,7 +85,7 @@ for (const mode of ['auto', 'ask'] as const) {
     s.result('completed');
     const t = await settle(h, thread.id);
     assert.equal(fs.existsSync(mark), false, 'none of its code ran');
-    assert.equal(t.patches?.find((p) => p.id === 'notes')?.untrusted, 'new', 'it waits for Mike in Patches');
+    assert.equal(t.patches?.find((p) => p.id === 'notes')?.untrusted, 'new', 'it waits for Alex in Patches');
     assert.equal(t.actions, undefined);
     const saved = path.join(home, 'patch-trust.json');
     const stored = fs.existsSync(saved) ? JSON.parse(fs.readFileSync(saved, 'utf8')).folders : {};
@@ -103,7 +103,7 @@ test('F1: the mode is the one recorded with the call: a write let through in Ask
   await tick();
   const s = h.adapter.last;
   s.init();
-  // Mike switches to Full access while the write is going through.
+  // Alex switches to Full access while the write is going through.
   h.runner.update({ threadId: thread.id, permissionMode: 'full' });
   assert.equal(h.runner.get(thread.id).permissionMode, 'full');
   const askMark = path.join(marks, 'ask.ran');
@@ -258,7 +258,7 @@ function session(mode: PermissionMode, runsAsCode?: (file: string) => CodeWrite)
     output: (o) => outputs.push(o),
     requestApproval: async (req) => {
       approvals.push(req);
-      // Mike (or an older client) picks Always allow where it can.
+      // Alex (or an older client) picks Always allow where it can.
       return { decision: 'allowAlways' };
     },
     requestQuestion: async () => ({ answers: null }),
@@ -370,7 +370,7 @@ for (const mode of ['ask', 'auto'] as const) {
   });
 }
 
-test("Full access: an agent's patch write doesn't ask (Mike's own workflow)", async () => {
+test("Full access: an agent's patch write doesn't ask (Alex's own workflow)", async () => {
   const a = session('full');
   assert.deepEqual(await a.hook('c1', path.join(a.dir, '.threadbear', 'patches', 'notes.ts'), 'bypassPermissions'), {});
   a.state.close!();
@@ -609,7 +609,7 @@ test('F21 case 2: in a cloned repo, a small Edit to its patch trusts none of it;
   assert.deepEqual(trust.trustAgentWrite(fresh, shaOf(mine), null, folder), [fresh]);
 });
 
-test('F21 through the real normalizer: a Full access Edit of an untrusted patch leaves it waiting; of one Mike trusted, it carries on', async () => {
+test('F21 through the real normalizer: a Full access Edit of an untrusted patch leaves it waiting; of one Alex trusted, it carries on', async () => {
   const root = tmpDir();
   const marks = tmpDir();
   const project = path.join(root, 'cloned');
@@ -640,7 +640,7 @@ test('F21 through the real normalizer: a Full access Edit of an untrusted patch 
   let t = await settle(h, thread.id);
   assert.equal(t.patches?.[0].untrusted, 'new');
   assert.equal(fs.existsSync(mark), false);
-  // Mike reads it and trusts it; the agent's next Edit carries on.
+  // Alex reads it and trusts it; the agent's next Edit carries on.
   await h.runner.trustPatches(thread.id, [{ file, hash: t.patches![0].hash! }]);
   assert.equal(fs.existsSync(mark), true);
   edit('e2', '"Ship"', '"Ship it"');
@@ -661,7 +661,7 @@ test("F21 for Claude settings: an Edit of settings with untrusted hooks doesn't 
   put(settings, edited);
   assert.equal(trust.trustClaudeEdit(dir, settings, shaOf(edited), shaOf(theirs)), false);
   assert.ok(!trust.checkClaude(dir).trusted);
-  // Trusted by Mike, then a pull changes the script, then a small Edit.
+  // Trusted by Alex, then a pull changes the script, then a small Edit.
   const v = trust.checkClaude(dir);
   assert.ok(!v.trusted);
   trust.trustClaude(dir, v.hash);
@@ -689,8 +689,8 @@ test('a login with no settings.json yet: writing one is code, and a saved edit r
   put(path.join(login, '.claude.json'), '{}');
   const h = makeHarness(home, {}, {
     accounts: new FakeAccounts([...ACCOUNTS, { id: 'claude-9', provider: 'claude', title: 'nine', configDir: login }]),
-    panelsRoot: tmpDir(),
-    patchTrust: new PatchTrust({ file: path.join(home, 'patch-trust.json'), claudeHome: tmpDir() }),
+    panelsRoot: os.homedir(),
+    patchTrust: new PatchTrust({ file: path.join(home, 'patch-trust.json'), claudeHome: os.homedir() }),
   });
   const { thread } = h.runner.create({ text: 'hi', accountId: 'claude-3', cwd: project, permissionMode: 'ask' });
   await settle(h, thread.id);
@@ -724,9 +724,6 @@ test('a login with no settings.json yet: writing one is code, and a saved edit r
 // Threadbear runs the file as code, Threadbear's own patches being unhashed
 // and full of strings that aren't commands.
 const REPO = path.resolve(import.meta.dirname, '..', '..', '..');
-// What makes it load unhashed on a real runner: it's the runner's own checkout,
-// and a thread's worktree of it counts as that checkout.
-const OWN = worktreeOf(REPO)?.main ?? REPO;
 function inProject(panelsRoot: string, cwd: string, folder: string, always: string[] = [folder], mode: PermissionMode = 'auto') {
   const home = tmpDir();
   // Only its folders matter here; anything else a thread asks a project is nothing.
@@ -737,21 +734,37 @@ function inProject(panelsRoot: string, cwd: string, folder: string, always: stri
 
 test("Threadbear's own patches don't make every edit ask, from a project folder or its own checkout", async () => {
   const root = tmpDir();
+  // Keep the real patch, but scan it in a fixture checkout: trust scans
+  // ancestor .claude folders too, which must never be this user's own.
+  const main = path.join(root, 'repo');
+  fs.mkdirSync(main);
+  // A developer's ignored settings.local.json or Claude worktrees are
+  // private and must not become part of this committed fixture.
+  const tracked = execFileSync('git', ['-C', REPO, '-c', 'core.fsmonitor=false', 'ls-files', '-z', '--', '.threadbear', '.claude'], { encoding: 'utf8' });
+  for (const file of tracked.split('\0').filter(Boolean)) put(path.join(main, file), fs.readFileSync(path.join(REPO, file), 'utf8'));
+  for (const file of ['worktree-setup.sh', 'check.sh', 'scripts/swift-freeze.sh']) put(path.join(main, file), fs.readFileSync(path.join(REPO, file), 'utf8'));
+  const git = (...args: string[]) => execFileSync('git', ['-C', main, '-c', 'user.email=t@t', '-c', 'user.name=t', ...args], { stdio: 'pipe' });
+  git('init', '-q', '-b', 'main');
+  git('add', '-A');
+  git('commit', '-qm', 'fixture');
+  const repo = path.join(root, 'worktree');
+  git('worktree', 'add', '-qb', 'thread/fixture', repo);
   const elsewhere = path.join(root, 'misc');
   fs.mkdirSync(elsewhere, { recursive: true });
-  const { h, thread } = inProject(root, elsewhere, REPO, [OWN]);
+  const { h, thread } = inProject(root, elsewhere, repo, [main]);
   await settle(h, thread.id);
   // Asked directly for the thread in its own checkout: starting one there
   // would give the test a real worktree of this repo.
-  for (const cwd of [elsewhere, REPO]) {
+  for (const cwd of [elsewhere, repo]) {
     const runsAsCode = (file: string) => h.runner.writeRunsAsCode({ ...thread, cwd } as unknown as ThreadRecord, file);
-    assert.equal(runsAsCode(path.join(REPO, 'app/Sources/ThreadbearCore/Protocol/Models.swift')), false, cwd);
-    assert.equal(runsAsCode(path.join(REPO, 'runner/src/instructions.ts')), false, cwd);
+    assert.equal(runsAsCode(path.join(repo, 'app/Sources/ThreadbearCore/Protocol/Models.swift')), false, cwd);
+    assert.equal(runsAsCode(path.join(repo, 'runner/src/instructions.ts')), false, cwd);
     assert.equal(runsAsCode(path.join(elsewhere, 'notes.md')), false, cwd);
     // What they really do run still asks, and says it runs.
-    assert.equal(runsAsCode(path.join(REPO, 'worktree-setup.sh')), true, cwd);
-    assert.equal(runsAsCode(path.join(REPO, 'check.sh')), true, cwd);
-    assert.equal(runsAsCode(path.join(REPO, '.threadbear/patches/checks.ts')), true, cwd);
+    assert.equal(runsAsCode(path.join(repo, 'worktree-setup.sh')), true, cwd);
+    assert.equal(runsAsCode(path.join(repo, 'check.sh')), true, cwd);
+    assert.equal(runsAsCode(path.join(repo, '.threadbear/patches/checks.ts')), true, cwd);
+    assert.equal(runsAsCode(path.join(repo, '.threadbear/patches/app-store.ts')), true, cwd);
   }
 });
 
@@ -817,7 +830,7 @@ test("strings a patch can't run, and a worktree's own setup and check, don't mak
   put(path.join(project, '.threadbear', 'patches', 'p.ts'), `export default {
   worktree: { setup: './setup.sh', check: './check.sh --quick', keep: ['app/.build'] },
   actions: [
-    { title: "Mike's chip", prompt: "Don't stop at what's there; it's only a thought (really)." },
+    { title: "Alex's chip", prompt: "Don't stop at what's there; it's only a thought (really)." },
     { title: 'Site', url: 'https://example.com/a?b=1' },
   ],
   hooks: [{ title: 'Types', on: 'turn.end', run: 'true', edited: 'src/**/*.ts' }],

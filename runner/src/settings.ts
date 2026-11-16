@@ -1,5 +1,6 @@
 // settings.get and settings.update (docs/protocol.md): the runner's side
 // of the Settings window. Everything lives in runner.json.
+import { DEFAULT_LAB_REVIEWERS, labReviewerProblem, parseLabReviewers, type LabReviewer } from './lab-reviewers.ts';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { Config } from './config.ts';
@@ -30,12 +31,18 @@ export type Settings = {
   oneReply: boolean;
   // Review by another lab (runner/lab-review.ts).
   labReview: boolean;
+  // Who reviews, in order (lab-reviewers.ts): runner.json's list, or the
+  // default when it has none.
+  labReviewers: LabReviewer[];
   // Keep the Mac awake while threads work (keep-awake.ts). Only on a Mac:
   // left out elsewhere, so Settings shows no switch for it.
   keepAwake?: boolean;
   // How often a fork's runner starts a thread to bring in Mike's releases
   // (bring-in.ts): every so many days, 'important' or 'off'.
   bringIn: BringInSetting;
+  // Full sync (docs/full-convex.md): tool output goes to Convex too. What
+  // runner.json says, which takes effect when the runner next starts.
+  fullSync: boolean;
   models: {
     pool: string | null;
     privateFolders: string[];
@@ -52,8 +59,10 @@ export type SettingsUpdate = {
   bulletReplies?: boolean;
   oneReply?: boolean;
   labReview?: boolean;
+  labReviewers?: LabReviewer[];
   keepAwake?: boolean;
   bringIn?: BringInSetting;
+  fullSync?: boolean;
   models?: { pool?: string | null; privateFolders?: string[] };
   // Experiment id to on or off, saved under runner.json `experiments`.
   experiments?: Record<string, boolean>;
@@ -83,8 +92,10 @@ export class SettingsService {
       bulletReplies: this.cfg.bulletReplies,
       oneReply: this.cfg.oneReply,
       labReview: this.cfg.labReview,
+      labReviewers: (this.cfg.labReviewers ?? DEFAULT_LAB_REVIEWERS).map((r) => ({ ...r })),
       ...(process.platform === 'darwin' ? { keepAwake: this.cfg.keepAwake } : {}),
       bringIn: bringInSetting(this.cfg.home),
+      fullSync: peekRunnerJson(this.cfg.home).sync?.full === true,
       models: {
         pool: this.cfg.models.pool,
         privateFolders: [...this.cfg.models.privateFolders],
@@ -133,9 +144,20 @@ export class SettingsService {
     if (u.bulletReplies !== undefined) json.bulletReplies = this.cfg.bulletReplies = u.bulletReplies;
     if (u.oneReply !== undefined) json.oneReply = this.cfg.oneReply = u.oneReply;
     if (u.labReview !== undefined) json.labReview = this.cfg.labReview = u.labReview;
+    if (u.labReviewers !== undefined) {
+      this.cfg.labReviewers = u.labReviewers.map((r) => ({ ...r }));
+      json.labReviewers = u.labReviewers;
+    }
     if (u.keepAwake !== undefined) json.keepAwake = this.cfg.keepAwake = u.keepAwake;
     // Read each time it's needed (bring-in.ts), so this takes effect at once.
     if (u.bringIn !== undefined) json.releases = { ...json.releases, bringIn: u.bringIn };
+    // Saved only: the mirror reads it when the runner starts. Either answer is
+    // an answer, so the runner never asks about it again (convex-use.ts).
+    // And the question's thread can't answer it again (Daybreak 121).
+    if (u.fullSync !== undefined) {
+      const { fullAskedThread: _t, fullAskedQuestion: _q, ...sync } = json.sync ?? {};
+      json.sync = { ...sync, full: u.fullSync };
+    }
     if (folders !== undefined || pool !== undefined) {
       json.models = { ...json.models };
       if (pool !== undefined) json.models.pool = this.cfg.models.pool = pool;
@@ -178,9 +200,19 @@ export function settingsMethods(s: SettingsService): Record<string, (p: Record<s
         if (typeof p.labReview !== 'boolean') throw bad('labReview must be a boolean');
         u.labReview = p.labReview;
       }
+      if (p.labReviewers !== undefined) {
+        if (!Array.isArray(p.labReviewers)) throw bad('labReviewers must be a list');
+        const problem = p.labReviewers.map(labReviewerProblem).find(Boolean);
+        if (problem) throw bad(problem);
+        u.labReviewers = parseLabReviewers(p.labReviewers);
+      }
       if (p.keepAwake !== undefined) {
         if (typeof p.keepAwake !== 'boolean') throw bad('keepAwake must be a boolean');
         u.keepAwake = p.keepAwake;
+      }
+      if (p.fullSync !== undefined) {
+        if (typeof p.fullSync !== 'boolean') throw bad('fullSync must be a boolean');
+        u.fullSync = p.fullSync;
       }
       if (p.bringIn !== undefined) {
         const b = parseBringIn(p.bringIn);

@@ -344,6 +344,8 @@ pub enum PeekPicture {
     Image,
     /// Its first lines: text, code, Markdown and pages.
     Lines,
+    /// A bounded first-page or first-frame raster, when the platform can make one.
+    Thumbnail,
     /// Its kind's symbol.
     Symbol,
 }
@@ -351,6 +353,7 @@ pub enum PeekPicture {
 /// The pictures and text the pane previews get a look at their contents;
 /// anything else (a folder, a PDF, a project) its symbol.
 pub fn peek_picture(path: &str) -> PeekPicture {
+    if matches!(crate::open_policy::media_kind(path), Some(crate::open_policy::Media::Pdf | crate::open_policy::Media::Video)) { return PeekPicture::Thumbnail; }
     let lower = path.to_lowercase();
     if highlights::looks_like_picture(path) || lower.ends_with(".svg") {
         return PeekPicture::Image;
@@ -433,11 +436,11 @@ mod tests {
         let titles = |menu: Vec<LinkMenuEntry>| menu.iter().map(|e| e.title().to_owned()).collect::<Vec<_>>();
         assert_eq!(titles(web_link_menu(Some("Safari"), &[], WebLinkAction::Browser)), ["Open in Safari", "Open in Panel", "---", "Copy Link", "---", "Default"]);
         let profiles = vec![
-            ChromeProfile { directory: "Default".into(), name: "Mike".into(), picture: None },
-            ChromeProfile { directory: "Profile 5".into(), name: "convex.dev".into(), picture: None },
+            ChromeProfile { directory: "Default".into(), name: "Alex".into(), picture: None },
+            ChromeProfile { directory: "Profile 5".into(), name: "Work".into(), picture: None },
         ];
         let menu = web_link_menu(Some("Google Chrome"), &profiles, WebLinkAction::Panel);
-        assert_eq!(titles(menu.clone()), ["Open in Chrome: Mike", "Open in Chrome: convex.dev", "Open in Panel", "---", "Copy Link", "---", "Default"]);
+        assert_eq!(titles(menu.clone()), ["Open in Chrome: Alex", "Open in Chrome: Work", "Open in Panel", "---", "Copy Link", "---", "Default"]);
         assert!(matches!(&menu[1], LinkMenuEntry::Item { choice: LinkChoice::OpenInProfile(1), .. }));
         let LinkMenuEntry::Defaults { choices } = menu.last().unwrap() else { panic!() };
         assert_eq!(choices.iter().map(|(t, _, _, on)| (t.as_str(), *on)).collect::<Vec<_>>(), [("Open in Google Chrome", false), ("Open in Panel", true)]);
@@ -448,7 +451,7 @@ mod tests {
     fn chromes_open_profiles_come_from_its_local_state_in_its_order() {
         let folder = Path::new("/Chrome");
         let state = r#"{"profile":{"last_active_profiles":["Profile 5","Default","Gone"],"info_cache":{
-            "Default":{"name":"Mike","gaia_picture_file_name":"Google Profile Picture.png"},
+            "Default":{"name":"Alex","gaia_picture_file_name":"Google Profile Picture.png"},
             "Profile 5":{"name":"","gaia_picture_file_name":""},
             "Profile 9":{"name":"Closed"}}}}"#;
         let exists = |p: &Path| p == Path::new("/Chrome/Default/Google Profile Picture.png");
@@ -456,7 +459,7 @@ mod tests {
         assert_eq!(profiles.len(), 2, "a profile Chrome no longer has is left out");
         assert_eq!((profiles[0].directory.as_str(), profiles[0].name.as_str(), profiles[0].picture.is_none()), ("Profile 5", "Profile 5", true), "no name: its folder's");
         assert_eq!(profiles[1].picture.as_deref(), Some(Path::new("/Chrome/Default/Google Profile Picture.png")));
-        assert_eq!(profiles[1].title(), "Open in Chrome: Mike");
+        assert_eq!(profiles[1].title(), "Open in Chrome: Alex");
         assert!(chrome_profiles("not json", folder, &exists).is_empty());
         assert!(chrome_profiles(r#"{"profile":{}}"#, folder, &exists).is_empty());
         // Offered only with more than one, and Chrome the browser in use.
@@ -467,8 +470,8 @@ mod tests {
 
     #[test]
     fn a_pages_card_is_titled_by_its_words_unless_theyre_its_address() {
-        let card = page_peek("https://github.com/mikecann/threadbear/pull/12", "the PR");
-        assert_eq!((card.title.as_str(), card.detail.as_str(), card.footer.as_str()), ("the PR", "github.com/mikecann/threadbear/pull/12", "Click to open"));
+        let card = page_peek("https://github.com/alex-example/threadbear/pull/12", "the PR");
+        assert_eq!((card.title.as_str(), card.detail.as_str(), card.footer.as_str()), ("the PR", "github.com/alex-example/threadbear/pull/12", "Click to open"));
         assert_eq!(page_peek("https://www.example.com/a", "example.com/a").title, "www.example.com");
         assert_eq!(page_peek("https://example.com/a", "https://example.com/a").title, "example.com");
         assert_eq!(page_peek("https://example.com/", "").detail, "example.com");
@@ -476,12 +479,12 @@ mod tests {
 
     #[test]
     fn a_files_card_names_it_its_folder_and_whether_its_here() {
-        let card = file_peek("/Users/mike/dev/app/docs/plan.md", true, None, "/Users/mike");
+        let card = file_peek("/Users/alex/dev/app/docs/plan.md", true, None, "/Users/alex");
         assert_eq!((card.title.as_str(), card.detail.as_str(), card.footer.as_str()), ("plan.md", "~/dev/app/docs", "Click to open"));
-        assert_eq!(file_peek("/tmp/a.png", false, None, "/Users/mike").footer, "Not found on this Mac");
-        assert_eq!(file_peek("/Users/mike/a.png", false, Some("bruce"), "/Users/mike").footer, "On bruce. Click to open.");
-        assert_eq!(file_peek("/Users/mike/a.png", true, None, "/Users/mike").detail, "~");
-        assert_eq!(file_peek("/Users/mikey/a.png", true, None, "/Users/mike").detail, "/Users/mikey", "not home, just a name like it");
+        assert_eq!(file_peek("/tmp/a.png", false, None, "/Users/alex").footer, "Not found on this Mac");
+        assert_eq!(file_peek("/Users/alex/a.png", false, Some("mac-mini"), "/Users/alex").footer, "On mac-mini. Click to open.");
+        assert_eq!(file_peek("/Users/alex/a.png", true, None, "/Users/alex").detail, "~");
+        assert_eq!(file_peek("/Users/alexa/a.png", true, None, "/Users/alex").detail, "/Users/alexa", "not home, just a name like it");
         assert_eq!(file_peek("/a.png", true, None, "").detail, "/");
     }
 
@@ -492,7 +495,9 @@ mod tests {
         assert_eq!(peek_picture("/a/plan.md"), PeekPicture::Lines);
         assert_eq!(peek_picture("/a/main.rs"), PeekPicture::Lines);
         assert_eq!(peek_picture("/a/page.html"), PeekPicture::Lines);
-        assert_eq!(peek_picture("/a/report.pdf"), PeekPicture::Symbol);
+        assert_eq!(peek_picture("/a/report.pdf"), PeekPicture::Thumbnail);
+        assert_eq!(peek_picture("/a/clip.MP4"), PeekPicture::Thumbnail);
+        assert_eq!(peek_picture("/a/clip.mov"), PeekPicture::Thumbnail);
         assert_eq!(peek_picture("/a/project.tandem"), PeekPicture::Symbol);
         assert_eq!(first_lines(b"one\n\ttwo\nthree\nfour", 3, 80).unwrap(), ["one", "    two", "three"]);
         assert_eq!(first_lines("caf\u{e9}".as_bytes().split_last().unwrap().1, 2, 80).unwrap(), ["caf"], "a character cut off at the end");

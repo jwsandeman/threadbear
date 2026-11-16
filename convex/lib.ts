@@ -4,6 +4,11 @@ import type { QueryCtx, MutationCtx } from './_generated/server';
 import type { Id } from './_generated/dataModel';
 import { callerFrom, FORBIDDEN, forbiddenMessage, isOwnerKey, mayCall, validRunnerId, type Caller } from './runnerAccess';
 
+// A runner's word that Mike is at its Mac counts while it's still checking
+// in; a Mac that's asleep or offline counts as away (devices.ts
+// threadForPush, sync.ts sendStaleHeldPushes).
+export const PRESENCE_FRESH_MS = 3 * 60_000;
+
 // The runner's functions carry the key from its secrets/convex-key: the
 // owner key (the deployment's RUNNER_KEY, set with `npx convex env set
 // RUNNER_KEY <key>`) or a runner key (runnerKeys, `tb runner add`). Every
@@ -79,6 +84,17 @@ export function pageLimit(limit: number | undefined, fallback: number, max: numb
   if (limit === undefined) return fallback;
   if (!Number.isFinite(limit)) throw new ConvexError({ kind: 'invalid', message: 'limit must be a number' });
   return Math.max(1, Math.min(max, Math.floor(limit)));
+}
+
+// A message's or tool body's seq: a whole number from 0 to MAX_SEQ.
+// v.number() takes NaN, the infinities, fractions and numbers past 2^53,
+// and a runner key's bad seq would break the order of its thread and the
+// event ids the main Mac's runner makes from it (seq times 8, plus a few,
+// runner/src/relay.ts SCALE), so it's refused where it comes in (Daybreak,
+// 15 Nov 2026). Seqs count a thread's events, so this is far past any.
+export const MAX_SEQ = 2 ** 49;
+export function isSeq(n: unknown): n is number {
+  return Number.isSafeInteger(n) && (n as number) >= 0 && (n as number) <= MAX_SEQ;
 }
 
 export async function sha256(text: string): Promise<string> {

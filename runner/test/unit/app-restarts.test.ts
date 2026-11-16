@@ -112,7 +112,7 @@ test('a deleted thread is dropped quietly', () => {
   assert.equal(watcher.isWatching(thread.id), false);
 });
 
-test('asks that tell Mike to restart the app count as a request', () => {
+test('asks that tell Alex to restart the app count as a request', () => {
   assert.equal(asksForAppRestart([{ action: 'Click Restart to Update in the Threadbear menu' }]), true);
   assert.equal(asksForAppRestart([{ action: 'Restart Threadbear', where: 'Threadbear menu > Restart to Update' }]), true);
   // The ask is one paragraph now, so the words can be in its why.
@@ -203,4 +203,18 @@ test('with no build known at all, either app coming back counts', () => {
   watcher.watch(thread.id);
   watcher.appHello(D1, 'desktop');
   assert.match(String(h.events(thread.id).findLast((e) => e.type === 'user.message' && e.origin === 'runner')?.text), /GPUI app has restarted onto dddd111/);
+});
+
+// With both apps connected, what the wait says it's waiting to change from
+// names each one's build: it named only the frozen Swift app's (13 Nov).
+test('the wait names each running app with its build', () => {
+  const { watcher, thread } = setUp();
+  watcher.appHello(A, 'mac');
+  watcher.appHello(B, 'desktop');
+  assert.equal(watcher.watch(thread.id).running, 'the GPUI app on bbbb222, the Swift app on aaaa111');
+  const { watcher: w2, thread: t2 } = setUp();
+  w2.appHello(B, 'desktop');
+  assert.equal(w2.watch(t2.id).running, 'the GPUI app on bbbb222');
+  const { watcher: w3, thread: t3 } = setUp();
+  assert.equal(w3.watch(t3.id).running, undefined);
 });

@@ -10,7 +10,7 @@ import { cleanUpWorktree, git, land, landTargetFromGit, makeWorktree, overwritte
 import { RpcServer } from '../../src/rpc.ts';
 import { readToken } from '../../src/config.ts';
 import { nullLogger } from '../../src/log.ts';
-import { PATCH, addBorrowScript, capture, commit, harness, isLocked, lines, makeBranch, makeRepo, notes, runTb, sh, startTb, threadWithWorktree, until, write } from '../helpers/worktrees-harness.ts';
+import { PATCH, addBorrowScript, capture, commit, harness, holdUntil, isLocked, lines, makeBranch, makeRepo, notes, runTb, sh, startTb, threadWithWorktree, until, write } from '../helpers/worktrees-harness.ts';
 
 // --------------------------------------------------------------- landing
 
@@ -39,7 +39,7 @@ test('land serializes separate CLIs before rebasing, so each checks the commit i
 echo checked >> '${root}/checks'
 if test -f first.txt && ! test -f second.txt; then
   touch '${root}/checking'
-  while ! test -f '${root}/release'; do sleep 0.05; done
+  ${holdUntil(`${root}/release`)}
 fi
 if test -f second.txt; then test -f first.txt && test "$1" = --latest; fi
 ` }, 'Add check');
@@ -50,10 +50,12 @@ if test -f second.txt; then test -f first.txt && test "$1" = --latest; fi
   commit(b.path, { 'second.txt': 'second\n' }, 'Second');
   const env = { THREADBEAR_HOME: path.join(root, 'no-runner'), THREADBEAR_THREAD_ID: undefined };
   const first = runTb(['land'], a.path, env);
-  await until(() => fs.existsSync(path.join(root, 'checking')), 'first check');
-  const second = startTb(['land'], b.path, env);
+  let second: ReturnType<typeof startTb> | undefined;
+  // Released however the waits end, so neither CLI is left holding.
   try {
-    await until(() => second.output().includes('Waiting for another landing'), 'second CLI waiting for landing');
+    await until(() => fs.existsSync(path.join(root, 'checking')), 'first check');
+    second = startTb(['land'], b.path, env);
+    await until(() => second!.output().includes('Waiting for another landing'), 'second CLI waiting for landing');
   } finally {
     write(root, { release: '' });
   }
@@ -79,7 +81,7 @@ test('land refuses a branch changed by the check instead of merging an unchecked
 });
 
 test('land releases its lock when a CLI is killed during the check', async () => {
-  const { root, main } = makeRepo(PATCH(`{ check: "touch ../checking; while ! test -f ../release; do sleep 0.05; done" }`));
+  const { root, main } = makeRepo(PATCH(`{ check: "touch ../checking; ${holdUntil('../release')}" }`));
   const t = makeBranch(main);
   commit(t.path, { 'first.txt': 'first\n' }, 'First');
   const env = { THREADBEAR_HOME: path.join(root, 'no-runner'), THREADBEAR_THREAD_ID: undefined };
@@ -239,20 +241,20 @@ test('land: a rebase conflict is undone and names the files', async () => {
 test("land never rebases a branch with a merge on it (Mike's release), so his commits keep their ids", async () => {
   const { main } = makeRepo();
   // Mike's release: a commit of his that main doesn't have.
-  sh(main, 'git checkout -q -b mike && echo his > his.txt && git add his.txt && git commit -qm "Mike\'s change" && git checkout -q main');
-  const his = sh(main, 'git rev-parse mike');
+  sh(main, 'git checkout -q -b alex && echo his > his.txt && git add his.txt && git commit -qm "Alex\'s change" && git checkout -q main');
+  const his = sh(main, 'git rev-parse alex');
   const t = makeBranch(main);
-  sh(t.path, 'git merge -q --no-ff --no-edit mike');
+  sh(t.path, 'git merge -q --no-ff --no-edit alex');
   const c = capture();
   assert.equal(await land(t, c.opts), 0, c.err.join('\n'));
   sh(main, `git merge-base --is-ancestor ${his} main`);
   assert.equal(c.out.length, 2, 'what landed is the merge, not each of his commits');
-  assert.match(c.out[1], /Merge branch 'mike'/);
+  assert.match(c.out[1], /Merge branch 'alex'/);
 
   // Main moved meanwhile: main is merged in, still no rebase.
-  sh(main, 'git checkout -q mike && echo more > more.txt && git add more.txt && git commit -qm "More of his" && git checkout -q main');
-  const more = sh(main, 'git rev-parse mike');
-  sh(t.path, 'git merge -q --no-ff --no-edit mike');
+  sh(main, 'git checkout -q alex && echo more > more.txt && git add more.txt && git commit -qm "More of his" && git checkout -q main');
+  const more = sh(main, 'git rev-parse alex');
+  sh(t.path, 'git merge -q --no-ff --no-edit alex');
   commit(main, { 'other.txt': 'x\n' }, 'Other work');
   const again = capture();
   assert.equal(await land(t, again.opts), 0, again.err.join('\n'));

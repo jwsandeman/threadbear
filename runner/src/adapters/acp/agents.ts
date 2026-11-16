@@ -5,9 +5,16 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import type { Account, PermissionMode, Provider } from '../../protocol.ts';
+import type { AcpToolCall } from './normalize.ts';
 import type { InitializeResult } from './connection.ts';
+import { grokGuardDir, grokTrusts, guardPluginName } from './grok-guard.ts';
 
-export type AcpProvider = Extract<Provider, 'cursor' | 'opencode'>;
+export type AcpProvider = Extract<Provider, 'cursor' | 'opencode' | 'grok'>;
+
+// What a process is started for: the runner's data dir (where Grok's hook
+// lives), and whether it's a small job that may use no tools at all.
+// trusted: the folder was one the agent trusts when this process started.
+export type AgentRun = { dataDir?: string; noTools?: boolean; trusted?: boolean };
 
 export type AcpAgent = {
   provider: AcpProvider;
@@ -19,7 +26,8 @@ export type AcpAgent = {
   loggedIn(home: string): boolean;
   // explicit: runner.json's path for it. Undefined when not installed.
   findBinary(o: { explicit?: string; home: string; pathEnv: string }): string | undefined;
-  args: string[];
+  // Read for every process it starts.
+  args(run?: AgentRun): string[];
   // Runs the agent's own updater, when Update is pressed.
   updateArgs: string[];
   // Set on every process it starts. What stops a thread running tools
@@ -33,6 +41,18 @@ export type AcpAgent = {
   // The agent's own session mode for a thread's permission mode, or
   // undefined to leave it as it is.
   modeFor(mode: PermissionMode): string | undefined;
+  // The MCP tool a permission request is for, as `<server>__<tool>`, where
+  // the agent says. A threadbear tool's request is allowed as it comes: the
+  // runner's own MCP server gates those (tool-gate.ts).
+  mcpToolName?(call: AcpToolCall): string | undefined;
+  // The plugin a process started with these args must report running before
+  // the model does anything each turn, or the turn is stopped (AcpSession).
+  guardName?(args: string[]): string | undefined;
+  // Whether the agent trusts this folder, read once as a process starts.
+  trusts?(cwd: string): boolean;
+  // Why a thread in this folder and mode can't run, if it can't. trusted: what
+  // trusts said when its process started, which outlasts the trust file.
+  refuses?(o: { cwd: string; mode: PermissionMode; trusted?: boolean }): string | undefined;
 };
 
 function isExecutableFile(file: string): boolean {
@@ -44,7 +64,9 @@ function isExecutableFile(file: string): boolean {
   }
 }
 
-function onPath(name: string, pathEnv: string): string | undefined {
+// Also config.ts's, for a claude from npm or Homebrew. Relative PATH folders
+// never count: a thread's folder must not supply the runner's CLI.
+export function onPath(name: string, pathEnv: string): string | undefined {
   for (const dir of pathEnv.split(':')) {
     if (!path.isAbsolute(dir)) continue;
     const file = path.join(dir, name);
@@ -65,6 +87,20 @@ export function isCursorBinary(file: string): boolean {
     return false;
   }
   return /(^|\/)cursor-agent(\/|$)/.test(real);
+}
+
+// Grok's installer links ~/.local/bin/grok to ~/.grok/bin/grok and that to
+// ~/.grok/downloads/grok-<version>-<platform>. A file counts only when where
+// it really lives is named grok: `agent` on Mike's Mac is a link to the same
+// binary, and initialize checks the rest (identifies).
+export function isGrokBinary(file: string): boolean {
+  let real: string;
+  try {
+    real = fs.realpathSync(file);
+  } catch {
+    return false;
+  }
+  return /^grok(-[\w.-]+)?$/.test(path.basename(real));
 }
 
 // Every tool asks unless it only reads, so a tool an agent adds later asks
@@ -105,7 +141,7 @@ export const ACP_AGENTS: Record<AcpProvider, AcpAgent> = {
       return isExecutableFile(own) ? own : onPath('opencode', pathEnv);
     },
     // --pure: no plugins, the user's own included, for the same reason.
-    args: ['acp', '--pure'],
+    args: () => ['acp', '--pure'],
     updateArgs: ['upgrade'],
     env: opencodeEnv,
     identifies: (init) => /opencode/i.test(init.agentInfo?.name ?? '') || Boolean(init.authMethods?.some((m) => m.id === 'opencode-login')),
@@ -123,7 +159,7 @@ export const ACP_AGENTS: Record<AcpProvider, AcpAgent> = {
       const candidates = [path.join(home, '.local', 'bin', 'cursor-agent'), onPath('cursor-agent', pathEnv), path.join(home, '.local', 'bin', 'agent'), onPath('agent', pathEnv)];
       return candidates.find((f): f is string => Boolean(f) && isExecutableFile(f!) && isCursorBinary(f!));
     },
-    args: ['acp'],
+    args: () => ['acp'],
     updateArgs: ['update'],
     // Nothing to set: the mode does the job. See modeFor.
     env: () => ({}),
@@ -133,6 +169,51 @@ export const ACP_AGENTS: Record<AcpProvider, AcpAgent> = {
     // Its ask and plan modes are read-only, so a thread that has to ask
     // runs in one of those: it can't change anything, card or no card.
     modeFor: (mode) => (mode === 'full' ? 'agent' : mode === 'plan' ? 'plan' : 'ask'),
+  },
+  grok: {
+    provider: 'grok',
+    accountId: 'grok-main',
+    title: 'Grok',
+    configDir: (home) => path.join(home, '.grok'),
+    // Its login; only whether it exists is read, never what it holds.
+    loggedIn: (home) => fs.existsSync(path.join(home, '.grok', 'auth.json')),
+    findBinary({ explicit, home, pathEnv }) {
+      if (explicit) return path.isAbsolute(explicit) && isExecutableFile(explicit) ? explicit : undefined;
+      const candidates = [path.join(home, '.local', 'bin', 'grok'), path.join(home, '.grok', 'bin', 'grok'), onPath('grok', pathEnv)];
+      return candidates.find((f): f is string => Boolean(f) && isExecutableFile(f!) && isGrokBinary(f!));
+    },
+    // Threadbear's hook as a plugin (grok-guard.ts), which is what makes
+    // every tool ask: a new one, named at random, for every start. Grok
+    // ignores --plugin-dir in its leader mode, so never that, whatever its
+    // config says.
+    args: (run = {}) => ['agent', '--no-leader', '--plugin-dir', grokGuardDir(run), 'stdio'],
+    guardName: guardPluginName,
+    // A folder Grok trusts runs its own hooks before anything can ask, and
+    // can rewrite what a call does after the guard has looked.
+    trusts: (cwd) => grokTrusts(cwd),
+    refuses: ({ cwd, mode, trusted }) =>
+      mode !== 'full' && (trusted || grokTrusts(cwd))
+        ? "Grok trusts this folder, so its own hooks would run before anything could ask you. Use Full access, or take the folder out of Grok's trusted folders (`/hooks-untrust` in Grok there), then send this again."
+        : undefined,
+    updateArgs: ['update'],
+    // A thread's own variables come before these (AcpAdapter.env), so it
+    // can't turn Grok's folder trust off (which would load a folder's hooks
+    // and rules unasked) or let a sandbox approve shell commands by itself.
+    // Neither can get round the hook; they're belt and braces.
+    env: () => ({ GROK_FOLDER_TRUST: '1', GROK_SANDBOX_AUTO_ALLOW_BASH: 'false' }),
+    identifies: (init) => Boolean(init.authMethods?.some((m) => m.id === 'grok.com')) || init._meta?.grokShell === true,
+    // Grok offers no session modes over ACP: the hook makes every mode ask,
+    // and each request is answered from the thread's mode (AcpSession).
+    modeFor: () => undefined,
+    // An MCP tool is called through Grok's use_tool, naming it.
+    mcpToolName(call) {
+      const input = call.rawInput;
+      if (input && typeof input === 'object' && !Array.isArray(input)) {
+        const r = input as Record<string, unknown>;
+        if (r.variant === 'UseTool' && typeof r.tool_name === 'string') return r.tool_name;
+      }
+      return undefined;
+    },
   },
 };
 

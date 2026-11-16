@@ -218,7 +218,7 @@ test('runner: a thread in an untrusted folder gets no actions until patches.trus
 });
 
 // Plays a Claude Edit through the real normalizer, as the CLI sends it:
-// the call, the approval preview (beforeApproval), then Mike's answer. On
+// the call, the approval preview (beforeApproval), then Alex's answer. On
 // approval `apply` makes the CLI's write, and `meanwhile` anything that
 // runs before the runner reads the result (a command straight after).
 // `mode`: what the adapter recorded the call as going through on (its
@@ -269,7 +269,7 @@ test('runner: a denied edit of an untrusted patch leaves it untrusted, from Clau
   s.init();
   const ctx = fileContext(project, tmpDir(), tmpDir());
 
-  // Claude: the preview's edit.diff names the file, then Mike says no.
+  // Claude: the preview's edit.diff names the file, then Alex says no.
   claudeEdit(s, new ClaudeNormalizer(ctx), { id: 'tu1', file: v.file, old: '"Deploy"', new: '"Ship"', deny: true });
   assert.ok(h.events(thread.id).some((e) => e.type === 'edit.diff' && e.path === v.file), 'the preview was shown');
   // Codex: a proposed patch (started, then updated), declined.
@@ -327,7 +327,7 @@ test('runner: a successful edit trusts only the bytes it wrote, not the file cha
   assert.equal(t.patches?.[0].untrusted, 'new');
   assert.equal(fs.existsSync(evil), false);
 
-  // Left as the edit wrote it, from a version Mike trusted (an Edit only
+  // Left as the edit wrote it, from a version Alex trusted (an Edit only
   // vouches for what it changed): trusted, by that file's hash alone.
   const fresh = writePatch(project, 'tools', 'Deploy');
   const trusted = patchHash(fresh.file).hash;
@@ -371,7 +371,7 @@ test('runner: a successful edit trusts only the bytes it wrote, not the file cha
   assert.equal(t.patches?.[0].untrusted, 'changed');
   assert.equal(t.actions, undefined);
   assert.equal(fs.existsSync(evil), false);
-  // Even left as Codex wrote it: Mike trusts it.
+  // Even left as Codex wrote it: Alex trusts it.
   const codexPatch = writePatch(project, 'tools', 'Codex');
   send(codex.handle('item/started', { threadId: 'th', item: { type: 'fileChange', id: 'p2', changes: [change], status: 'inProgress' } }));
   send(codex.handle('item/completed', { threadId: 'th', item: { type: 'fileChange', id: 'p2', changes: [change], status: 'completed' } }));
@@ -1104,4 +1104,48 @@ test("runner: a trusted hook whose script changed after the last look isn't run;
   assert.ok(note());
   assert.equal(h.events(thread.id).filter((e) => e.type === 'action.run').length, 0);
   assert.equal(fs.existsSync(ran), false);
+});
+
+// Trust pressed on two patches one after the other (the Patches panel's
+// two rows): the second came while the first one's re-read was still
+// going, in a slow badge. That read had already found the second patch
+// untrusted, and the second press's re-read was dropped because a read
+// was running, so the row kept saying "Changed since you trusted it"
+// until the next poll, 15 to 20 seconds later (13 Nov 2026).
+test('runner: Trust pressed on a second patch while the first one is still loading loads both', async () => {
+  const root = tmpDir();
+  const project = path.join(root, 'app');
+  const dir = path.join(project, '.threadbear', 'patches');
+  fs.mkdirSync(dir, { recursive: true });
+  // a's badge says it has started, then waits to be let go: by then the
+  // read has looked at b (files load in order, live state after).
+  const gate = tmpDir();
+  const entered = path.join(gate, 'entered');
+  const go = path.join(gate, 'go');
+  fs.writeFileSync(
+    path.join(dir, 'a.ts'),
+    `import fs from 'node:fs';\nexport default { panels: [{ title: "A", url: "https://example.com/a", badge: async () => { fs.writeFileSync(${JSON.stringify(entered)}, ''); while (!fs.existsSync(${JSON.stringify(go)})) await new Promise((r) => setTimeout(r, 20)); return 1; } }] };\n`,
+  );
+  fs.writeFileSync(path.join(dir, 'b.ts'), `export default { panels: [{ title: "B", url: "https://example.com/b", badge: () => 1 }] };\n`);
+  const home = tmpDir();
+  const h = makeHarness(home, {}, { panelsRoot: root, patchTrust: new PatchTrust({ file: path.join(home, 'patch-trust.json') }) });
+  const { thread } = h.runner.create({ text: 'hi', accountId: 'claude-3', cwd: project });
+  await tick();
+  await h.runner.patchesIdle();
+  const shown = h.runner.get(thread.id).patches!;
+  const [a, b] = ['a', 'b'].map((id) => shown.find((p) => p.id === id)!);
+  assert.equal(a.untrusted, 'new');
+  assert.equal(b.untrusted, 'new');
+
+  const first = h.runner.trustPatches(thread.id, [{ file: a.file!, hash: a.hash! }]);
+  for (let i = 0; !fs.existsSync(entered); i++) {
+    assert.ok(i < 400, `a's badge never ran: ${JSON.stringify(h.runner.get(thread.id).patches)}`);
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  const second = h.runner.trustPatches(thread.id, [{ file: b.file!, hash: b.hash! }]);
+  fs.writeFileSync(go, '');
+  await Promise.all([first, second]);
+  const after = h.runner.get(thread.id);
+  assert.deepEqual(after.patches?.filter((p) => p.untrusted).map((p) => p.id), []);
+  assert.deepEqual(after.panels?.filter((p) => p.title === 'A' || p.title === 'B').map((p) => p.title).sort(), ['A', 'B']);
 });

@@ -97,7 +97,7 @@ public enum ThreadLinks {
         case let .message(message): matches(message, q) ? message.seq : nil
         case let .tools(run): run.last { matches($0, q) }?.seq
         case let .worked(worked): worked.items.reversed().lazy.compactMap { step(in: $0, q) }.first
-        case .gap: nil
+        case .gap, .note: nil
         }
     }
 
@@ -108,12 +108,12 @@ public enum ThreadLinks {
         // One with no `)` uses up its line and stays: trying every `](work:`
         // after it again was quadratic.
         case .assistant: !message.summary && normal(message.text.replacing(/\]\(work:[^)\n]*(\))?/) { $0.1 == nil ? String($0.0) : "]" }).contains(q)
-        case .user: false
+        case .user, .note: false
         }
     }
 
     /// Lowercase, one space, and home as the runner's step lines write it, so
-    /// `/Users/mike/a.md` finds "Edited ~/a.md".
+    /// `/Users/alex/a.md` finds "Edited ~/a.md".
     private static func normal(_ text: String) -> String {
         text.replacing(/\/Users\/[^\/\s]+/, with: "~")
             .lowercased()
@@ -133,7 +133,7 @@ private extension ThreadItem {
         case let .message(message): message.seq == seq
         case let .tools(run): run.contains { $0.seq == seq }
         case let .worked(worked): worked.items.contains { $0.holds(seq) }
-        case .gap: false
+        case .gap, .note: false
         }
     }
 }

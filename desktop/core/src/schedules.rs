@@ -5,7 +5,7 @@
 pub use crate::home::HomeStat;
 use crate::highlights::{schedule_relative, Schedule};
 use crate::composer::{effort_title, model_title};
-use crate::logins::{choice_for, effort_levels, implied_effort, picker_rows, resolved_model, Account, ModelChoice, PickerRow, RunnerLogins};
+use crate::logins::{choice_for, implied_effort, picker_rows, resolved_model, Account, ModelChoice, PickerRow, RunnerLogins};
 use crate::new_thread::{pool_logins, short_folder};
 use chrono::{DateTime, Datelike, TimeZone, Timelike};
 
@@ -341,7 +341,7 @@ impl ScheduleModels {
         let effective = resolved_model(&[model, default_model.as_deref()]);
         let default_effort = implied_effort(effective, choices, account, logins.defaults.efforts.get(&provider).map(String::as_str));
         let rows = picker_rows(choices, default_model.as_deref(), model, "", &provider);
-        let effort_levels = effort_levels(effective, choices, &provider);
+        let effort_levels = logins.effort_levels(effective, choices, &provider);
         ScheduleModels { provider, account: account.cloned(), default_model, default_effort, rows, effort_levels }
     }
 
@@ -435,7 +435,7 @@ mod tests {
     fn a_new_threads_models_come_from_the_login_it_runs_on() {
         let hello = json!({
             "accounts": [
-                { "id": "claude-main", "provider": "claude", "title": "Mike", "defaultModel": "opus",
+                { "id": "claude-main", "provider": "claude", "title": "Alex", "defaultModel": "opus",
                   "models": [{ "id": "opus", "title": "Opus 5.5", "effortLevels": ["low", "high"] }, { "id": "haiku", "title": "Haiku 5.5" }] },
                 { "id": "codex-main", "provider": "codex", "title": "Codex", "models": [{ "id": "gpt-6", "title": "GPT-6" }] },
             ],

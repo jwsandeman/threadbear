@@ -11,7 +11,7 @@
 // Through Convex, the only way this app reaches another Mac so far, the
 // runner sends no pictures at all, just a line saying how many it kept there,
 // and answers a `files.read` for another runner with "Files on another runner
-// are kept there for now." So these tiles turn up for the mock runner's bruce,
+// are kept there for now." So these tiles turn up for the mock runner's mac-mini,
 // which plays a direct link, and for whatever comes next.
 use crate::call;
 use gpui_kit::*;
@@ -130,6 +130,6 @@ pub(crate) fn tile_point_command(app: &Entity<crate::app::Threadbear>, cmd: &ser
     window.render_frame(cx);
     // A tile's label is its file's name (rows/images.rs).
     let tile = window.find_all_by_label(&name).into_iter().filter(|e| e.visible()).last().ok_or("that picture isn't on screen")?;
-    let at = tile.bounds().center();
-    Ok(json!(format!("ok {} {} {name}", f32::from(at.x).round(), f32::from(at.y).round())))
+    let (x, y) = crate::automation::whole_point(tile.visible_bounds()).ok_or("that picture isn't on screen")?;
+    Ok(json!(format!("ok {x} {y} {name}")))
 }

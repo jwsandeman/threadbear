@@ -6,7 +6,7 @@
 // is one of those too long to read, shown as its words.
 
 export type LinkTarget = { kind: 'step'; quote: string } | { kind: 'thread'; id: string } | { kind: 'review' } | { kind: 'button'; id: string } | { kind: 'plain' };
-type Row = { seq: number; role: 'user' | 'assistant' | 'tool'; text: string; summary?: boolean };
+type Row = { seq: number; role: 'user' | 'assistant' | 'tool' | 'note'; text: string; summary?: boolean };
 
 // The markdown with work: and thread: destinations escaped, as agents write
 // `[tests pass](work:npm test)` and a destination with a space isn't a link to
@@ -159,7 +159,8 @@ function pageFor(rows: readonly Row[]): Page {
 function searchable(row: Row): string | undefined {
   let text = texts.get(row);
   if (text === undefined) {
-    text = row.role === 'assistant' && row.summary ? null : normal(row.role === 'tool' ? row.text : withoutWorkLinks(row.text));
+    // Nor a login's note: it's the runner's line, not a step of the work.
+    text = row.role === 'note' || (row.role === 'assistant' && row.summary) ? null : normal(row.role === 'tool' ? row.text : withoutWorkLinks(row.text));
     texts.set(row, text);
   }
   return text ?? undefined;
@@ -174,7 +175,7 @@ function withoutWorkLinks(text: string): string {
 }
 
 // Lowercase, one space, and home as the runner's step lines write it, so
-// `/Users/mike/a.md` finds "Edited ~/a.md".
+// `/Users/alex/a.md` finds "Edited ~/a.md".
 function normal(text: string): string {
   return text
     .replace(/\/Users\/[^/\s]+/g, '~')

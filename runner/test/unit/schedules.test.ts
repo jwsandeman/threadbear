@@ -2,15 +2,18 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { makeHarness, tick } from '../helpers/fakes.ts';
+import { makeHarness, tick, tmpDir } from '../helpers/fakes.ts';
 import { describeAt, describeCron, nextRuns, parseCron } from '../../src/cron.ts';
 import { SAVE_RETRY_MS, Scheduler, scheduleMethods, type ScheduleBackend, type StoredSchedule } from '../../src/schedules.ts';
 import { buildThreadbearTools } from '../../src/threadbear-mcp.ts';
 import { ErrorCode, RpcError } from '../../src/protocol.ts';
 import { nullLogger } from '../../src/log.ts';
 import { readRunnerJson } from '../../src/config.ts';
-import { toOwnedScheduleDoc, SCHEDULE_POOLS_API_VERSION } from '../../src/sync.ts';
+import { convexPoster, toOwnedScheduleDoc, SCHEDULE_POOLS_API_VERSION } from '../../src/sync.ts';
 import { keptCheckFile } from '../../src/schedule-check.ts';
+import { scheduledSendMethods, sendScheduled } from '../../src/handover.ts';
+import { DRAIN_MAX_OLD_MS, DRAIN_SETTLE_MS } from '../../src/runner.ts';
+import { PatchTrust } from '../../src/patch-trust.ts';
 
 const MIN = 60_000;
 const iso = (ms: number) => new Date(ms).toISOString();
@@ -93,6 +96,566 @@ function idleThread(h: ReturnType<typeof makeHarness>) {
   s.result('completed');
   return { thread, s };
 }
+
+for (const backend of [false, true]) for (const crashed of [false, true]) for (const manual of [false, true]) test(`a lost draining-runner reply is not delivered again after adoption (${backend ? 'backend' : 'local'}, ${crashed ? 'crash' : 'normal'}, ${manual ? 'Run now' : 'due'})`, async () => {
+  const old = makeHarness();
+  // Start the primary before the old thread exists, as if it skipped a
+  // thread the draining process still owns. They share the real log files.
+  const h = makeHarness(old.home);
+  const { thread } = old.runner.create({ text: 'Measure', accountId: 'claude-3' });
+  const session = old.adapter.last;
+  session.init();
+  session.out({ kind: 'tasks', tasks: [{ id: 'shell', type: 'local_bash', kind: 'shell', description: 'blocked shell' }] });
+  session.result('completed');
+  await tick();
+  await old.runner.beginDrain([thread.id], { onHandedOver: () => assert.fail('the shell holds ownership') });
+  let away = true;
+  let arriving = false;
+  const sched = new Scheduler({
+    runner: h.runner, home: h.home, clock: h.clock, log: nullLogger, self: LAPTOP,
+    elsewhere: () => away,
+    sendElsewhere: async (id, text, scheduleId, run, since) => {
+      if (arriving) return sendScheduled(h.runner, { call: async () => { throw new RpcError(ErrorCode.moved, 'arriving'); } }, id, text, scheduleId, run, since);
+      const methods = scheduledSendMethods(old.runner);
+      const deliver = methods['drain.sendScheduledOnce'] ?? methods['drain.sendScheduled'];
+      deliver({ threadId: id, text, scheduleId, run, since });
+      throw new RpcError(ErrorCode.busy, 'connection closed before the reply');
+    },
+  });
+  sched.start();
+  if (backend) { await sched.attach(fakeBackend(h.clock, [LAPTOP]).for('primary', LAPTOP.id)); await tick(8); }
+  try {
+    const sc = await sched.create({ text: 'Inspect', at: iso(h.clock.now() + MIN), threadId: thread.id });
+    if (manual) await assert.rejects(sched.runNow(sc.id), (e: RpcError) => e.code === ErrorCode.busy);
+    else h.clock.advance(MIN);
+    await tick(8);
+    assert.equal(session.sent.length, 2, 'the old process started the scheduled turn');
+    assert.equal(sched.find(sc.id).lastRun, undefined, 'the missing reply left the slot due');
+    arriving = true;
+    h.clock.advance(MIN);
+    await tick(8);
+    assert.equal(sched.find(sc.id).lastRun, undefined, 'the arriving gap leaves delivery pending');
+    if (!crashed) { session.result('completed'); await tick(8); }
+    old.runner.flush();
+    away = false;
+    h.runner.adopt(thread.id, { crashed });
+    h.clock.advance(MIN);
+    await tick(8);
+    const messages = h.store.log(thread.id).read(1, h.store.log(thread.id).lastSeq).filter((e) => e.type === 'user.message' && e.scheduleId === sc.id);
+    assert.equal(messages.length, 1, 'the primary acknowledges the existing durable message');
+    assert.equal(sched.find(sc.id).runs, 1);
+    assert.ok(sched.find(sc.id).finishedAt);
+  } finally { sched.stop(); }
+});
+
+test('a manual cron run cannot change the identity of a lost due delivery', async () => {
+  const h = makeHarness();
+  const { thread, s } = idleThread(h);
+  let away = true;
+  const sched = new Scheduler({
+    runner: h.runner, home: h.home, clock: h.clock, log: nullLogger,
+    elsewhere: () => away,
+    sendElsewhere: async (id, text, scheduleId, run, since) => {
+      h.runner.sendScheduled(id, text, scheduleId, run, since);
+      throw new RpcError(ErrorCode.busy, 'lost reply');
+    },
+  });
+  sched.start();
+  try {
+    const sc = await sched.create({ text: 'Inspect', cron: '* * * * *', threadId: thread.id });
+    h.clock.advance(MIN);
+    await tick(8);
+    s.result('completed');
+    await tick();
+    away = false;
+    await sched.runNow(sc.id);
+    s.result('completed');
+    await tick();
+    h.clock.advance(MIN / 2);
+    await tick(8);
+    const messages = h.events(thread.id).filter((e) => e.type === 'user.message' && e.scheduleId === sc.id);
+    assert.equal(messages.length, 2, 'one due delivery and one explicit manual delivery');
+    assert.equal(sched.find(sc.id).runs, 2);
+  } finally { sched.stop(); }
+});
+
+test('Run now consuming a one-off while its backend claim waits does not send it twice', async () => {
+  const h = makeHarness();
+  const { thread } = idleThread(h);
+  const sched = new Scheduler({ runner: h.runner, home: h.home, clock: h.clock, log: nullLogger, self: LAPTOP });
+  sched.start();
+  const be = fakeBackend(h.clock, [LAPTOP]).for('primary', LAPTOP.id);
+  let release!: () => void;
+  await sched.attach({ ...be, claim: async (...args) => {
+    const claimed = await be.claim(...args);
+    await new Promise<void>((resolve) => { release = resolve; });
+    return claimed;
+  } });
+  await tick(8);
+  try {
+    const sc = await sched.create({ text: 'Inspect', at: iso(h.clock.now() + MIN), threadId: thread.id });
+    h.clock.advance(MIN);
+    await tick(8);
+    assert.equal(typeof release, 'function');
+    await sched.runNow(sc.id);
+    release();
+    await tick(8);
+    assert.equal(sched.find(sc.id).runs, 1);
+    assert.equal(h.events(thread.id).filter((e) => e.type === 'user.message' && e.scheduleId === sc.id).length, 1);
+  } finally { sched.stop(); release?.(); }
+});
+
+test('a delivery timestamp from a slightly faster runner does not hide its logged message', async () => {
+  const h = makeHarness();
+  const { thread } = idleThread(h);
+  const since = h.clock.now() + 2 * MIN;
+  const sent = h.runner.sendScheduled(thread.id, 'Inspect', 's1', 'due:slot#0', since);
+  await tick();
+  const recovered = makeHarness(h.home);
+  assert.deepEqual(recovered.runner.sendScheduled(thread.id, 'Inspect', 's1', 'due:slot#0', since), sent);
+  const log = recovered.store.log(thread.id);
+  assert.equal(log.read(1, log.lastSeq).filter((e) => e.type === 'user.message' && e.scheduleId === 's1').length, 1);
+});
+
+test('explicit cron runs remain distinct from each other and the next due slot', async () => {
+  const { h, sched } = setup();
+  const { thread, s } = idleThread(h);
+  try {
+    const sc = await sched.create({ text: 'Inspect', cron: '@hourly', threadId: thread.id });
+    await sched.runNow(sc.id);
+    s.result('completed');
+    await tick();
+    await sched.runNow(sc.id);
+    s.result('completed');
+    await tick();
+    h.clock.advance(60 * MIN);
+    await tick(8);
+    const messages = h.store.log(thread.id).read(1, h.store.log(thread.id).lastSeq).filter((e) => e.type === 'user.message' && e.scheduleId === sc.id);
+    assert.equal(messages.length, 3);
+    assert.equal(new Set(messages.map((e) => e.turnId)).size, 3);
+  } finally { sched.stop(); }
+});
+
+test('rearming a consumed one-off at the same time sends the edited text again', async () => {
+  const { h, sched } = setup();
+  const { thread, s } = idleThread(h);
+  try {
+    const at = iso(h.clock.now() - MIN);
+    const sc = await sched.create({ text: 'First', at, threadId: thread.id });
+    await tick(8);
+    s.result('completed');
+    await tick();
+    await sched.update({ scheduleId: sc.id, at, text: 'Edited' });
+    await tick(8);
+    assert.equal(s.sent.at(-1)?.text.includes('Edited'), true);
+    assert.equal(sched.find(sc.id).runs, 2);
+    const messages = h.events(thread.id).filter((e) => e.type === 'user.message' && e.scheduleId === sc.id);
+    assert.equal(messages.length, 2);
+    assert.notEqual(messages[0].turnId, messages[1].turnId);
+  } finally { sched.stop(); }
+});
+
+test('a new keyed send searches recent events and legacy sends do not scan history', async () => {
+  const h = makeHarness();
+  const { thread } = idleThread(h);
+  const st = h.runner.mustGet(thread.id);
+  for (let i = 0; i < 1024; i++) h.runner.emit(st, { type: 'system.note', text: 'Earlier work' });
+  h.clock.advance(10 * MIN);
+  const log = h.store.log(thread.id);
+  const read = log.read.bind(log);
+  const ranges: number[] = [];
+  log.read = (from, to) => { ranges.push(from); return read(from, to); };
+  h.runner.sendScheduled(thread.id, 'Inspect', 'schedule-1', 'due:slot#0', h.clock.now());
+  assert.equal(ranges.length, 1);
+  assert.ok(ranges[0] > 1, 'old history is not parsed to prove a fresh key absent');
+  h.adapter.last.result('completed');
+  await tick();
+  ranges.length = 0;
+  h.runner.sendScheduled(thread.id, 'Legacy', 'schedule-2');
+  assert.equal(ranges.length, 0);
+});
+
+test('a cached missing delivery scans only events appended since that miss', () => {
+  const h = makeHarness();
+  const { thread } = idleThread(h);
+  const st = h.runner.mustGet(thread.id);
+  const log = h.store.log(thread.id);
+  assert.equal(h.runner.findScheduledSend(thread.id, 's1', 'due:missing'), undefined);
+  let through = log.lastSeq;
+  const read = log.read.bind(log);
+  const ranges: number[] = [];
+  log.read = (from, to) => { ranges.push(from); return read(from, to); };
+  for (let retry = 0; retry < 3; retry++) {
+    h.runner.emit(st, { type: 'system.note', text: 'New streaming work' });
+    ranges.length = 0;
+    assert.equal(h.runner.findScheduledSend(thread.id, 's1', 'due:missing'), undefined);
+    assert.deepEqual(ranges, [through + 1], 'the previously scanned prefix is reused');
+    through = log.lastSeq;
+  }
+});
+
+test('a cached partial message learns about its appended turn start without rereading the row', () => {
+  const h = makeHarness();
+  const { thread } = idleThread(h);
+  const log = h.store.log(thread.id);
+  const append = log.append.bind(log);
+  log.append = (event) => {
+    if (event.type === 'turn.started') throw new Error('disk full');
+    append(event);
+  };
+  try {
+    assert.throws(() => h.runner.sendScheduled(thread.id, 'Inspect', 's1', 'due:partial'), /disk full/);
+  } finally { log.append = append; }
+  const partialSeq = log.lastSeq;
+  const sent = h.runner.sendScheduled(thread.id, 'Retry', 's1', 'due:partial');
+  const read = log.read.bind(log);
+  const ranges: number[] = [];
+  log.read = (from, to) => { ranges.push(from); return read(from, to); };
+  assert.deepEqual(h.runner.findScheduledSend(thread.id, 's1', 'due:partial'), sent);
+  assert.deepEqual(ranges, [partialSeq + 1]);
+  h.runner.emit(h.runner.mustGet(thread.id), { type: 'system.note', text: 'More work' });
+  ranges.length = 0;
+  assert.deepEqual(h.runner.findScheduledSend(thread.id, 's1', 'due:partial'), sent);
+  assert.deepEqual(ranges, [], 'an accepted delivery stays known while the log grows');
+});
+
+test('widening a cached miss time window still searches the older prefix', () => {
+  const h = makeHarness();
+  const { thread } = idleThread(h);
+  const sent = h.runner.sendScheduled(thread.id, 'Inspect', 's1', 'due:older');
+  const recovered = makeHarness(h.home);
+  assert.equal(recovered.runner.findScheduledSend(thread.id, 's1', 'due:older', h.clock.now() + 60 * MIN), undefined);
+  assert.deepEqual(recovered.runner.findScheduledSend(thread.id, 's1', 'due:older', 0), sent);
+});
+
+test('retrying a scheduled start after a failed turn.started append reuses its user message', async () => {
+  const h = makeHarness();
+  const { thread } = idleThread(h);
+  const log = h.store.log(thread.id);
+  const append = log.append.bind(log);
+  log.append = (event) => {
+    if (event.type === 'turn.started') throw new Error('disk full');
+    append(event);
+  };
+  try {
+    assert.throws(() => h.runner.sendScheduled(thread.id, 'Inspect', 'schedule-1', 'due:slot-1'), /disk full/);
+  } finally { log.append = append; }
+  const recovered = makeHarness(h.home);
+  const sent = recovered.runner.sendScheduled(thread.id, 'Changed retry', 'schedule-1', 'due:slot-1');
+  await tick(8);
+  const events = recovered.store.log(thread.id).read(1, recovered.store.log(thread.id).lastSeq);
+  assert.equal(events.filter((e) => e.type === 'user.message' && e.scheduleId === 'schedule-1').length, 1);
+  assert.equal(events.filter((e) => e.type === 'turn.started' && e.turnId === sent.turnId).length, 1);
+  assert.equal(recovered.adapter.last.sent.at(-1)?.text, 'Inspect', 'retry uses the original logged input');
+  assert.deepEqual(recovered.runner.findScheduledSend(thread.id, 'schedule-1', 'due:slot-1'), sent);
+});
+
+for (const backend of [false, true]) for (const hibernated of [false, true]) test(`a scheduled continuation reaches a draining runner held by a blocked shell (${backend ? 'backend' : 'local'}, ${hibernated ? 'hibernating' : 'awake'})`, async () => {
+  const old = makeHarness();
+  const { thread } = old.runner.create({ text: 'Measure', accountId: 'claude-3' });
+  const session = old.adapter.last;
+  session.init();
+  session.out({ kind: 'tasks', tasks: [{ id: 'shell', type: 'local_bash', kind: 'shell', description: 'waiting for a lock' }] });
+  await old.runner.beginDrain([thread.id], { onHandedOver: () => assert.fail('blocked shell still owns the thread'), backgroundMs: 4 * 60 * MIN });
+  const h = makeHarness();
+  const sched = new Scheduler({
+    runner: h.runner, home: h.home, clock: h.clock, log: nullLogger, self: LAPTOP,
+    elsewhere: (id) => id === thread.id,
+    sendElsewhere: (id, text, scheduleId, run, since) => sendScheduled(h.runner, {
+      call: async (_id, method, params) => {
+        assert.equal(method, 'drain.sendScheduledOnce');
+        return scheduledSendMethods(old.runner)['drain.sendScheduledOnce'](params);
+      },
+    }, id, text, scheduleId, run, since),
+  });
+  sched.start();
+  if (backend) { await sched.attach(fakeBackend(h.clock, [LAPTOP]).for('primary', LAPTOP.id)); await tick(6); }
+  try {
+    const sc = await sched.create({ text: 'Inspect the job', at: iso(h.clock.now() + MIN), threadId: thread.id });
+    h.clock.advance(MIN);
+    await tick(8);
+    assert.equal(session.sent.length, 1, 'never steers the running turn');
+    assert.equal(old.runner.mustGet(thread.id).rec.queue.length, 0, 'the old runner never acknowledges an unsent queue item');
+    session.result('completed');
+    await tick(8);
+    assert.equal(sched.find(sc.id).lastRun, undefined, 'a busy old runner leaves the slot due');
+    if (hibernated) {
+      const rec = old.runner.mustGet(thread.id).rec;
+      rec.snoozedUntil = iso(old.clock.now() + 24 * 60 * MIN);
+      rec.wakeWhen = { said: 'when the perf job finishes' };
+    }
+    h.clock.advance(MIN);
+    await tick(8);
+    assert.equal(session.sent.length, 2, 'starts after the turn despite the blocked shell');
+    const msg = old.events(thread.id).filter((e) => e.type === 'user.message').at(-1)!;
+    assert.equal(msg.origin, 'schedule');
+    assert.equal(msg.scheduleId, sc.id);
+    assert.equal(old.runner.get(thread.id).snoozedUntil, undefined);
+    assert.equal(sched.find(sc.id).runs, 1);
+    h.clock.advance(2 * MIN);
+    await tick(8);
+    assert.equal(session.sent.length, 2, 'sent only once');
+  } finally { sched.stop(); }
+});
+
+for (const backend of [false, true]) for (const createdAway of [false, true]) test(`a draining thread's check keeps its approved and executed folder (${backend ? 'backend' : 'local'}, created ${createdAway ? 'after' : 'before'} handover)`, async () => {
+  const home = tmpDir();
+  const cwd = path.join(home, 'project');
+  fs.mkdirSync(cwd);
+  const file = path.join(home, 'patch-trust.json');
+  const trust = () => new PatchTrust({ file, always: [cwd] });
+  const old = makeHarness(home, {}, { patchTrust: trust() });
+  // A primary skips the threads still owned by the old process. Both
+  // processes share the trust file and schedules on disk.
+  const h = makeHarness(home, {}, { patchTrust: trust() });
+  const { thread } = old.runner.create({ text: 'Measure', accountId: 'claude-3', cwd });
+  old.adapter.last.init();
+  old.adapter.last.result('completed');
+  await tick();
+  const shared = fakeBackend(h.clock, [LAPTOP]);
+  const oldSched = new Scheduler({ runner: old.runner, home, clock: old.clock, log: nullLogger, self: LAPTOP });
+  oldSched.start();
+  if (backend) { await oldSched.attach(shared.for('old', LAPTOP.id)); await tick(6); }
+  const command = 'printf "%s" "$PWD"';
+  const params = { text: 'Inspect', cron: '* * * * *', threadId: thread.id, check: command };
+  let sc = createdAway ? undefined : await oldSched.create(params);
+  oldSched.stop();
+  let folder: string | undefined = cwd;
+  let away = true;
+  const checkedFolders: string[] = [];
+  const sched = new Scheduler({
+    runner: h.runner, home, clock: h.clock, log: nullLogger, self: LAPTOP,
+    elsewhere: (id) => away && id === thread.id,
+    folderElsewhere: (id) => id === thread.id ? folder : undefined,
+    sendElsewhere: async (id, text) => old.runner.send(id, text),
+    runCheck: async (p) => {
+      checkedFolders.push(p.cwd);
+      return { ok: true, output: p.cwd };
+    },
+  });
+  sched.start();
+  if (backend) { await sched.attach(shared.for('primary', LAPTOP.id)); await tick(6); }
+  try {
+    sc ??= await sched.create(params);
+    assert.equal(h.runner.patchTrust.checkApproved(command, cwd).approved, true);
+    assert.equal(h.runner.patchTrust.checkApproved(command, home).approved, false, 'never approve the fallback data folder');
+    h.clock.advance(MIN);
+    await tick(12);
+    assert.equal(sched.find(sc.id).runs, 1);
+    assert.ok(old.adapter.last.sent.at(-1)!.text.includes(cwd));
+    assert.doesNotMatch(old.adapter.last.sent.at(-1)!.text, /wasn't run/);
+    assert.deepEqual(checkedFolders, [cwd], 'execution uses the approved folder');
+    old.adapter.last.result('completed');
+    await tick();
+
+    // No peer summary during adoption: neither approve nor run in home.
+    folder = undefined;
+    await assert.rejects(sched.update({ scheduleId: sc.id, check: command }), /folder isn't available/);
+    await assert.rejects(sched.create(params), /folder isn't available/);
+    assert.equal(h.runner.patchTrust.checkApproved(command, home).approved, false);
+    h.clock.advance(MIN);
+    await tick(12);
+    assert.equal(sched.find(sc.id).runs, 1, 'the unresolved run stays due');
+    assert.deepEqual(checkedFolders, [cwd]);
+    folder = cwd;
+    h.clock.advance(MIN);
+    await tick(12);
+    assert.equal(sched.find(sc.id).runs, 2, 'the due check resumes when the folder is known');
+    assert.deepEqual(checkedFolders, [cwd, cwd]);
+    old.adapter.last.result('completed');
+    await tick();
+
+    // A genuine move still needs approval in the new folder.
+    folder = path.join(home, 'other-project');
+    fs.mkdirSync(folder);
+    h.clock.advance(MIN);
+    await tick(12);
+    assert.deepEqual(checkedFolders, [cwd, cwd], 'never execute an unapproved check after a move');
+    assert.match(old.adapter.last.sent.at(-1)!.text, /wasn't run/);
+    old.adapter.last.result('completed');
+    await tick();
+    folder = undefined;
+    away = false;
+    h.clock.advance(MIN);
+    await tick(12);
+    assert.deepEqual(checkedFolders, [cwd, cwd]);
+    assert.equal(sched.find(sc.id).lastRun?.outcome, 'failed', 'a deleted thread fails rather than waiting for handover forever');
+  } finally { sched.stop(); }
+});
+
+for (const requested of [false, true]) test(`an unresponsive draining runner holds only its own ${requested ? 'requested' : 'due'} schedule`, async () => {
+  const h = makeHarness();
+  const { thread } = idleThread(h);
+  let release!: () => void;
+  let calls = 0;
+  const sched = new Scheduler({
+    runner: h.runner, home: h.home, clock: h.clock, log: nullLogger, self: LAPTOP,
+    elsewhere: (id) => id === 'remote',
+    sendElsewhere: async () => { calls++; await new Promise<void>((resolve) => { release = resolve; }); throw new RpcError(ErrorCode.busy, 'still busy'); },
+  });
+  sched.start();
+  const be = fakeBackend(h.clock, [LAPTOP]).for('primary', LAPTOP.id);
+  await sched.attach(be);
+  await tick(8);
+  try {
+    const stuck = await sched.create({ text: 'Inspect', at: iso(h.clock.now() + (requested ? 10 : 1) * MIN), threadId: 'remote' });
+    const ready = await sched.create({ text: 'Other work', at: iso(h.clock.now() + MIN), threadId: thread.id });
+    if (requested) { await be.requestRun(stuck.id, iso(h.clock.now())); await tick(8); }
+    h.clock.advance(MIN);
+    await tick(8);
+    assert.equal(calls, 1);
+    assert.equal(sched.find(stuck.id).runs, 0);
+    assert.equal(sched.find(ready.id).runs, 1, 'another schedule proceeds before the old runner answers');
+    h.clock.advance(2 * MIN);
+    await tick(8);
+    assert.equal(calls, 1, 'the pending RPC is not sent again');
+  } finally { sched.stop(); release?.(); await tick(8); }
+});
+
+test('an old draining release leaves a run due, then it sends locally after the thread moves', async () => {
+  const h = makeHarness();
+  const { thread, s } = idleThread(h);
+  let away = true;
+  let legacyCalls = 0;
+  const sched = new Scheduler({
+    runner: h.runner, home: h.home, clock: h.clock, log: nullLogger,
+    elsewhere: () => away,
+    sendElsewhere: (id, text, scheduleId, run, since) => sendScheduled(h.runner, {
+      call: async (_id, method) => {
+        if (method === 'drain.sendScheduledOnce') throw new RpcError(ErrorCode.methodNotFound, 'old release');
+        legacyCalls++;
+        return h.runner.send(id, text, [], { origin: 'schedule', scheduleId, queue: true });
+      },
+    }, id, text, scheduleId, run, since),
+  });
+  sched.start();
+  try {
+    const sc = await sched.create({ text: 'Inspect', at: iso(h.clock.now() + MIN), threadId: thread.id });
+    h.clock.advance(MIN);
+    await tick(6);
+    assert.equal(sched.find(sc.id).lastRun, undefined);
+    assert.equal(s.sent.length, 1);
+    assert.equal(legacyCalls, 0, 'a keyed send cannot silently give up lost-reply deduplication');
+    away = false;
+    h.clock.advance(MIN);
+    await tick(6);
+    assert.equal(sched.find(sc.id).runs, 1);
+    assert.equal(s.sent.length, 2);
+  } finally { sched.stop(); }
+});
+
+test('a scheduled send racing the handover queues on the primary with its origin', async () => {
+  const h = makeHarness();
+  const { thread, s } = idleThread(h);
+  await sendScheduled(h.runner, {
+    call: async () => { throw new RpcError(ErrorCode.moved, 'handed over'); },
+  }, thread.id, 'Inspect', 'schedule-1');
+  await tick();
+  assert.equal(s.sent.length, 2);
+  const msg = h.events(thread.id).filter((e) => e.type === 'user.message').at(-1)!;
+  assert.equal(msg.origin, 'schedule');
+  assert.equal(msg.scheduleId, 'schedule-1');
+});
+
+test('an in-flight scheduled send cannot be sent again by Run now or another tick', async () => {
+  const h = makeHarness();
+  const { thread } = idleThread(h);
+  let finish!: () => void;
+  let calls = 0;
+  const sched = new Scheduler({
+    runner: h.runner, home: h.home, clock: h.clock, log: nullLogger,
+    elsewhere: () => true,
+    sendElsewhere: async () => { calls++; await new Promise<void>((resolve) => { finish = resolve; }); return { turnId: 'queued' }; },
+  });
+  sched.start();
+  try {
+    const sc = await sched.create({ text: 'Inspect', at: iso(h.clock.now() + MIN), threadId: thread.id });
+    h.clock.advance(MIN);
+    await tick();
+    await assert.rejects(sched.runNow(sc.id), (e: RpcError) => e.code === ErrorCode.busy);
+    h.clock.advance(2 * MIN);
+    await tick();
+    assert.equal(calls, 1);
+    finish();
+    await tick();
+    assert.equal(sched.find(sc.id).runs, 1);
+  } finally { sched.stop(); }
+});
+
+test('concurrent Run now requests send a local message once', async () => {
+  const { h, sched } = setup();
+  const { thread, s } = idleThread(h);
+  try {
+    const sc = await sched.create({ text: 'Inspect', at: iso(h.clock.now() + MIN), threadId: thread.id });
+    const results = await Promise.allSettled([sched.runNow(sc.id), sched.runNow(sc.id)]);
+    assert.equal(results.filter((r) => r.status === 'fulfilled').length, 1);
+    assert.equal(s.sent.length, 2);
+  } finally { sched.stop(); }
+});
+
+test('scheduled turns leave the quiet spell an old runner needs to hand over', async () => {
+  const h = makeHarness();
+  const { thread } = h.runner.create({ text: 'Measure', accountId: 'claude-3' });
+  const s = h.adapter.last;
+  s.init();
+  s.out({ kind: 'tasks', tasks: [{ id: 'shell', type: 'local_bash', kind: 'shell', description: 'never-ending monitor' }] });
+  s.result('completed');
+  const handed: string[] = [];
+  await h.runner.beginDrain([thread.id], { onHandedOver: (id) => handed.push(id), checkMs: MIN });
+  h.runner.draining!.since = h.clock.now() - DRAIN_MAX_OLD_MS;
+  const deliver = scheduledSendMethods(h.runner)['drain.sendScheduled'];
+  assert.throws(() => deliver({ threadId: thread.id, text: 'Inspect', scheduleId: 's1' }), (e: RpcError) => e.code === ErrorCode.busy);
+  h.clock.advance(DRAIN_SETTLE_MS);
+  await tick(8);
+  assert.deepEqual(handed, [thread.id]);
+  assert.equal(s.sent.length, 1);
+});
+
+for (const edit of ['rename', 'reschedule', 'pause']) test(`editing a local schedule during a send preserves its result (${edit})`, async () => {
+  const h = makeHarness();
+  const { thread } = idleThread(h);
+  let finish!: () => void;
+  let calls = 0;
+  const sched = new Scheduler({
+    runner: h.runner, home: h.home, clock: h.clock, log: nullLogger,
+    elsewhere: () => true,
+    sendElsewhere: async () => { calls++; await new Promise<void>((resolve) => { finish = resolve; }); return { turnId: 'queued' }; },
+  });
+  sched.start();
+  try {
+    const sc = await sched.create({ text: 'Inspect', at: iso(h.clock.now() + MIN), threadId: thread.id });
+    h.clock.advance(MIN);
+    await tick(6);
+    const later = iso(h.clock.now() + 10 * MIN);
+    await sched.update({ scheduleId: sc.id, title: 'Renamed', ...(edit === 'reschedule' ? { at: later } : edit === 'pause' ? { paused: true } : {}) });
+    finish();
+    await tick(6);
+    const edited = sched.find(sc.id);
+    assert.equal(edited.title, 'Renamed');
+    assert.equal(edited.runs, 1);
+    assert.equal(edited.lastRun?.outcome, 'sent');
+    if (edit === 'reschedule') { assert.equal(edited.nextRunAt, later); assert.equal(edited.finishedAt, undefined); }
+    else assert.ok(edited.finishedAt);
+    if (edit === 'pause') await sched.update({ scheduleId: sc.id, paused: false });
+    h.clock.advance(2 * MIN);
+    await tick(6);
+    assert.equal(calls, 1, 'the old slot is not sent again');
+  } finally { sched.stop(); }
+});
+
+test('Run now on a paused local one-off finishes that slot before it is resumed', async () => {
+  const { h, sched } = setup();
+  const { thread, s } = idleThread(h);
+  try {
+    const sc = await sched.create({ text: 'Inspect', at: iso(h.clock.now() + MIN), threadId: thread.id, paused: true });
+    await sched.runNow(sc.id);
+    assert.ok(sched.find(sc.id).finishedAt);
+    await sched.update({ scheduleId: sc.id, paused: false });
+    h.clock.advance(2 * MIN);
+    await tick(6);
+    assert.equal(s.sent.length, 2);
+  } finally { sched.stop(); }
+});
 
 test('a one-off sends to its thread when due, says it was scheduled, then is done', async () => {
   const { h, sched, updates } = setup();
@@ -216,6 +779,7 @@ test('a failed run says why, and deleting the thread deletes its schedules', asy
   const job = await sched.create({ text: 'build', cron: '@hourly', cwd: dir, accountId: 'claude-3' });
   fs.rmSync(dir, { recursive: true });
   h.clock.advance(60 * MIN);
+  await tick();
   const failed = sched.find(job.id);
   assert.equal(failed.lastRun?.outcome, 'failed');
   assert.match(failed.lastRun?.note ?? '', /Folder not found/);
@@ -452,10 +1016,10 @@ function fakeBackend(clock: { now(): number }, runners: { id: string; name: stri
   };
 }
 
-const M5 = { id: 'r-m5', name: 'm5', icon: 'laptopcomputer' };
-const BRUCE = { id: 'r-bruce', name: 'bruce', icon: 'macmini' };
+const LAPTOP = { id: 'r-laptop', name: 'laptop', icon: 'laptopcomputer' };
+const MINI = { id: 'r-mac-mini', name: 'mac-mini', icon: 'macmini' };
 
-function backendScheduler(h: ReturnType<typeof makeHarness>, self = M5, home = h.home) {
+function backendScheduler(h: ReturnType<typeof makeHarness>, self = LAPTOP, home = h.home) {
   fs.mkdirSync(home, { recursive: true });
   const sched = new Scheduler({ runner: h.runner, home, clock: h.clock, log: nullLogger, zone: () => 'UTC', self, syncOn: true });
   sched.start();
@@ -466,10 +1030,10 @@ function backendScheduler(h: ReturnType<typeof makeHarness>, self = M5, home = h
 // update copies the record, so two at once lost the earlier one's change.
 test('two updates at once both land: a rename after a lowering keeps it lowered', async () => {
   const h = makeHarness();
-  const sched = new Scheduler({ runner: h.runner, home: h.home, clock: h.clock, log: nullLogger, zone: () => 'UTC', self: M5, syncOn: true });
+  const sched = new Scheduler({ runner: h.runner, home: h.home, clock: h.clock, log: nullLogger, zone: () => 'UTC', self: LAPTOP, syncOn: true });
   sched.start();
-  const b = fakeBackend(h.clock, [M5, BRUCE]);
-  const be = b.for('m5-a', M5.id);
+  const b = fakeBackend(h.clock, [LAPTOP, MINI]);
+  const be = b.for('laptop-a', LAPTOP.id);
   let slow = false;
   await sched.attach({
     ...be,
@@ -493,21 +1057,21 @@ test('two updates at once both land: a rename after a lowering keeps it lowered'
 test('meeting a backend moves schedules.json up once, then the file is only its copy', async () => {
   const h = makeHarness();
   const { thread } = idleThread(h);
-  const local = new Scheduler({ runner: h.runner, home: h.home, clock: h.clock, log: nullLogger, zone: () => 'UTC', self: M5, syncOn: true });
+  const local = new Scheduler({ runner: h.runner, home: h.home, clock: h.clock, log: nullLogger, zone: () => 'UTC', self: LAPTOP, syncOn: true });
   local.start();
   const sc = await local.create({ text: 'ping', cron: '@hourly', threadId: thread.id });
   assert.equal(local.inBackend(), false, 'its own file until a backend says API 9');
 
-  const b = fakeBackend(h.clock, [M5, BRUCE]);
-  await local.attach(b.for('m5-a', M5.id));
+  const b = fakeBackend(h.clock, [LAPTOP, MINI]);
+  await local.attach(b.for('laptop-a', LAPTOP.id));
   await tick();
   assert.equal(local.inBackend(), true);
   assert.deepEqual(b.calls.slice(0, 1), ['adopt 1']);
-  assert.equal(b.rows.get(sc.id)?.runnerId, M5.id);
+  assert.equal(b.rows.get(sc.id)?.runnerId, LAPTOP.id);
   assert.equal(b.rows.get(sc.id)?.whenText, 'Every hour');
   const listed = local.list()[0];
-  assert.equal(listed.runnerId, M5.id);
-  assert.equal(listed.runnerName, 'm5');
+  assert.equal(listed.runnerId, LAPTOP.id);
+  assert.equal(listed.runnerName, 'laptop');
   const saved = JSON.parse(fs.readFileSync(path.join(h.home, 'schedules.json'), 'utf8'));
   assert.equal(saved.version, 2);
   local.stop();
@@ -517,7 +1081,7 @@ test('meeting a backend moves schedules.json up once, then the file is only its 
   const again = backendScheduler(h);
   assert.equal(again.inBackend(), true);
   assert.equal(again.list().length, 1, 'listed from the copy');
-  await again.attach(b.for('m5-b', M5.id));
+  await again.attach(b.for('laptop-b', LAPTOP.id));
   await tick();
   assert.equal(b.calls.filter((c) => c.startsWith('adopt')).length, 1);
   again.stop();
@@ -526,12 +1090,12 @@ test('meeting a backend moves schedules.json up once, then the file is only its 
 test('a due run is claimed, so two runner processes under one id send it once', async () => {
   const h = makeHarness();
   const { thread } = idleThread(h);
-  const b = fakeBackend(h.clock, [M5]);
+  const b = fakeBackend(h.clock, [LAPTOP]);
   // The release that's draining and the new one, as in a handover.
-  const old = backendScheduler(h, M5, path.join(h.home, 'old'));
-  const now = backendScheduler(h, M5, path.join(h.home, 'new'));
-  await old.attach(b.for('m5-old', M5.id));
-  await now.attach(b.for('m5-new', M5.id));
+  const old = backendScheduler(h, LAPTOP, path.join(h.home, 'old'));
+  const now = backendScheduler(h, LAPTOP, path.join(h.home, 'new'));
+  await old.attach(b.for('laptop-old', LAPTOP.id));
+  await now.attach(b.for('laptop-new', LAPTOP.id));
   const sc = await now.create({ text: 'Check CI', at: iso(h.clock.now() + 10 * MIN), threadId: thread.id });
   await tick();
   h.clock.advance(10 * MIN);
@@ -550,7 +1114,7 @@ test('a due run is claimed, so two runner processes under one id send it once', 
 
 test('a check\'s output survives a handover in the backend too, and is sent once by the next runner', async () => {
   const h = makeHarness();
-  const b = fakeBackend(h.clock, [M5]);
+  const b = fakeBackend(h.clock, [LAPTOP]);
   // A check that keeps state: prints its news once.
   const seen: string[] = [];
   let told = false;
@@ -562,12 +1126,12 @@ test('a check\'s output survives a handover in the backend too, and is sent once
   };
   // Both releases share the runner's data dir, as in a real handover.
   const make = () => {
-    const s = new Scheduler({ runner: h.runner, home: h.home, clock: h.clock, log: nullLogger, zone: () => 'UTC', self: M5, syncOn: true, runCheck });
+    const s = new Scheduler({ runner: h.runner, home: h.home, clock: h.clock, log: nullLogger, zone: () => 'UTC', self: LAPTOP, syncOn: true, runCheck });
     s.start();
     return s;
   };
   const old = make();
-  await old.attach(b.for('m5-old', M5.id));
+  await old.attach(b.for('laptop-old', LAPTOP.id));
   const sc = await old.create({ text: 'Look at the forks', title: 'Fork watch', at: iso(h.clock.now() + MIN), check: 'fork-watch' });
   await tick();
   h.runner.refuseNewTurns('The runner is restarting; send again in a moment.');
@@ -580,7 +1144,7 @@ test('a check\'s output survives a handover in the backend too, and is sent once
 
   h.runner.refusing = undefined;
   const next = make();
-  await next.attach(b.for('m5-new', M5.id));
+  await next.attach(b.for('laptop-new', LAPTOP.id));
   for (let i = 0; i < 5; i++) await tick();
   h.clock.advance(MIN);
   for (let i = 0; i < 5; i++) await tick();
@@ -594,11 +1158,11 @@ test('a check\'s output survives a handover in the backend too, and is sent once
 
 test('a backend schedule deleted while its check runs sends nothing', async () => {
   const h = makeHarness();
-  const b = fakeBackend(h.clock, [M5]);
+  const b = fakeBackend(h.clock, [LAPTOP]);
   let finish!: (r: { ok: true; output: string }) => void;
-  const s = new Scheduler({ runner: h.runner, home: h.home, clock: h.clock, log: nullLogger, zone: () => 'UTC', self: M5, syncOn: true, runCheck: () => new Promise((r) => (finish = r)) });
+  const s = new Scheduler({ runner: h.runner, home: h.home, clock: h.clock, log: nullLogger, zone: () => 'UTC', self: LAPTOP, syncOn: true, runCheck: () => new Promise((r) => (finish = r)) });
   s.start();
-  await s.attach(b.for('m5', M5.id));
+  await s.attach(b.for('laptop', LAPTOP.id));
   const sc = await s.create({ text: 'Look', title: 'Fork watch', cron: '*/5 * * * *', check: 'fork-watch' });
   await tick();
   h.clock.advance(5 * MIN);
@@ -614,10 +1178,10 @@ test('a backend schedule deleted while its check runs sends nothing', async () =
 
 test('a backend run uses the schedule as it is once its claim comes back, not as it was', async () => {
   const h = makeHarness();
-  const b = fakeBackend(h.clock, [M5]);
+  const b = fakeBackend(h.clock, [LAPTOP]);
   const seen: string[] = [];
   const s = new Scheduler({
-    runner: h.runner, home: h.home, clock: h.clock, log: nullLogger, zone: () => 'UTC', self: M5, syncOn: true,
+    runner: h.runner, home: h.home, clock: h.clock, log: nullLogger, zone: () => 'UTC', self: LAPTOP, syncOn: true,
     runCheck: async (p) => {
       seen.push(p.command);
       return { ok: true, output: '' };
@@ -625,7 +1189,7 @@ test('a backend run uses the schedule as it is once its claim comes back, not as
   });
   s.start();
   // Claims held until let go, as a slow backend would.
-  const real = b.for('m5', M5.id);
+  const real = b.for('laptop', LAPTOP.id);
   let letGo: (() => void) | undefined;
   const slow: ScheduleBackend = { ...real, claim: (id, kind, expect) => new Promise((r) => (letGo = () => void real.claim(id, kind, expect).then(r))) };
   await s.attach(slow);
@@ -650,95 +1214,120 @@ test('a backend run uses the schedule as it is once its claim comes back, not as
 
 test('runners.list gives each runner\'s version, start and whether it\'s updating, for the Runners panel', async () => {
   const h = makeHarness();
-  const bruce = { ...BRUCE, version: '0.4.0', release: 'r-abc', startedAt: '2026-11-05T01:00:00.000Z', draining: true };
-  const b = fakeBackend(h.clock, [M5, bruce]);
-  const me = { ...M5, version: '0.4.1', release: 'r-def', startedAt: '2026-11-05T02:00:00.000Z' };
-  const m5 = backendScheduler(h, me, path.join(h.home, 'm5'));
-  await m5.attach(b.for('m5', M5.id));
-  const [self, other] = await m5.runners();
-  assert.deepEqual(self, { id: M5.id, name: 'm5', icon: 'laptopcomputer', online: true, self: true, version: '0.4.1', release: 'r-def', startedAt: '2026-11-05T02:00:00.000Z' });
+  const mini = { ...MINI, version: '0.4.0', release: 'r-abc', startedAt: '2026-11-05T01:00:00.000Z', draining: true };
+  const b = fakeBackend(h.clock, [LAPTOP, mini]);
+  const me = { ...LAPTOP, version: '0.4.1', release: 'r-def', startedAt: '2026-11-05T02:00:00.000Z' };
+  const laptop = backendScheduler(h, me, path.join(h.home, 'laptop'));
+  await laptop.attach(b.for('laptop', LAPTOP.id));
+  const [self, other] = await laptop.runners();
+  assert.deepEqual(self, { id: LAPTOP.id, name: 'laptop', icon: 'laptopcomputer', online: true, self: true, version: '0.4.1', release: 'r-def', startedAt: '2026-11-05T02:00:00.000Z' });
   assert.equal(other!.version, '0.4.0');
   assert.equal(other!.release, 'r-abc');
   assert.equal(other!.startedAt, '2026-11-05T01:00:00.000Z');
   assert.equal(other!.draining, true);
-  m5.stop();
+  laptop.stop();
 });
 
 test('a schedule made for another runner runs there, with that runner\'s folder', async () => {
   const h = makeHarness();
-  const b = fakeBackend(h.clock, [M5, BRUCE]);
-  const m5 = backendScheduler(h, M5, path.join(h.home, 'm5'));
-  const bruce = backendScheduler(h, BRUCE, path.join(h.home, 'bruce'));
-  await m5.attach(b.for('m5', M5.id));
-  await bruce.attach(b.for('bruce', BRUCE.id));
+  const b = fakeBackend(h.clock, [LAPTOP, MINI]);
+  const laptop = backendScheduler(h, LAPTOP, path.join(h.home, 'laptop'));
+  const mini = backendScheduler(h, MINI, path.join(h.home, 'mac-mini'));
+  await laptop.attach(b.for('laptop', LAPTOP.id));
+  await mini.attach(b.for('mac-mini', MINI.id));
 
-  // A folder that only exists on Bruce isn't checked on the M5.
-  const made = await m5.create({ text: 'Summarise Slack', title: 'Slack summary', cron: '0 * * * *', cwd: '/nowhere/on/this/mac', accountId: 'codex-main', runnerId: 'Bruce' });
-  assert.equal(made.runnerId, BRUCE.id);
-  assert.equal(made.runnerName, 'bruce');
+  // A folder that only exists on Mac mini isn't checked on the laptop.
+  const made = await laptop.create({ text: 'Summarise Slack', title: 'Slack summary', cron: '0 * * * *', cwd: '/nowhere/on/this/mac', accountId: 'codex-main', runnerId: 'mac-mini' });
+  assert.equal(made.runnerId, MINI.id);
+  assert.equal(made.runnerName, 'mac-mini');
   assert.equal(made.runnerIcon, 'macmini');
-  assert.deepEqual((await m5.runners()).map((r) => [r.name, r.icon]), [['m5', 'laptopcomputer'], ['bruce', 'macmini']]);
+  assert.deepEqual((await laptop.runners()).map((r) => [r.name, r.icon]), [['laptop', 'laptopcomputer'], ['mac-mini', 'macmini']]);
   assert.equal(made.cwd, '/nowhere/on/this/mac');
   await tick();
-  assert.equal(bruce.list().length, 1, 'bruce sees it');
-  await assert.rejects(m5.create({ text: 'x', cron: '@daily', runnerId: 'tinker' }), /No runner called tinker. Runners: m5, bruce/);
-  await assert.rejects(m5.create({ text: 'x', cron: '@daily', threadId: 'whatever', runnerId: 'bruce' }), /runs on that thread's runner/);
+  assert.equal(mini.list().length, 1, 'mac-mini sees it');
+  await assert.rejects(laptop.create({ text: 'x', cron: '@daily', runnerId: 'build-box' }), /No runner called build-box. Runners: laptop, mac-mini/);
+  await assert.rejects(laptop.create({ text: 'x', cron: '@daily', threadId: 'whatever', runnerId: 'mac-mini' }), /runs on that thread's runner/);
 
-  // Due: Bruce takes it and it fails there (no such folder, no such
-  // account), the M5 never tries.
+  // Due: Mac mini takes it and it fails there (no such folder, no such
+  // account), the laptop never tries.
   h.clock.advance(60 * MIN);
   for (let i = 0; i < 5; i++) await tick();
   const row = b.rows.get(made.id)!;
   assert.equal(row.lastRun?.outcome, 'failed');
-  assert.equal(b.calls.filter((c) => c === 'claim due m5').length, 0, 'the M5 leaves it alone');
+  assert.equal(b.calls.filter((c) => c === 'claim due laptop').length, 0, 'the laptop leaves it alone');
   assert.equal(row.nextRunAt, '2026-10-26T14:00:00.000Z', 'carries on next time');
 
-  // Run now from the M5: asked for, and run by Bruce. With no folder it uses
-  // Bruce's default.
-  await m5.update({ scheduleId: made.id, cwd: '' });
+  // Run now from the laptop: asked for, and run by Mac mini. With no folder it uses
+  // Mac mini's default.
+  await laptop.update({ scheduleId: made.id, cwd: '' });
   await tick();
   assert.equal(b.rows.get(made.id)?.cwd, undefined);
-  await bruce.update({ scheduleId: made.id, accountId: 'claude-3' });
-  const asked = await m5.runNow(made.id);
+  await mini.update({ scheduleId: made.id, accountId: 'claude-3' });
+  const asked = await laptop.runNow(made.id);
   assert.equal(asked.queued, true);
   assert.equal(asked.threadId, undefined);
   for (let i = 0; i < 5; i++) await tick();
   const started = h.runner.list().find((t) => t.schedule?.id === made.id);
-  assert.ok(started, 'Bruce started the thread');
+  assert.ok(started, 'Mac mini started the thread');
   assert.equal(started.cwd, h.cfg.defaults.cwd);
   assert.equal(b.rows.get(made.id)?.runRequestedAt, undefined);
   assert.equal(b.rows.get(made.id)?.runs, 1);
-  m5.stop();
-  bruce.stop();
+  laptop.stop();
+  mini.stop();
 });
 
 test('with the backend out of reach, changes fail and say so', async () => {
   const h = makeHarness();
-  const b = fakeBackend(h.clock, [M5]);
+  const b = fakeBackend(h.clock, [LAPTOP]);
   const first = backendScheduler(h);
-  await first.attach(b.for('m5', M5.id));
+  await first.attach(b.for('laptop', LAPTOP.id));
   first.stop();
   // Started again: its file is the backend's copy, and until the backend is
   // attached there's nowhere to write.
   const sched = backendScheduler(h);
   await assert.rejects(sched.create({ text: 'x', cron: '@daily' }), /can't reach right now/, 'before the backend is attached');
-  await sched.attach(b.for('m5', M5.id));
+  await sched.attach(b.for('laptop', LAPTOP.id));
   b.setDown(true);
   await assert.rejects(sched.create({ text: 'x', cron: '@daily' }), /Couldn't save the schedule to the backend: fetch failed/);
   assert.equal(sched.list().length, 0);
   sched.stop();
 });
 
+test('a failed schedule update reports the network cause and keeps the old definition', async () => {
+  const h = makeHarness();
+  const b = fakeBackend(h.clock, [LAPTOP]);
+  const sched = backendScheduler(h);
+  const be = b.for('laptop', LAPTOP.id);
+  let down = false;
+  let attempts = 0;
+  const fake = (async () => {
+    attempts++;
+    throw new TypeError('fetch failed', { cause: Object.assign(new Error('private connection details'), { code: 'ENOTFOUND' }) });
+  }) as typeof fetch;
+  const post = convexPoster('https://x.convex.cloud', fake);
+  await sched.attach({ ...be, save: async (sc) => {
+    if (down) await post('mutation', 'sync:saveSchedule', { key: 'secret-key', schedule: sc });
+    else await be.save(sc);
+  } });
+  const sc = await sched.create({ text: 'Old continuation', title: 'Old title', cron: '@daily' });
+  down = true;
+  await assert.rejects(sched.update({ scheduleId: sc.id, title: 'New title', text: 'New continuation' }), /Couldn't save the schedule to the backend: fetch failed \(ENOTFOUND\)/);
+  assert.equal(attempts, 1);
+  assert.equal(sched.find(sc.id).title, 'Old title');
+  assert.equal(b.rows.get(sc.id)?.text, 'Old continuation');
+  sched.stop();
+});
+
 test('with sync turned off, its own schedules come back from the copy as its own', async () => {
   const h = makeHarness();
-  const b = fakeBackend(h.clock, [M5, BRUCE]);
+  const b = fakeBackend(h.clock, [LAPTOP, MINI]);
   const sched = backendScheduler(h);
-  await sched.attach(b.for('m5', M5.id));
+  await sched.attach(b.for('laptop', LAPTOP.id));
   await sched.create({ text: 'mine', cron: '@daily' });
-  await sched.create({ text: 'bruce', cron: '@daily', runnerId: 'bruce' });
+  await sched.create({ text: 'mac-mini', cron: '@daily', runnerId: 'mac-mini' });
   await tick();
   sched.stop();
-  const off = new Scheduler({ runner: h.runner, home: h.home, clock: h.clock, log: nullLogger, zone: () => 'UTC', self: M5, syncOn: false });
+  const off = new Scheduler({ runner: h.runner, home: h.home, clock: h.clock, log: nullLogger, zone: () => 'UTC', self: LAPTOP, syncOn: false });
   off.start();
   assert.deepEqual(off.list().map((s) => [s.title, s.runnerId]), [['mine', undefined]]);
   off.stop();
@@ -746,11 +1335,11 @@ test('with sync turned off, its own schedules come back from the copy as its own
 
 test('a schedule made while the file is being moved up is moved up too', async () => {
   const h = makeHarness();
-  const b = fakeBackend(h.clock, [M5]);
-  const sched = new Scheduler({ runner: h.runner, home: h.home, clock: h.clock, log: nullLogger, zone: () => 'UTC', self: M5, syncOn: true });
+  const b = fakeBackend(h.clock, [LAPTOP]);
+  const sched = new Scheduler({ runner: h.runner, home: h.home, clock: h.clock, log: nullLogger, zone: () => 'UTC', self: LAPTOP, syncOn: true });
   sched.start();
   const early = await sched.create({ text: 'early', cron: '@daily' });
-  const backend = b.for('m5', M5.id);
+  const backend = b.for('laptop', LAPTOP.id);
   // The adopt call is slow; meanwhile one is made, one changed, one deleted.
   let late: Awaited<ReturnType<Scheduler['create']>> | undefined;
   const slow: ScheduleBackend = {
@@ -772,35 +1361,35 @@ test('a schedule made while the file is being moved up is moved up too', async (
 
 test('on a runner key the scheduler still moves up and lists runners, without the main key\'s adopt and runner list', async () => {
   const h = makeHarness();
-  const b = fakeBackend(h.clock, [M5, BRUCE]);
+  const b = fakeBackend(h.clock, [LAPTOP, MINI]);
   const refused = () => Promise.reject(Object.assign(new Error('Server Error'), { data: { kind: 'forbidden', message: "This runner's key can't call adoptSchedules" } }));
-  const backend = { ...b.for('bruce', BRUCE.id), adopt: refused, runners: refused };
-  const home = path.join(h.home, 'bruce');
+  const backend = { ...b.for('mac-mini', MINI.id), adopt: refused, runners: refused };
+  const home = path.join(h.home, 'mac-mini');
   fs.mkdirSync(home, { recursive: true });
-  const local = new Scheduler({ runner: h.runner, home, clock: h.clock, log: nullLogger, zone: () => 'UTC', self: BRUCE, syncOn: false });
+  const local = new Scheduler({ runner: h.runner, home, clock: h.clock, log: nullLogger, zone: () => 'UTC', self: MINI, syncOn: false });
   local.start();
   await local.create({ text: 'ping', cron: '@hourly', cwd: h.home });
   local.stop();
-  const s = new Scheduler({ runner: h.runner, home, clock: h.clock, log: nullLogger, zone: () => 'UTC', self: BRUCE, syncOn: true });
+  const s = new Scheduler({ runner: h.runner, home, clock: h.clock, log: nullLogger, zone: () => 'UTC', self: MINI, syncOn: true });
   s.start();
   await s.attach(backend as never);
   assert.equal(s.inBackend(), true);
-  assert.equal([...b.rows.values()].filter((r) => r.runnerId === BRUCE.id).length, 1, 'saved one by one instead');
-  assert.deepEqual((await s.runners()).map((r) => r.id), [BRUCE.id]);
+  assert.equal([...b.rows.values()].filter((r) => r.runnerId === MINI.id).length, 1, 'saved one by one instead');
+  assert.deepEqual((await s.runners()).map((r) => r.id), [MINI.id]);
   s.stop();
 });
 
 test("schedules a runner key can't bring up stay on this Mac, running from its own file, and it says so", async () => {
   const h = makeHarness();
-  const b = fakeBackend(h.clock, [BRUCE]);
-  const home = path.join(h.home, 'bruce2');
+  const b = fakeBackend(h.clock, [MINI]);
+  const home = path.join(h.home, 'mini2');
   fs.mkdirSync(home, { recursive: true });
-  const local = new Scheduler({ runner: h.runner, home, clock: h.clock, log: nullLogger, zone: () => 'UTC', self: BRUCE, syncOn: false });
+  const local = new Scheduler({ runner: h.runner, home, clock: h.clock, log: nullLogger, zone: () => 'UTC', self: MINI, syncOn: false });
   local.start();
   const sc = await local.create({ text: 'a long prompt', cron: '@hourly', cwd: h.home });
   local.stop();
-  const backend = { ...b.for('bruce', BRUCE.id), adopt: async () => ({ held: [{ id: sc.id, why: "it's over 12000 bytes" }] }) };
-  const s = new Scheduler({ runner: h.runner, home, clock: h.clock, log: nullLogger, zone: () => 'UTC', self: BRUCE, syncOn: true });
+  const backend = { ...b.for('mac-mini', MINI.id), adopt: async () => ({ held: [{ id: sc.id, why: "it's over 12000 bytes" }] }) };
+  const s = new Scheduler({ runner: h.runner, home, clock: h.clock, log: nullLogger, zone: () => 'UTC', self: MINI, syncOn: true });
   s.start();
   await s.attach(backend as never);
   assert.equal(s.inBackend(), false, 'still its own file');
@@ -818,22 +1407,22 @@ test("schedules a runner key can't bring up stay on this Mac, running from its o
 async function replaceUnderClaim(b: ReturnType<typeof fakeBackend>, id: string, how: 'secondary' | 'owner') {
   const old = structuredClone(b.rows.get(id)!);
   delete old.claim;
-  await b.for('phone', M5.id).remove(id);
+  await b.for('phone', LAPTOP.id).remove(id);
   const evil = { ...old, title: 'ATTACKER JOB', text: 'ATTACKER INSTRUCTIONS', permissionMode: 'full' as const };
-  if (how === 'secondary') await b.for('bruce', BRUCE.id).save({ ...evil, runnerId: BRUCE.id });
-  // Mike making a new one under the old id (his own key may): a new
+  if (how === 'secondary') await b.for('mac-mini', MINI.id).save({ ...evil, runnerId: MINI.id });
+  // Alex making a new one under the old id (his own key may): a new
   // schedule all the same, not the one claimed.
-  else await b.for('phone', M5.id).save({ ...evil, createdAt: iso(Date.parse(old.createdAt) + 1) });
+  else await b.for('phone', LAPTOP.id).save({ ...evil, createdAt: iso(Date.parse(old.createdAt) + 1) });
 }
 
 for (const how of ['secondary', 'owner'] as const) {
   test(`a schedule replaced under its id while its check runs isn't sent as the claimed one (${how})`, async () => {
     const h = makeHarness();
-    const b = fakeBackend(h.clock, [M5, BRUCE]);
+    const b = fakeBackend(h.clock, [LAPTOP, MINI]);
     let finish: ((r: { ok: true; output: string }) => void) | undefined;
-    const s = new Scheduler({ runner: h.runner, home: h.home, clock: h.clock, log: nullLogger, zone: () => 'UTC', self: M5, syncOn: true, runCheck: () => new Promise((r) => (finish = r)) });
+    const s = new Scheduler({ runner: h.runner, home: h.home, clock: h.clock, log: nullLogger, zone: () => 'UTC', self: LAPTOP, syncOn: true, runCheck: () => new Promise((r) => (finish = r)) });
     s.start();
-    await s.attach(b.for('m5', M5.id));
+    await s.attach(b.for('laptop', LAPTOP.id));
     const sc = await s.create({ text: 'Benign', title: 'BENIGN JOB', cron: '*/5 * * * *', check: 'news-check', permissionMode: 'ask' });
     await tick();
     h.clock.advance(5 * MIN);
@@ -853,9 +1442,9 @@ for (const how of ['secondary', 'owner'] as const) {
 
   test(`a requested run whose schedule is replaced while the claim is out isn't sent (${how})`, async () => {
     const h = makeHarness();
-    const b = fakeBackend(h.clock, [M5, BRUCE]);
+    const b = fakeBackend(h.clock, [LAPTOP, MINI]);
     const s = backendScheduler(h);
-    const real = b.for('m5', M5.id);
+    const real = b.for('laptop', LAPTOP.id);
     let letGo: (() => void) | undefined;
     // The claim lands at once; only its answer is slow to come back.
     const slow: ScheduleBackend = {
@@ -868,8 +1457,8 @@ for (const how of ['secondary', 'owner'] as const) {
     await s.attach(slow);
     const sc = await s.create({ text: 'Benign', title: 'BENIGN JOB', cron: '0 0 1 1 *', permissionMode: 'ask' });
     await tick();
-    // Run now from another Mac: a request the M5 claims.
-    await b.for('bruce', BRUCE.id).requestRun(sc.id, iso(h.clock.now()));
+    // Run now from another Mac: a request the laptop claims.
+    await b.for('mac-mini', MINI.id).requestRun(sc.id, iso(h.clock.now()));
     for (let i = 0; i < 5; i++) await tick();
     assert.ok(letGo, 'claiming the request');
     await replaceUnderClaim(b, sc.id, how);
@@ -918,9 +1507,9 @@ test('a run the backend missed hearing of is not sent again in the same process,
   const h = makeHarness();
   const { thread } = idleThread(h);
   const sends = countSends(h, thread.id);
-  const b = fakeBackend(h.clock, [M5]);
+  const b = fakeBackend(h.clock, [LAPTOP]);
   const s = backendScheduler(h);
-  const f = flakyRan(b.for('m5-a', M5.id));
+  const f = flakyRan(b.for('laptop-a', LAPTOP.id));
   await s.attach(f.backend);
   const sc = await s.create({ text: 'Daily digest', title: 'Digest', cron: '0 13 * * *', threadId: thread.id });
   await tick();
@@ -958,9 +1547,9 @@ test('a run the backend missed hearing of is not sent again by the next runner a
   const h = makeHarness();
   const { thread } = idleThread(h);
   const sends = countSends(h, thread.id);
-  const b = fakeBackend(h.clock, [M5]);
+  const b = fakeBackend(h.clock, [LAPTOP]);
   const old = backendScheduler(h);
-  const f = flakyRan(b.for('m5-old', M5.id));
+  const f = flakyRan(b.for('laptop-old', LAPTOP.id));
   await old.attach(f.backend);
   const sc = await old.create({ text: 'Daily digest', title: 'Digest', cron: '0 13 * * *', threadId: thread.id });
   await tick();
@@ -972,7 +1561,7 @@ test('a run the backend missed hearing of is not sent again by the next runner a
 
   // The new release, on the same data dir, with the network back.
   const next = backendScheduler(h);
-  await next.attach(b.for('m5-new', M5.id));
+  await next.attach(b.for('laptop-new', LAPTOP.id));
   for (let i = 0; i < 5; i++) await tick();
   h.clock.advance(MIN);
   for (let i = 0; i < 5; i++) await tick();
@@ -990,9 +1579,9 @@ test('a run the backend missed hearing of is not sent again after the schedule i
   const h = makeHarness();
   const { thread } = idleThread(h);
   const sends = countSends(h, thread.id);
-  const b = fakeBackend(h.clock, [M5, BRUCE]);
+  const b = fakeBackend(h.clock, [LAPTOP, MINI]);
   const s = backendScheduler(h);
-  const f = flakyRan(b.for('m5-a', M5.id));
+  const f = flakyRan(b.for('laptop-a', LAPTOP.id));
   await s.attach(f.backend);
   const sc = await s.create({ text: 'Daily digest', title: 'Digest', cron: '0 13 * * *', threadId: thread.id });
   await tick();
@@ -1001,11 +1590,11 @@ test('a run the backend missed hearing of is not sent again after the schedule i
   for (let i = 0; i < 5; i++) await tick();
   assert.equal(sends.n, 1);
 
-  const bruce = backendScheduler(h, BRUCE, path.join(h.home, 'bruce'));
-  await bruce.attach(b.for('bruce', BRUCE.id));
+  const mini = backendScheduler(h, MINI, path.join(h.home, 'mac-mini'));
+  await mini.attach(b.for('mac-mini', MINI.id));
   for (let i = 0; i < 5; i++) await tick();
   h.clock.advance(1000);
-  await bruce.update({ scheduleId: sc.id, title: 'Renamed' });
+  await mini.update({ scheduleId: sc.id, title: 'Renamed' });
   for (let i = 0; i < 5; i++) await tick();
   assert.equal(b.rows.get(sc.id)?.nextRunAt, '2026-10-26T13:00:00.000Z', 'still the slot that ran');
   h.clock.advance(5 * MIN);
@@ -1023,7 +1612,7 @@ test('a run the backend missed hearing of is not sent again after the schedule i
   for (let i = 0; i < 5; i++) await tick();
   assert.equal(sends.n, 1);
   assert.deepEqual(fs.readdirSync(path.join(h.home, 'schedule-runs')), [], 'nothing left waiting');
-  bruce.stop();
+  mini.stop();
   s.stop();
 });
 
@@ -1033,9 +1622,9 @@ test('a run whose yes comes back after an edit elsewhere is told again, so its n
   const h = makeHarness();
   const { thread } = idleThread(h);
   const sends = countSends(h, thread.id);
-  const b = fakeBackend(h.clock, [M5, BRUCE]);
+  const b = fakeBackend(h.clock, [LAPTOP, MINI]);
   const s = backendScheduler(h);
-  const be = b.for('m5-a', M5.id);
+  const be = b.for('laptop-a', LAPTOP.id);
   let open!: () => void;
   let hold: Promise<void> | undefined;
   await s.attach({
@@ -1049,15 +1638,15 @@ test('a run whose yes comes back after an edit elsewhere is told again, so its n
   });
   const sc = await s.create({ text: 'Daily digest', title: 'Digest', cron: '0 13 * * *', threadId: thread.id });
   await tick();
-  const bruce = backendScheduler(h, BRUCE, path.join(h.home, 'bruce'));
-  await bruce.attach(b.for('bruce', BRUCE.id));
+  const mini = backendScheduler(h, MINI, path.join(h.home, 'mac-mini'));
+  await mini.attach(b.for('mac-mini', MINI.id));
   for (let i = 0; i < 5; i++) await tick();
   hold = new Promise((r) => (open = r));
   h.clock.advance(60 * MIN);
   for (let i = 0; i < 5; i++) await tick();
   assert.equal(sends.n, 1);
   h.clock.advance(1000);
-  await bruce.update({ scheduleId: sc.id, title: 'Renamed' });
+  await mini.update({ scheduleId: sc.id, title: 'Renamed' });
   for (let i = 0; i < 5; i++) await tick();
   hold = undefined;
   open();
@@ -1069,7 +1658,7 @@ test('a run whose yes comes back after an edit elsewhere is told again, so its n
   h.clock.advance(5 * MIN);
   for (let i = 0; i < 5; i++) await tick();
   assert.equal(sends.n, 1);
-  bruce.stop();
+  mini.stop();
   s.stop();
 });
 
@@ -1078,20 +1667,20 @@ test('a one-off run now that the backend missed hearing of is not sent again at 
   const h = makeHarness();
   const { thread } = idleThread(h);
   const sends = countSends(h, thread.id);
-  const b = fakeBackend(h.clock, [M5, BRUCE]);
+  const b = fakeBackend(h.clock, [LAPTOP, MINI]);
   const s = backendScheduler(h);
-  const f = flakyRan(b.for('m5-a', M5.id));
+  const f = flakyRan(b.for('laptop-a', LAPTOP.id));
   await s.attach(f.backend);
   const sc = await s.create({ text: 'Check the deploy', title: 'Deploy', at: iso(h.clock.now() + 60 * MIN), threadId: thread.id });
   await tick();
-  const bruce = backendScheduler(h, BRUCE, path.join(h.home, 'bruce'));
-  await bruce.attach(b.for('bruce', BRUCE.id));
+  const mini = backendScheduler(h, MINI, path.join(h.home, 'mac-mini'));
+  await mini.attach(b.for('mac-mini', MINI.id));
   for (let i = 0; i < 5; i++) await tick();
   f.state.down = true;
   await s.runNow(sc.id);
   assert.equal(sends.n, 1);
   h.clock.advance(MIN);
-  await bruce.update({ scheduleId: sc.id, title: 'Renamed' });
+  await mini.update({ scheduleId: sc.id, title: 'Renamed' });
   for (let i = 0; i < 5; i++) await tick();
   f.state.down = false;
   h.clock.advance(MIN);
@@ -1102,7 +1691,7 @@ test('a one-off run now that the backend missed hearing of is not sent again at 
   const row = b.rows.get(sc.id)!;
   assert.equal(row.nextRunAt, undefined);
   assert.ok(row.finishedAt, 'finished');
-  bruce.stop();
+  mini.stop();
   s.stop();
 });
 

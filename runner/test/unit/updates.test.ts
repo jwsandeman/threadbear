@@ -644,7 +644,7 @@ test('omp: the policy chosen in the app persists; THREADBEAR_CLI_UPDATES=off win
   assert.equal(of(off.u.list(), 'omp').policy, 'off');
 });
 
-function acpSetup(o: { on?: boolean; env?: NodeJS.ProcessEnv; version?: () => string; fail?: boolean } = {}) {
+function acpSetup(o: { missing?: boolean; env?: NodeJS.ProcessEnv; version?: () => string; fail?: boolean } = {}) {
   const calls: string[][] = [];
   const exec: Exec = async (cmd, args) => {
     if (cmd === '/bin/opencode') {
@@ -655,12 +655,12 @@ function acpSetup(o: { on?: boolean; env?: NodeJS.ProcessEnv; version?: () => st
     return { code: 1, stdout: '', stderr: '' };
   };
   const ctx = setup({ exec, env: o.env });
-  (ctx.u as unknown as { d: Record<string, unknown> }).d.acp = { on: () => o.on !== false, providers: ['opencode'], binary: () => '/bin/opencode', updateArgs: () => ['upgrade'] };
+  (ctx.u as unknown as { d: Record<string, unknown> }).d.acp = { providers: ['opencode'], binary: () => (o.missing ? undefined : '/bin/opencode'), updateArgs: () => ['upgrade'] };
   return { ...ctx, calls };
 }
 
-test('with the experiment off, an ACP agent has no row and clis.* do nothing', async () => {
-  const c = acpSetup({ on: false });
+test('an ACP agent that isn\'t installed has no row and clis.* do nothing', async () => {
+  const c = acpSetup({ missing: true });
   assert.ok(!c.u.list().some((r) => r.provider === 'opencode'));
   c.u.update('opencode');
   c.u.check('opencode');
@@ -719,7 +719,7 @@ test('an update left running across a restart is marked failed, so it can be tri
   const c = acpSetup();
   (c.u as unknown as { setUpdate(p: string, u: unknown): void }).setUpdate('opencode', { state: 'running', message: 'Updating' });
   const after = c.make();
-  (after as unknown as { d: Record<string, unknown> }).d.acp = { on: () => true, providers: ['opencode'], binary: () => '/bin/opencode', updateArgs: () => ['upgrade'] };
+  (after as unknown as { d: Record<string, unknown> }).d.acp = { providers: ['opencode'], binary: () => '/bin/opencode', updateArgs: () => ['upgrade'] };
   assert.equal(after.list().find((r) => r.provider === 'opencode')!.update?.state, 'failed');
 });
 

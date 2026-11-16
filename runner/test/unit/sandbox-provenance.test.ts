@@ -41,7 +41,7 @@ function setup(opts: { callerIn?: 'box' | 'host'; mode?: PermissionMode } = {}) 
   h.adapter.last.init();
   // As the router has it: another runner's start (cross-runner.ts) answers for itself.
   const updates: Record<string, unknown>[] = [];
-  const control = new Proxy(h.runner, { get: (t, k) => (k === 'update' ? (u: Record<string, unknown>) => (updates.push(u), t.update(u as never)) : k === 'startOn' ? async () => 'Asked bruce to start it.' : typeof (t as any)[k] === 'function' ? (t as any)[k].bind(t) : (t as any)[k]) });
+  const control = new Proxy(h.runner, { get: (t, k) => (k === 'update' ? (u: Record<string, unknown>) => (updates.push(u), t.update(u as never)) : k === 'startOn' ? async () => 'Asked mac-mini to start it.' : typeof (t as any)[k] === 'function' ? (t as any)[k].bind(t) : (t as any)[k]) });
   const list = buildThreadbearTools(control as never, me.id, () => h.clock.now(), sched, undefined, undefined, { sleep: async () => {} });
   const call = async (name: string, args: Record<string, unknown>) => {
     const t = list.find((x) => x.name === name)!;
@@ -107,13 +107,13 @@ test("the scan's attack: create_thread from a sandboxed Full thread into ~ or an
   // The card names where it really runs.
   const shown = await s.withCard('deny', 'create_thread', { text: 'x', title: 'Shown', folder: '../../elsewhere' });
   assert.equal(shown.card.input.folder, s.outside);
-  // Allowed: Mike's choice, and the new thread runs outside, not shut in.
+  // Allowed: Alex's choice, and the new thread runs outside, not shut in.
   const ok = await s.withCard('allow', 'create_thread', { text: 'fine', title: 'Allowed', folder: s.outside });
   assert.equal(ok.error, false, ok.text);
   assert.equal(s.rec(s.byTitle('Allowed')!.id).confined, undefined);
   // On another machine counts as outside too.
-  const remote = await s.withCard('deny', 'create_thread', { text: 'x', title: 'Remote', runner: 'bruce' });
-  assert.match(remote.card.title, /on bruce$/);
+  const remote = await s.withCard('deny', 'create_thread', { text: 'x', title: 'Remote', runner: 'mac-mini' });
+  assert.match(remote.card.title, /on mac-mini$/);
 });
 
 test('inside its sandbox it carries on unasked, and what it starts there is shut in too', async () => {
@@ -154,7 +154,7 @@ test('a link inside the sandbox to a folder outside it: the card shows where it 
   await tick(10);
   assert.equal(h2.adapter.sessions.length, 0, 'no CLI started outside');
   assert.ok(h2.events(child.id).some((e) => /isn't in a sandbox folder now/.test(JSON.stringify(e))), 'and the thread says why');
-  // Nor can an agent move it out: only Mike, or his yes on a card.
+  // Nor can an agent move it out: only Alex, or his yes on a card.
   assert.throws(() => h2.runner.update({ threadId: child.id, cwd: s.outside }), /runs in a sandbox/);
 });
 
@@ -166,7 +166,7 @@ test('messages, moves, schedules, checks and pins from a sandboxed thread ask on
   assert.match(sched.card.title, /^Schedule new threads with Full access outside the sandbox/);
   const check = await s.withCard('deny', 'schedule_message', { text: 'x', when: '1h', check: 'echo news' });
   assert.match(check.card.title, /shell command as you before each run, outside the sandbox/);
-  // A button's brief runs outside at Mike's press.
+  // A button's brief runs outside at Alex's press.
   const list = buildThreadbearTools(s.h.runner, s.me.id, () => s.h.clock.now(), s.sched, undefined, undefined, { sleep: async () => {} } as never);
   const button = list.find((x) => x.name === 'add_button')!;
   {
@@ -205,7 +205,7 @@ test("a sandboxed thread's own patch edits aren't trusted as written: the runner
   const host = setup({ callerIn: 'host' });
   const hostSession = host.h.adapter.sessions.find((x) => x.opts.threadId === host.me.id)!;
   hostSession.out({ kind: 'wrote', mode: 'full', files: [{ path: '.threadbear/patches/p.ts', sha256: 'a'.repeat(64), base: null }] } as never);
-  assert.equal(host.trusted.length, 1, 'a Full thread outside any sandbox still is (Mike\'s workflow)');
+  assert.equal(host.trusted.length, 1, 'a Full thread outside any sandbox still is (Alex\'s workflow)');
 });
 
 test('a Full access thread outside any sandbox is never asked, as before', async () => {
@@ -232,10 +232,10 @@ test("a Full thread outside any sandbox may move a sandboxed one's login, as wit
 });
 
 test('the docker run refuses a folder that is no longer in a sandbox folder, rather than mounting where a link points', () => {
-  const sb = { folders: ['/home/mike/sandboxed'], image: 'img', docker: 'docker' };
-  const ctx = (to: string) => ({ threadId: 't', home: '/home/mike', uid: 1, gid: 1, exists: () => true, realpath: (p: string) => (p === '/home/mike/sandboxed/demo' ? to : p) });
-  assert.ok(dockerRun({ command: '/c', args: [], cwd: '/home/mike/sandboxed/demo', env: {} }, sb, ctx('/home/mike/sandboxed/demo')));
-  assert.throws(() => dockerRun({ command: '/c', args: [], cwd: '/home/mike/sandboxed/demo', env: {} }, sb, ctx('/home/mike')), /isn't in a sandbox folder now/);
+  const sb = { folders: ['/home/alex/sandboxed'], image: 'img', docker: 'docker' };
+  const ctx = (to: string) => ({ threadId: 't', home: '/home/alex', uid: 1, gid: 1, exists: () => true, realpath: (p: string) => (p === '/home/alex/sandboxed/demo' ? to : p) });
+  assert.ok(dockerRun({ command: '/c', args: [], cwd: '/home/alex/sandboxed/demo', env: {} }, sb, ctx('/home/alex/sandboxed/demo')));
+  assert.throws(() => dockerRun({ command: '/c', args: [], cwd: '/home/alex/sandboxed/demo', env: {} }, sb, ctx('/home/alex')), /isn't in a sandbox folder now/);
 });
 
 // Codex review, 7 Nov 2026: a login's config folder is mounted into the
@@ -292,4 +292,29 @@ test("a button a sandboxed thread made, once allowed and pressed, still starts o
   const out = gate.check(ask.id, 'threads.create', { text: 'x', permissionMode: 'ask', unconfine: true, startedBy: { kind: 'thread', label: 'Agent', threadId: s.me.id } });
   assert.equal(out.unconfine, undefined);
   assert.equal((out.startedBy as { threadId: string }).threadId, ask.id, 'and it is started by the caller, not who it names');
+});
+
+// Codex's review of the Daybreak fix for finding 111 (13 Nov 2026): a title
+// is the renaming agent's own words, and it reaches the renamed thread's
+// agent and others' (list_threads, a new thread's same-work note), so
+// renaming a thread with more access asks, as a message to it would.
+test('renaming a thread with more access asks first; its own title, or one no higher, does not', async () => {
+  const s = setup();
+  const r = await s.withCard('deny', 'update_thread', { threadId: s.host.id, title: 'Selecting text\nSECURITY_POC' });
+  assert.equal(r.error, true);
+  assert.match(r.card.title, /^Rename "Host work", which has .* outside the sandbox/);
+  assert.equal(s.rec(s.host.id).title, 'Host work');
+  await s.withCard(null, 'update_thread', { title: 'My own name' });
+  assert.equal(s.rec(s.me.id).title, 'My own name');
+  // An Ask thread outside any sandbox: a Full one asks, another Ask one doesn't.
+  const ask = setup({ callerIn: 'host', mode: 'ask' });
+  const full = ask.h.runner.create({ text: 'Full work', accountId: 'claude-3', cwd: ask.outside, permissionMode: 'full' }).thread;
+  const denied = await ask.withCard('deny', 'update_thread', { threadId: full.id, title: 'x' });
+  assert.equal(denied.error, true);
+  assert.equal(ask.rec(full.id).title, 'Full work');
+  const fine = await ask.withCard(null, 'update_thread', { threadId: ask.host.id, title: 'Renamed' });
+  assert.equal(fine.error, false, fine.text);
+  assert.equal(ask.rec(ask.host.id).title, 'Renamed');
+  s.sched.stop();
+  ask.sched.stop();
 });
