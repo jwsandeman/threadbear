@@ -97,6 +97,10 @@ async function shot(name) {
   const { data } = await cdp('Page.captureScreenshot', { format: 'png' });
   await fs.writeFile(path.join(shots, `${name}.png`), Buffer.from(data, 'base64'));
 }
+async function frame(clip) {
+  await evaluate('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
+  return (await cdp('Page.captureScreenshot', { format: 'png', ...(clip ? { clip: { ...clip, scale: 1 } } : {}) })).data;
+}
 try {
   let port;
   for (let i = 0; i < 150; i++) {
@@ -169,6 +173,31 @@ try {
   await clickTarget('#target');
   assert.equal(await evaluate('window.clicks'), 1, 'Finish restores normal clicking');
   console.log('PASS selection, multiple targets, drawing, erasing, region, comment capture and cleanup');
+
+  await start('frame-stability-test');
+  const hoverPoint = await point('#target');
+  await cdp('Input.dispatchMouseEvent', { type: 'mouseMoved', ...hoverPoint });
+  const hoverFrame = await frame();
+  for (let i = 0; i < 12; i++) {
+    await cdp('Input.dispatchMouseEvent', { type: 'mouseMoved', x: hoverPoint.x + i % 3, y: hoverPoint.y });
+    assert.ok(await frame() === hoverFrame, 'Hovering within one element must keep the rendered page and tools stable');
+  }
+  await control('Draw');
+  // Drawing changes the canvas, but neither the toolbar nor comment editor should flash.
+  const controlsClip = { x: 335, y: 0, width: 765, height: 800 };
+  await cdp('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 120, y: 460 });
+  const controlsFrame = await frame(controlsClip);
+  await cdp('Input.dispatchMouseEvent', { type: 'mousePressed', x: 120, y: 460, button: 'left', buttons: 1, clickCount: 1 });
+  for (let i = 1; i <= 12; i++) {
+    await cdp('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 120 + i * 15, y: 460 + i * 3, button: 'left', buttons: 1 });
+    assert.ok(await frame(controlsClip) === controlsFrame, 'Drawing outside the tools must leave their rendered frames stable');
+  }
+  await cdp('Input.dispatchMouseEvent', { type: 'mouseReleased', x: 300, y: 496, button: 'left', clickCount: 1 });
+  assert.equal((await read()).status, 'active', 'Pointer movement must not dismiss the annotation');
+  await accessiblePoint('button', 'Select');
+  await accessiblePoint('textbox', 'Describe the change');
+  await finish();
+  console.log('PASS temporal hover and drawing frames keep the page and tools stable');
 
   await start('scroll-test');
   await clickTarget('#target');

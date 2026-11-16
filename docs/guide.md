@@ -290,9 +290,12 @@ thread's agents have open through [BrowserBear](https://github.com/mikecann/brow
 in the agents' own browser ([Helium](https://helium.computer), in real windows
 that open behind yours without taking the focus) or in one of your Chrome
 profiles. Each page has a still of how it looks, what the agent is doing in it,
-and Show window, which brings its real window to the front. The panel doesn't
-draw the live page or take clicks for it: you use the page in its own window.
-An address typed at the top opens a new page in the agents' browser.
+and Show window, which brings its real window to the front. These stills aren't
+interactive; Show window lets you use the page in its own browser window.
+With **Annotate browser pages** enabled on a local thread, the address field
+says **Open a page here** and loads the page inside Threadbear, even when
+BrowserBear isn't running. Otherwise it opens a new page in the agents'
+browser.
 
 When the agent needs you to do something in a page (sign in, approve, pay),
 handoff brings that page's window to the front. For a page in the agents'
@@ -302,24 +305,29 @@ stays yours. The agent waits for Done or for the page to settle after your step.
 Normal browsing by the agent doesn't open the panel.
 
 With **Annotate browser pages** on in Settings > General > Experiments,
-pages in the agents' own browser have an **Annotate** button. Select elements,
-drag a Region, Draw a mark or Erase one, then write what should change.
-**Attach** puts the comment, element details and a screenshot in that thread's
-message box. Anything you had already typed stays there. Check it and press
-Send when ready; attaching alone doesn't start the agent. Escape or Cancel
-closes the tools. Switching threads while annotating still attaches to the
-thread you started from.
+pages shown inside Threadbear have an **Annotate** button at the top. It works
+on web previews, local HTML previews and web panels in this Mac's threads.
+Select elements, drag a Region, Draw a mark or Erase one, then write what
+should change. **Attach** puts the comment, element details and a screenshot
+in that thread's message box, preserving any text and pictures already there.
+Check it and press Send when ready; attaching alone doesn't start the agent.
 
-This works on this Mac's threads and the agents' browser. Personal Chrome
-profile tabs and threads on other machines don't offer annotation. Elements
-inside another site's embedded frame can be marked as a region. BrowserBear
-must be running; enabling the experiment does not install it.
+Escape or Cancel closes the tools. Navigating away, closing the page or
+switching threads cancels an unfinished annotation. An attachment that has
+already been captured belongs to the thread it started in.
+
+The tools run inside Threadbear and need neither BrowserBear nor Chrome.
+For a page listed in the Browser panel, **Open here to annotate** loads its
+address inside Threadbear; **Show window** still opens the separate browser
+window. Annotation doesn't change a preview's script permission or network
+restrictions. Elements inside another site's embedded frame can be marked as
+a region. Threads on other machines don't offer annotation.
 
 An agent can also use a separate Chrome with `--profile agent`. Its pages show in
 the same panel, with its own sign-ins. When that Chrome asks for a passkey or a
 permission, its window comes to the middle of your screen and the panel says so,
-with Show it to bring it to the front. Existing-profile pages use captured frames,
-so movement is less smooth than the separate Chrome's stream.
+with Show it to bring it to the front. The Browser panel shows stills of these
+pages too.
 
 A link to a folder opens it in the side pane, where it works like a Finder
 window. Double-click a folder to go in, or a file to see it there, and the

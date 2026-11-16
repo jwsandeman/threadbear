@@ -76,7 +76,7 @@ struct DockPane: View {
                 // is and opens as a link from a highlight would: the browser,
                 // or a page over this panel with Back (Mike, 11 Nov: a click
                 // on a video loaded YouTube in the panel, with no way back).
-                WebPanel(url: url, leaving: { link in app.openLink(link, overPanel: panel.id, in: thread) })
+                AnnotatedWebPanel(url: url, threadID: thread.id, leaving: { link in app.openLink(link, overPanel: panel.id, in: thread) })
             } else {
                 PaneNote(text: "This panel has no page to show.")
             }
@@ -891,6 +891,10 @@ final class WebPanelPool: NSObject, ObservableObject, WKNavigationDelegate, WKUI
     /// `scriptsFor`: a local page's digest Mike has let run its scripts
     /// (PreviewScriptConsent). That view is its own, kept apart from the
     /// static one, with JavaScript on and every other guard the same.
+    func loadedWebView(for url: URL, scriptsFor digest: String? = nil) -> WKWebView? {
+        views[digest.map { Self.scriptsSlot(url, $0) } ?? url]
+    }
+
     func webView(for url: URL, scriptsFor digest: String? = nil) -> WKWebView {
         let slot = digest.map { Self.scriptsSlot(url, $0) } ?? url
         if let existing = views[slot] {
@@ -1096,6 +1100,7 @@ final class WebPanelPool: NSObject, ObservableObject, WKNavigationDelegate, WKUI
     }
 
     private func forget(_ view: WKWebView) {
+        EmbeddedBrowserAnnotations.shared.cancel(webView: view)
         view.removeFromSuperview()
         leavers.removeValue(forKey: ObjectIdentifier(view))
         backWatches.removeValue(forKey: ObjectIdentifier(view))?.invalidate()
