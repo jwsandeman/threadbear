@@ -1323,7 +1323,8 @@ test('a backend from before the pictures read is asked once, and everything stay
     rows: pictureRows,
     pictures: () => {
       asked++;
-      throw new Error("Could not find public function for 'relay:picturesAtSeqs'. Did you forget to run `npx convex dev` or `npx convex deploy`?");
+      // What a deployment answers for a function it doesn't have (seen on the live one, 17 Nov 2026).
+      throw new Error('[Request ID: 232c0802c9f2a61f] Server Error');
     },
   });
   const page = (await h.relay.call(T, 'threads.events', { threadId: T })) as { events: Shown[] };
@@ -1343,6 +1344,23 @@ test('a backend from before the pictures read is asked once, and everything stay
   h.subs.get('relay:remoteTail')![0]!.onUpdate({ messages: [{ seq: 20, role: 'user', text: '[1 picture]', turn: 'cccc3333', at: ago(0) }, { seq: 30, role: 'user', text: '[1 picture]', turn: 'dddd4444', at: ago(3600) }], hasMore: true });
   await new Promise((r) => setImmediate(r));
   assert.equal(asked, 2);
+});
+
+test("a dev deployment's own words for a missing function, and a refusal, turn the pictures read off too", async () => {
+  for (const error of [new Error("Could not find public function for 'relay:picturesAtSeqs'. Did you forget to run `npx convex dev` or `npx convex deploy`?"), Object.assign(new Error('Server Error'), { data: { kind: 'forbidden', message: 'no' } })]) {
+    let asked = 0;
+    const h = harness({
+      rows: pictureRows,
+      pictures: () => {
+        asked++;
+        throw error;
+      },
+    });
+    await h.relay.call(T, 'threads.events', { threadId: T });
+    h.clock.advance(60_000);
+    await h.relay.call(T, 'threads.events', { threadId: T });
+    assert.equal(asked, 1, error.message);
+  }
 });
 
 test('Convex being away for the pictures read leaves the message as it was, and is not taken for an old backend', async () => {

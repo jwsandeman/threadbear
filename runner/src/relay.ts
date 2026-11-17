@@ -216,6 +216,14 @@ function saidOf(r: RelayRow): { count: number; words: string } {
   }
   return s;
 }
+// Whether the backend answered a read with an error, as opposed to not
+// being reached: a deployment says only "[Request ID: ...] Server Error" for
+// a function it doesn't have (a dev one, "Could not find public function"),
+// and gives a ConvexError's data for a refusal.
+function backendRefused(e: unknown): boolean {
+  if ((e as { data?: unknown } | null)?.data !== undefined) return true;
+  return /Server Error|Could not find public function/i.test(String((e as Error | null)?.message ?? e));
+}
 // The most places a message's pictures get by its words alone: a line
 // typed to look like the count can't make a row of hundreds of empty tiles.
 const MOST_PLACES = 50;
@@ -1272,7 +1280,7 @@ export class Relay {
         }
       } catch (e) {
         const now = this.deps.clock.now();
-        if (/Could not find public function/i.test(String((e as Error)?.message ?? e))) {
+        if (backendRefused(e)) {
           this.picturesOffUntil = now + PICTURES_RETRY_MS;
           this.deps.log.info("relay: the backend has no pictures read yet, so other runners' messages show without their pictures");
         } else {
