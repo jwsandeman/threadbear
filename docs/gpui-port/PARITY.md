@@ -5213,3 +5213,18 @@ Fixes from Codex's review of the slice before:
 - Verification: `features/review.feature` `@review.picks` passes on the GPUI
   app on a Mac, 8 scenarios, three of them new and `@swift-pending`.
 - Not checked: a real ⌘V of a screenshot and a real drop in the reply box.
+
+### 2026-11-17 Swift changes the GPUI app already covers
+
+- A group's tabs stay inside it (Swift f7dad355, 24afc280): the dock crate's
+  tab strip scrolls sideways and brings the selected tab into view
+  (`desktop/dock/src/view.rs`). Checked by eye at a 760 pt window with
+  Highlights and Files in one group: the tabs clip inside the group and the
+  icon rail shows. No scenario scrolls the strip.
+- Settings > Experiments has a switch for each experiment (Swift 0b5a4e96):
+  `features/settings.feature`, `@settings.general`, 3 scenarios pass.
+- ⌘V takes a picture that's alone on the clipboard (Swift 9322f547):
+  `features/composer-media.feature` and `features/sending.feature`,
+  `@composer.picturechips`, pass.
+- Swift b8de5f87 and 1813e914 are build and test fixes inside the Swift app
+  and the runner's tests. Nothing in the GPUI app corresponds.
