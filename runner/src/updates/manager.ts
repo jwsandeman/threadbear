@@ -20,10 +20,9 @@ import type { Provider as AnyProvider } from '../protocol.ts';
 import { PROVIDERS } from '../protocol.ts';
 import { cliName } from '../providers.ts';
 
-// What this updates (Oh My Pi too while its experiment is on). An ACP
+// What this updates. An ACP
 // agent's CLI isn't touched by Threadbear.
-const MANAGED: readonly AnyProvider[] = ['claude', 'codex'];
-import { experimentOn } from '../experiments.ts';
+const MANAGED: readonly AnyProvider[] = ['claude', 'codex', 'omp'];
 import { claudeChannel, claudeInstalledVersion, claudeLatestVersion, runClaudeUpdate } from './claude.ts';
 import { ompInstalledVersion, ompLatestVersion, runOmpUpdate } from './omp.ts';
 import { CodexCopies, NPM_LATEST, codexPackageVersion, type CodexResolver, type SurfaceCheck } from './codex.ts';
@@ -232,7 +231,7 @@ export class CliUpdates {
   // version feed. Never updated without being asked.
 
   private managed(): Provider[] {
-    return experimentOn(this.cfg.home, 'ohMyPi') ? [...MANAGED, 'omp'] : [...MANAGED];
+    return [...MANAGED];
   }
 
   private acpProviders(): Provider[] {
@@ -348,7 +347,7 @@ export class CliUpdates {
     const claude = await claudeInstalledVersion(this.cfg.claudePath, this.exec);
     const bin = this.codexBinary();
     const codex = bin === this.copies.currentLink ? this.copies.currentVersion() : codexPackageVersion(bin);
-    const omp = experimentOn(this.cfg.home, 'ohMyPi') ? await ompInstalledVersion(this.ompPath(), this.exec) : undefined;
+    const omp = await ompInstalledVersion(this.ompPath(), this.exec);
     const changed = claude !== this.installed.claude || codex !== this.installed.codex || omp !== this.installed.omp;
     this.installed = { ...this.installed, claude, codex };
     if (omp) this.installed.omp = omp;
@@ -381,7 +380,6 @@ export class CliUpdates {
   }
 
   private async runCheck(p: Provider, asked: boolean): Promise<void> {
-    if (p === 'omp' && !experimentOn(this.cfg.home, 'ohMyPi')) return;
     await this.refreshInstalled();
     const policy = this.policy(p);
     if (policy === 'off' && !asked) return;

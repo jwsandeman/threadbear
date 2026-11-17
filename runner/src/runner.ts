@@ -57,7 +57,7 @@ import type {
   TurnOutcome,
 } from './protocol.ts';
 import { agentsStillWorking, ErrorCode, LIMITS, PROTOCOL_VERSION, RpcError, sentByAgent } from './protocol.ts';
-import { activeProviders, cliName, providerInfo, providerName, providersForHello } from './providers.ts';
+import { cliName, providerInfo, providerName, providersForHello } from './providers.ts';
 import type { ArchivedBy, ArchiveVerdict, LibrarianStatus, LooseEnd, Project, Schedule } from './protocol.ts';
 import { Projects } from './projects.ts';
 import type { Settings } from './settings.ts';
@@ -1352,7 +1352,7 @@ export class Runner {
     if (this.cfg.defaults.efforts) defaults.efforts = { ...this.cfg.defaults.efforts };
     // The app's composer starts a new thread on it.
     if (this.cfg.defaults.permissionMode) defaults.permissionMode = this.cfg.defaults.permissionMode;
-    const out: ReturnType<Runner['hello']> = { runnerVersion: RUNNER_VERSION, protocol: PROTOCOL_VERSION, accounts, providers: providersForHello(activeProviders(this.cfg.home)), pools, defaults };
+    const out: ReturnType<Runner['hello']> = { runnerVersion: RUNNER_VERSION, protocol: PROTOCOL_VERSION, accounts, providers: providersForHello(), pools, defaults };
     const clis = this.cliList();
     if (clis) out.clis = clis;
     return out;

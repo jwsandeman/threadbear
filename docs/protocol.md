@@ -157,8 +157,7 @@ upgrade with an `Authorization` header that's wrong is turned away with HTTP
 
 ```ts
 // cursor, opencode and grok: ACP agents, where their CLIs are installed and
-// logged in (see "ACP agents"); omp: Oh My Pi, only with the ohMyPi
-// experiment on (see "Oh My Pi harness")
+// logged in (see "ACP agents"); omp: Oh My Pi (see "Oh My Pi harness")
 type Provider = "claude" | "codex" | "cursor" | "opencode" | "grok" | "omp"
 
 // What a provider is called and can do, from `hello`. A client asks this
@@ -787,7 +786,7 @@ type Settings = {
 
 ## Oh My Pi harness
 
-The `ohMyPi` experiment adds provider `omp`, the Oh My Pi harness. Its
+Provider `omp` is the Oh My Pi harness, available without an experiment switch. Its
 underlying model provider stays part of the model id (`provider/model`),
 not the thread's provider. The runner uses an installed `omp` executable
 (`ompPath` in runner.json) and its own authenticated OMP configuration
@@ -813,7 +812,9 @@ The bundled guard is loaded explicitly with extension discovery disabled.
 It blocks delegated tasks in Ask and Auto, since their separate execution
 cannot currently be approved from Threadbear. Native message rewind and
 subagent transcript drilldown are unavailable.
-OMP is externally installed and updated, with no Threadbear-managed updater.
+OMP is externally installed. Threadbear checks and updates it through
+`omp update` under the chosen CLI update policy; package-manager installs
+are left to their package manager.
 Its usage tally and automatic network-recovery probe are not supported.
 A network error remains visible and can be retried by sending another message.
 

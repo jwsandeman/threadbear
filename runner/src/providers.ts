@@ -5,7 +5,6 @@
 //
 // What's left comparing names is really about one CLI's own files or
 // behaviour (copying Claude's transcripts, Codex's model list).
-import { experimentOn } from './experiments.ts';
 import { PROVIDERS, type Provider, type ProviderInfo } from './protocol.ts';
 
 export const PROVIDER_INFO: Record<Provider, ProviderInfo> = {
@@ -92,13 +91,6 @@ export const PROVIDER_INFO: Record<Provider, ProviderInfo> = {
     usageReadings: false,
   },
 };
-
-// The providers this runner offers: Oh My Pi only with its experiment on, so
-// with it off nothing of its turns up anywhere.
-export function activeProviders(home: string): Provider[] {
-  const omp = experimentOn(home, 'ohMyPi');
-  return PROVIDERS.filter((p) => p !== 'omp' || omp);
-}
 
 // One this build has no row for (a record or another runner's hello from a
 // build that has more): it can do nothing, so no check takes it for Claude

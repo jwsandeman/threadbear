@@ -1,6 +1,5 @@
 import fs from 'node:fs';
 import { acpAccounts } from './adapters/acp/agents.ts';
-import { experimentOn } from './experiments.ts';
 import path from 'node:path';
 import { isEffortLevel, type Account, type EffortLevel, type ModelChoice } from './protocol.ts';
 import type { UsageStore } from './usage.ts';
@@ -123,7 +122,7 @@ export function discoverAccounts(cfg: DiscoveryConfig): Account[] {
   for (const { id, dir } of [...codex, ...numbered('codex')]) {
     if (isCodexLogin(dir)) out.push(codexAccount(id, dir));
   }
-  if (cfg.home && cfg.ompMainDir && experimentOn(cfg.home, 'ohMyPi') && isDirectory(cfg.ompMainDir)) {
+  if (cfg.ompMainDir && isDirectory(cfg.ompMainDir)) {
     out.push({ id: 'omp-main', provider: 'omp', title: 'Oh My Pi', configDir: cfg.ompMainDir });
   }
   out.push(...acpAccounts({ home: cfg.userHome, pathEnv: cfg.pathEnv, paths: { cursor: cfg.cursorPath, opencode: cfg.opencodePath, grok: cfg.grokPath } }));

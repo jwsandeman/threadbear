@@ -105,7 +105,7 @@ function setup(o: { latest?: Partial<Record<Provider, string>>; env?: NodeJS.Pro
   fs.mkdirSync(path.join(home, 'run'), { recursive: true });
   const claude = fakeClaude(root);
   const npm = fakeNpm(root);
-  const cfg = testConfig(home, { claudePath: claude.claudePath, claudeMainDir: path.join(root, 'claude-main'), cliUpdates: { claude: 'auto', codex: 'auto', omp: 'auto', checkMinutes: 60, keepCodexVersions: 2 }, ...o.cfg });
+  const cfg = testConfig(home, { claudePath: claude.claudePath, claudeMainDir: path.join(root, 'claude-main'), ompPath: path.join(root, 'no-omp'), cliUpdates: { claude: 'auto', codex: 'auto', omp: 'auto', checkMinutes: 60, keepCodexVersions: 2 }, ...o.cfg });
   const latest = { claude: '2.1.311', codex: '0.165.0', ...o.latest };
   const fetched: string[] = [];
   const fetchText = async (url: string) => {
@@ -415,7 +415,7 @@ test('policies: the app\'s choice persists; THREADBEAR_CLI_UPDATES=off and a han
 
   const off = setup({ env: { PATH: '/usr/bin:/bin', THREADBEAR_CLI_UPDATES: 'off' } });
   off.u.setPolicy('claude', 'auto');
-  assert.deepEqual(off.u.list().map((c) => c.policy), ['off', 'off']);
+  assert.deepEqual(off.u.list().map((c) => c.policy), ['off', 'off', 'off']);
   // A copy installed earlier isn't used: tests and dev runners use the fallback.
   fs.mkdirSync(path.join(off.tools, '0.164.0', 'node_modules', '@openai', 'codex'), { recursive: true });
   fs.writeFileSync(path.join(off.tools, '0.164.0', 'node_modules', '@openai', 'codex', 'package.json'), '{}');
@@ -541,15 +541,14 @@ esac`,
 function ompSetup(policy: 'auto' | 'notify' = 'notify') {
   const t = setup();
   const omp = fakeOmp(t.root);
-  fs.writeFileSync(path.join(t.home, 'runner.json'), JSON.stringify({ experiments: { ohMyPi: true } }));
   t.cfg.ompPath = omp.ompPath;
   t.cfg.cliUpdates.omp = policy;
   return { ...t, omp };
 }
 
-test('omp: listed only with its experiment on; a check finds it behind with omp update --check', async () => {
+test('omp: listed without an experiment switch; a check finds it behind with omp update --check', async () => {
   const off = setup();
-  assert.equal(off.u.list().some((c) => c.provider === 'omp'), false);
+  assert.equal(of(off.u.list(), 'omp').status, 'missing');
   off.u.check();
   await off.u.settled();
 
@@ -608,7 +607,6 @@ test('omp: updates the configured omp, not another one earlier on PATH or none o
     const decoy = fakeOmp(root, path.join(root, 'decoy'));
     const t = setup({ env: { PATH: decoyFirst ? `${path.join(root, 'decoy')}:/usr/bin:/bin` : '/usr/bin:/bin' } });
     const omp = fakeOmp(t.root);
-    fs.writeFileSync(path.join(t.home, 'runner.json'), JSON.stringify({ experiments: { ohMyPi: true } }));
     t.cfg.ompPath = omp.ompPath;
     t.cfg.cliUpdates.omp = 'notify';
     t.u.check('omp');
@@ -638,7 +636,6 @@ test('omp: the policy chosen in the app persists; THREADBEAR_CLI_UPDATES=off win
   t.u.setPolicy('omp', 'off');
   assert.equal(of(t.make().list(), 'omp').policy, 'off', 'kept in updates.json');
   const off = setup({ env: { PATH: '/usr/bin:/bin', THREADBEAR_CLI_UPDATES: 'off' } });
-  fs.writeFileSync(path.join(off.home, 'runner.json'), JSON.stringify({ experiments: { ohMyPi: true } }));
   off.cfg.ompPath = fakeOmp(off.root).ompPath;
   off.u.setPolicy('omp', 'auto');
   assert.equal(of(off.u.list(), 'omp').policy, 'off');

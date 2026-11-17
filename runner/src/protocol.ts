@@ -6,8 +6,7 @@ export const PROTOCOL_VERSION = 1;
 
 // cursor, opencode and grok run over ACP (adapters/acp/); each turns up as a
 // login only where its CLI is installed and logged in (adapters/acp/agents.ts).
-// omp (adapters/omp/) is behind the ohMyPi experiment: activeProviders
-// (providers.ts) is the list a runner offers.
+// omp (adapters/omp/) uses the installed Oh My Pi and its own sign-ins.
 export type Provider = 'claude' | 'codex' | 'cursor' | 'opencode' | 'grok' | 'omp';
 export const PROVIDERS: readonly Provider[] = ['claude', 'codex', 'cursor', 'opencode', 'grok', 'omp'];
 

@@ -10,15 +10,16 @@ import { FakeAccounts, FakeAdapter, makeHarness, testConfig, tmpDir, tick } from
 
 const omp: Account = { id: 'omp-main', provider: 'omp', title: 'Oh My Pi', configDir: '/unused/omp', models: [{ id: 'openai/gpt-example', model: 'openai/gpt-example', title: 'GPT Example' }] };
 
-test('OMP discovery is opt-in and never reads the credential database', () => {
+test('OMP discovery needs only its directory and never reads the credential database', () => {
   const home = tmpDir();
   const dir = path.join(home, 'omp');
   fs.mkdirSync(dir);
   fs.writeFileSync(path.join(dir, 'agent.db'), 'not a credential database');
   const cfg = testConfig(home, { ompMainDir: dir, ompPath: '/unused/omp' });
-  assert.equal(discoverAccounts(cfg).some(a => a.provider === 'omp'), false);
-  fs.writeFileSync(path.join(home, 'runner.json'), JSON.stringify({ experiments: { ohMyPi: true } }));
   assert.deepEqual(discoverAccounts(cfg).filter(a => a.provider === 'omp'), [{ id: 'omp-main', provider: 'omp', title: 'Oh My Pi', configDir: dir }]);
+  fs.writeFileSync(path.join(home, 'runner.json'), JSON.stringify({ experiments: { ohMyPi: false } }));
+  assert.equal(discoverAccounts(cfg).some(a => a.provider === 'omp'), true, 'a retired experiment flag is ignored');
+  assert.equal(discoverAccounts({ ...cfg, ompMainDir: path.join(home, 'missing') }).some(a => a.provider === 'omp'), false);
   const registry = new AccountRegistry(cfg);
   registry.learn('omp-main', { models: omp.models, defaultModel: 'openai/gpt-example' });
   assert.equal(registry.get('omp-main')?.defaultModel, 'openai/gpt-example');

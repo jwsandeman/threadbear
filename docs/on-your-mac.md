@@ -537,11 +537,13 @@ File references are where to look.
   restart in the background) is put on its own display's. These are
   private window server calls, and they only touch the app's own windows.
 
-### Oh My Pi experiment
+### Oh My Pi
 
-When the `ohMyPi` experiment is enabled, the runner also starts your
-installed `omp` executable, one process for each live OMP thread. Threadbear
-does not install or update it. `ompPath` can select its executable and
+For an Oh My Pi thread, the runner starts your installed `omp` executable,
+one process for each live OMP thread. Threadbear does not install it.
+It checks and updates OMP through `omp update` under your CLI update policy;
+package-manager installs are left to their package manager.
+`ompPath` can select its executable and
 `ompMainDir` its agent configuration directory (default `~/.omp/agent`).
 OMP reads its own settings and credentials and connects to the model
 providers and tools configured there. Threadbear asks OMP for available

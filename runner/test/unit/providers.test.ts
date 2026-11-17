@@ -7,7 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { discoverAccounts } from '../../src/accounts.ts';
 import { readPools } from '../../src/pools.ts';
-import { activeProviders, cliName, PROVIDER_INFO, providerInfo, providerName, providersForHello } from '../../src/providers.ts';
+import { cliName, PROVIDER_INFO, providerInfo, providerName, providersForHello } from '../../src/providers.ts';
 import { PROVIDERS, type Account } from '../../src/protocol.ts';
 import { FakeAccounts, makeHarness, withCodex } from '../helpers/fakes.ts';
 
@@ -82,17 +82,13 @@ test('a saved pool of only an agent this runner does not offer is gone', () => {
 test('hello lists each provider this runner offers', () => {
   assert.deepEqual(providersForHello().map((p) => p.id), [...PROVIDERS]);
   const h = makeHarness(undefined, {}, { accounts: new FakeAccounts(withCodex()) });
-  assert.deepEqual(h.runner.hello().providers.map((p) => p.name), ['Claude', 'Codex', 'Cursor', 'OpenCode', 'Grok']);
+  assert.deepEqual(h.runner.hello().providers.map((p) => p.name), ['Claude', 'Codex', 'Cursor', 'OpenCode', 'Grok', 'Oh My Pi']);
 });
 
-test('Oh My Pi is only offered with its experiment on', () => {
-  const home = (on: boolean) => {
-    const d = fs.mkdtempSync(path.join(os.tmpdir(), 'tb-omp-gate-'));
-    fs.writeFileSync(path.join(d, 'runner.json'), JSON.stringify({ experiments: { ohMyPi: on } }));
-    return d;
-  };
-  assert.deepEqual(activeProviders(home(false)), ['claude', 'codex', 'cursor', 'opencode', 'grok']);
-  assert.deepEqual(activeProviders(home(true)), ['claude', 'codex', 'cursor', 'opencode', 'grok', 'omp']);
+test('Oh My Pi is offered even with a retired experiment flag set to false', () => {
+  const h = makeHarness();
+  fs.writeFileSync(path.join(h.cfg.home, 'runner.json'), JSON.stringify({ experiments: { ohMyPi: false } }));
+  assert.ok(h.runner.hello().providers.some((p) => p.id === 'omp'));
 });
 
 test('what Grok can do', () => {

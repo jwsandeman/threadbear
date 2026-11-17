@@ -6,8 +6,8 @@
      app links to some of those pages (site/app-doc-slugs.json lists them),
      so keep a section's slug when you rename its heading. -->
 
-Threadbear is a Mac app for running AI agent threads. It drives the official
-Claude Code and Codex command line tools on your own logins. A small program
+Threadbear is a desktop app for running AI agent threads. It drives agent
+command line tools, including Claude Code, Codex and Oh My Pi, on your own logins. A small program
 called the runner keeps every agent going in the background, so quitting or
 updating the app never stops a thread. Your threads are also copied to a
 Convex deployment of your own, which is how the iPhone app and the website
@@ -1196,9 +1196,28 @@ reads their passwords or tokens. The account and model a thread runs on are
 small menus on the composer. Whatever you picked last is what the next
 thread starts on.
 
-With the Oh My Pi experiment enabled, Oh My Pi also appears in the picker.
-It uses OMP's own sign-ins and available models, with messages and approval
-cards in Threadbear. See [Experiments](#experiments) for setup and limits.
+Oh My Pi also appears in the picker when its agent configuration is present.
+Install OMP and sign in with `omp login` first. It uses its own sign-ins
+and available models; your Claude Code and Codex sign-ins are separate.
+`ompPath` in runner.json selects the executable when it isn't on the
+runner's path, and `ompMainDir` selects its agent directory (default
+`~/.omp/agent`). Model choices include their underlying provider.
+Threadbear never reads or copies OMP's tokens.
+
+OMP's messages, thinking, tool activity and approvals appear in the normal
+conversation. Stopping, hibernating and reopening a thread keeps its saved
+OMP session. Full access lets its tools run; Ask before edits and Auto use
+approval cards. Plan first is unavailable. Discovered OMP extensions and
+project MCP configuration are disabled so they cannot bypass those checks;
+LSP servers start only when their tools are used. Delegated tasks are
+blocked in Ask and Auto; the parent can do the work through its cards.
+
+Threadbear keeps OMP up to date with `omp update`, like Claude Code and
+Codex, through the Updates panel. Homebrew, mise and Nix installs are left
+to their package manager. Historical usage charts, editing an earlier
+message and opening a subagent's transcript are not supported yet.
+Automatic retry when the network returns is unavailable for OMP; send
+another message to retry a connection failure.
 
 Once a thread has run a turn, a small ring beside the send button shows
 how full its context is: how much of the model's window the conversation
@@ -2054,7 +2073,7 @@ window stays where it is: the new version opens the same thread underneath
 and takes over, as the Swift app's does.
 
 The Updates icon on the left-hand rail shows what's on its way for the app,
-the runner and the Claude Code and Codex tools. A grey dot means something
+the runner and the Claude Code, Codex and Oh My Pi tools. A grey dot means something
 is in progress and will sort itself out, and a coloured dot means it needs
 you. Right-click it for a quick Restart to Update.
 
