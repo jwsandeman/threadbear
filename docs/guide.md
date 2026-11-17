@@ -292,8 +292,7 @@ that open behind yours without taking the focus) or in one of your Chrome
 profiles. Each page has a still of how it looks, what the agent is doing in it,
 and Show window, which brings its real window to the front. These stills aren't
 interactive; Show window lets you use the page in its own browser window.
-With **Annotate browser pages** enabled on a local thread, the address field
-says **Open a page here** and loads the page inside Threadbear, even when
+On a local thread, the address field says **Open a page here** and loads the page inside Threadbear, even when
 BrowserBear isn't running. Otherwise it opens a new page in the agents'
 browser.
 
@@ -304,15 +303,14 @@ turn and a Done button, even if the panel was closed; your selected thread
 stays yours. The agent waits for Done or for the page to settle after your step.
 Normal browsing by the agent doesn't open the panel.
 
-With **Annotate browser pages** on in Settings > General > Experiments,
-pages shown inside Threadbear have an **Annotate** button at the top. It works
+Pages shown inside Threadbear have an **Annotate** button at the top. It works
 on web previews, local HTML previews and web panels in this Mac's threads.
 Select elements, drag a Region, Draw a mark or Erase one, then write what
 should change. **Attach** puts the comment, element details and a screenshot
 in that thread's message box, preserving any text and pictures already there.
 Check it and press Send when ready; attaching alone doesn't start the agent.
-While it's on, a web link opened in the pane loads there too, with **Open in
-browser** in its bar.
+A web link opened in the pane loads there too, with **Open in browser** in its
+bar.
 
 Escape or Cancel closes the tools. Navigating away, closing the page or
 switching threads cancels an unfinished annotation. An attachment that has

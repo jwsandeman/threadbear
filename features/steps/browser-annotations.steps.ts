@@ -121,34 +121,6 @@ Then('the annotation tools are closed', async function (this: ThreadbearWorld) {
   assert.ok(!nodes.some((n) => !n.ignored && n.role?.value === 'button' && n.name?.value === 'Attach'), 'the tools are still in the page');
 });
 
-Then("the pane's page loses its Annotate button", async function (this: ThreadbearWorld) {
-  await this.until('the page with no Annotate button', (d) => annotate(d) === undefined && webPages(d).some((p) => !p.hidden));
-});
-
-Then('the page in the pane has no annotation tools', async function (this: ThreadbearWorld) {
-  const key = webPages(await this.app.dump()).find((p) => !p.hidden)?.key;
-  assert.ok(key, 'no page is in the pane');
-  for (let i = 0; i < 30; i += 1) {
-    const { nodes } = (await devtools(this, key, 'Accessibility.getFullAXTree')) as { nodes: AxNode[] };
-    if (!nodes.some((n) => !n.ignored && n.role?.value === 'button' && n.name?.value === 'Attach')) return;
-    await sleep(100);
-  }
-  assert.fail('the tools are still in the page');
-});
-
-Then("the pane's page has an Annotate button and an empty annotation line", async function (this: ThreadbearWorld) {
-  const d = await this.until('Annotate over the page again', (x) => annotate(x)?.button === 'Annotate' && annotate(x)?.active === false && x);
-  assert.equal(annotate(d)?.status, '');
-});
-
-Then('the annotation tools are still open', async function (this: ThreadbearWorld) {
-  // Longer than three of the session's looks at the experiment.
-  await sleep(700);
-  const now = await state(this);
-  assert.equal(now.active, true, 'the annotation ended');
-  assert.equal(now.status, 'Select, mark or draw here, then choose Attach.');
-});
-
 // The mock keeps each media.import unanswered until it's told to keep them.
 When("the runner holds the pictures it's given", async function (this: ThreadbearWorld) {
   await this.app.do({ cmd: 'mock', method: 'holdMedia', params: { hold: true } });
@@ -211,9 +183,4 @@ Then("the pane shows the panel's site with an Annotate button", { timeout: 120_0
     (d) => annotate(d)?.button === 'Annotate' && annotate(d)?.key?.startsWith(`view:${home}`) && webPages(d).some((p) => p.key === annotate(d)?.key && !p.hidden && !p.loading && p.title === 'Panel home'),
     90_000,
   );
-});
-
-Then("the pane's page has no Annotate button", async function (this: ThreadbearWorld) {
-  await sleep(300);
-  assert.equal(annotate(await this.app.dump()), undefined);
 });

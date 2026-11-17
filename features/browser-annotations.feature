@@ -1,6 +1,6 @@
 Feature: Annotate a browser page
-  With the browserAnnotations experiment on, a page shown inside the app has
-  an Annotate button. Its tools select an element, mark a region or draw, and
+  A page shown inside the app for a local thread has an Annotate button
+  without an experiment switch. Its tools select an element, mark a region or draw, and
   Attach puts the comment, the page's context and a screenshot after the
   thread's draft, sending nothing.
 
@@ -9,7 +9,7 @@ Feature: Annotate a browser page
 
   # The Swift app annotates its embedded WKWebView, and its dump has no
   # Annotate button or tools to drive, so these run on the GPUI app only.
-  @browser.annotate @browser-annotations @web-runtime @swift-pending
+  @browser.annotate @web-runtime @swift-pending
   Scenario: Attach a requested change to its original thread
     Given the web runtime is installed
     When I open the thread "Rebuild the three landing pages"
@@ -25,7 +25,7 @@ Feature: Annotate a browser page
     And the annotation sent no message
     And nothing was opened outside the app
 
-  @browser.annotate @browser-annotations @web-runtime @swift-pending
+  @browser.annotate @web-runtime @swift-pending
   Scenario: Cancel without changing the page or draft
     Given the web runtime is installed
     When I open the thread "Rebuild the three landing pages"
@@ -37,7 +37,7 @@ Feature: Annotate a browser page
     Then the annotation tools are closed
     And the composer says only "Before the annotation"
 
-  @browser.annotate @browser-annotations @web-runtime @swift-pending
+  @browser.annotate @web-runtime @swift-pending
   Scenario: Leave the page before attaching
     Given the web runtime is installed
     When I open the thread "Rebuild the three landing pages"
@@ -51,67 +51,7 @@ Feature: Annotate a browser page
     When I open the thread "Rebuild the three landing pages"
     Then the composer says only "Before the annotation"
 
-  @browser.annotate @browser-annotations @web-runtime @swift-pending
-  Scenario: The experiment going off ends an annotation and leaves the draft
-    Given the web runtime is installed
-    When I open the thread "Rebuild the three landing pages"
-    And I type "Before the annotation" in the composer
-    And I open "mockups/drawn.html" in the thread's folder in the pane
-    And I press Annotate over the page in the pane
-    And I select the page's "p" with the annotation tools
-    And the runner turns the "browserAnnotations" experiment off
-    Then the pane's page loses its Annotate button
-    And the page in the pane has no annotation tools
-    And the composer says only "Before the annotation"
-    When the runner turns the "browserAnnotations" experiment on
-    Then the pane's page has an Annotate button and an empty annotation line
-    When I press Annotate over the page in the pane
-    And I press Cancel annotation over the page in the pane
-    Then the annotation tools are closed
-    And the composer says only "Before the annotation"
-
-  @browser.annotate @browser-annotations @web-runtime @swift-pending
-  Scenario: A refused switch-off leaves the annotation open
-    Given the web runtime is installed
-    When I open the thread "Rebuild the three landing pages"
-    And I type "Before the annotation" in the composer
-    And I open "mockups/drawn.html" in the thread's folder in the pane
-    And I press Annotate over the page in the pane
-    And I select the page's "p" with the annotation tools
-    And the runner holds settings changes
-    And I open Settings
-    And I press "Turn Browser annotations off" in Settings
-    Then Settings shows the "browserAnnotations" experiment off
-    And the annotation tools are still open
-    When the runner refuses the settings changes it held
-    Then Settings says "Couldn't save the settings (disk full)."
-    And Settings shows the "browserAnnotations" experiment on
-    And the annotation tools are still open
-    When I attach the annotation with the comment "Make this line bigger"
-    Then the pane's annotation line says "Annotation attached to this thread's draft. Review it, then send."
-    And the composer keeps "Before the annotation" and gains the comment "Make this line bigger"
-
-  @browser.annotate @browser-annotations @web-runtime @swift-pending
-  Scenario: The experiment going off while the screenshot is kept attaches nothing
-    Given the web runtime is installed
-    When I open the thread "Rebuild the three landing pages"
-    And I type "Before the annotation" in the composer
-    And I open "mockups/drawn.html" in the thread's folder in the pane
-    And I press Annotate over the page in the pane
-    And I select the page's "p" with the annotation tools
-    And the runner holds the pictures it's given
-    And I attach the annotation with the comment "Make this line bigger"
-    Then the runner is holding the annotation's screenshot
-    When the runner turns the "browserAnnotations" experiment off
-    And the runner keeps the pictures it held
-    Then the pane's page loses its Annotate button
-    And the page in the pane has no annotation tools
-    And the composer still says only "Before the annotation"
-    When the runner turns the "browserAnnotations" experiment on
-    Then the pane's page has an Annotate button and an empty annotation line
-    And the composer still says only "Before the annotation"
-
-  @browser.annotate @browser-annotations @browserbear @windows-pending @panel.web @web-runtime @swift-pending
+  @browser.annotate @browserbear @windows-pending @panel.web @web-runtime @swift-pending
   Scenario: Open an agent's page inside Threadbear for annotation
     Given the web runtime is installed
     And BrowserBear has the panel's site open as "Panel home" for "Morning brief"
@@ -121,7 +61,7 @@ Feature: Annotate a browser page
     Then the pane shows the panel's site with an Annotate button
     And nothing was opened outside the app
 
-  @browser.annotate @browser-annotations @panel.web @web-runtime @swift-pending
+  @browser.annotate @panel.web @web-runtime @swift-pending
   Scenario: Open a page directly without BrowserBear
     Given the web runtime is installed
     When I open the thread "Morning brief"
@@ -131,10 +71,23 @@ Feature: Annotate a browser page
     Then the pane shows the panel's site with an Annotate button
     And nothing was opened outside the app
 
+  @browser.annotate @swift-pending
+  Scenario: Annotations are standard and have no experiment switch
+    When I open Settings
+    Then Settings has no "browserAnnotations" experiment
+
   @browser.annotate @web-runtime @swift-pending
-  Scenario: With the experiment off a page has no Annotate button
+  Scenario: Cancel while the screenshot is being kept attaches nothing
     Given the web runtime is installed
     When I open the thread "Rebuild the three landing pages"
+    And I type "Before the annotation" in the composer
     And I open "mockups/drawn.html" in the thread's folder in the pane
-    Then the local page in the pane is titled "Drawn mockup"
-    And the pane's page has no Annotate button
+    And I press Annotate over the page in the pane
+    And I select the page's "p" with the annotation tools
+    And the runner holds the pictures it's given
+    And I attach the annotation with the comment "Make this line bigger"
+    Then the runner is holding the annotation's screenshot
+    When I press Cancel annotation over the page in the pane
+    And the runner keeps the pictures it held
+    Then the annotation tools are closed
+    And the composer still says only "Before the annotation"

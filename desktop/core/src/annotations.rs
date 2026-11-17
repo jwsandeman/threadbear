@@ -7,9 +7,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
 
-/// The experiment's id (runner/src/experiments/browserAnnotations.md).
-pub const EXPERIMENT: &str = "browserAnnotations";
-
 /// The tools: a function taking the session's id.
 pub const SOURCE: &str = include_str!("../../../app/Sources/Threadbear/Resources/Annotations/annotation.js");
 

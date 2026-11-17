@@ -335,7 +335,6 @@ const settings = {
   experiments: [
     { id: 'openAnything', name: 'Open Anything', does: 'Search threads, projects, files and actions together.' },
     { id: 'projectDecisions', name: 'Project decisions', does: 'Shows waiting questions on the project page.' },
-    { id: 'browserAnnotations', name: 'Browser annotations', does: 'Select or draw on a page and attach it to the draft.' },
     { id: 'nestedThreads', name: 'Nested threads', does: 'Groups threads under the thread that started them.' },
   ].map((experiment) => ({ ...experiment, on: mockExperiments().includes(experiment.id) })),
 };
@@ -419,7 +418,6 @@ function mockExperiments() {
   return [
     ...(process.env.TB_MOCK_OPEN_ANYTHING_OFF ? [] : ['openAnything']),
     ...(process.env.TB_MOCK_DECISIONS ? ['projectDecisions'] : []),
-    ...(process.env.TB_MOCK_BROWSER_ANNOTATIONS ? ['browserAnnotations'] : []),
     // TB_MOCK_NESTED_OFF keeps its demo threads with the experiment off.
     ...(process.env.TB_MOCK_NESTED && !process.env.TB_MOCK_NESTED_OFF ? ['nestedThreads'] : []),
   ];

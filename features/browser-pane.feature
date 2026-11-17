@@ -20,7 +20,7 @@ Feature: The Browser pane
     When I open the thread "Morning brief"
     Then the right rail's Browser button shows 1 page
     When I click the right rail's Browser button
-    Then the Browser pane lists "Example Domain" from "example.com" with "Show window"
+    Then the Browser pane lists "Example Domain" from "example.com" with "Show window, Open here to annotate"
 
   @browserbear @windows-pending @browser.show @swift-pending
   Scenario: Show window asks BrowserBear to bring the page's window forward
@@ -36,10 +36,17 @@ Feature: The Browser pane
     When I open the thread "Morning brief"
     And the agent hands "Sign in" to me
     Then the dock has the "browser" panel
-    And the Browser pane lists "Sign in" from "login.example.com" with "Show window, Done"
+    And the Browser pane lists "Sign in" from "login.example.com" with "Show window, Done, Open here to annotate"
     When I press "Done" on "Sign in"
     Then BrowserBear was told I'm done with "Sign in"
-    And the Browser pane lists "Sign in" from "login.example.com" with "Show window"
+    And the Browser pane lists "Sign in" from "login.example.com" with "Show window, Open here to annotate"
+
+  @browser.annotate @browserbear @windows-pending @remote-threads @swift-pending
+  Scenario: Another Mac's pages keep only the external browser action
+    Given BrowserBear has "Example Domain" at "https://example.com/" open for "Check the photo library backup"
+    When I open the thread "Check the photo library backup"
+    And I click the right rail's Browser button
+    Then the Browser pane lists "Example Domain" from "example.com" with "Show window"
 
   @browserbear @windows-pending @browser.handoff @panel.requests @swift-pending
   Scenario: show_panel for the browser brings the Browser pane up

@@ -273,29 +273,29 @@ mod tests {
 
     #[test]
     fn confirmed_settings_replace_the_enabled_experiments() {
-        let mut on = EnabledExperiments::from_hello(&json!({ "experiments": ["removed", "browserAnnotations"] }));
-        assert!(on.on("removed") && on.on("browserAnnotations") && !on.on("projectDecisions"));
-        assert!(on.confirm(&json!({ "experiments": [{ "id": "browserAnnotations", "on": false }, { "id": "projectDecisions", "on": true }] })));
+        let mut on = EnabledExperiments::from_hello(&json!({ "experiments": ["removed", "openAnything"] }));
+        assert!(on.on("removed") && on.on("openAnything") && !on.on("projectDecisions"));
+        assert!(on.confirm(&json!({ "experiments": [{ "id": "openAnything", "on": false }, { "id": "projectDecisions", "on": true }] })));
         assert!(on.on("projectDecisions"));
-        assert!(!on.on("browserAnnotations"), "a switch confirmed off is off");
+        assert!(!on.on("openAnything"), "a switch confirmed off is off");
         assert!(!on.on("removed"), "an id the runner no longer lists is not kept");
-        assert!(on.confirm(&json!({ "experiments": [{ "id": "browserAnnotations", "on": true }, { "id": "projectDecisions", "on": false }] })));
-        assert!(on.on("browserAnnotations") && !on.on("projectDecisions"), "back on with no new hello");
-        assert!(!on.confirm(&json!({ "experiments": [{ "id": "browserAnnotations", "on": true }] })), "the same set again is no change");
-        assert!(on.confirm(&json!({ "experiments": [{ "id": "browserAnnotations" }] })));
+        assert!(on.confirm(&json!({ "experiments": [{ "id": "openAnything", "on": true }, { "id": "projectDecisions", "on": false }] })));
+        assert!(on.on("openAnything") && !on.on("projectDecisions"), "back on with no new hello");
+        assert!(!on.confirm(&json!({ "experiments": [{ "id": "openAnything", "on": true }] })), "the same set again is no change");
+        assert!(on.confirm(&json!({ "experiments": [{ "id": "openAnything" }] })));
         assert_eq!(on, EnabledExperiments::default(), "an entry with no on is off");
     }
 
     #[test]
     fn settings_with_no_experiment_list_keep_hellos_and_an_empty_list_clears_them() {
-        let hello = json!({ "experiments": ["browserAnnotations"] });
+        let hello = json!({ "experiments": ["openAnything"] });
         let mut on = EnabledExperiments::from_hello(&hello);
         assert!(!on.confirm(&json!({ "idleMinutes": 10 })));
-        assert!(on.on("browserAnnotations"), "an older runner's settings say nothing of experiments");
+        assert!(on.on("openAnything"), "an older runner's settings say nothing of experiments");
         assert!(!on.confirm(&Value::Null));
-        assert!(on.on("browserAnnotations"));
+        assert!(on.on("openAnything"));
         assert!(on.confirm(&json!({ "experiments": [] })));
-        assert!(!on.on("browserAnnotations"), "an empty list is the runner saying none are on");
+        assert!(!on.on("openAnything"), "an empty list is the runner saying none are on");
         assert_eq!(EnabledExperiments::from_hello(&json!({})), EnabledExperiments::default(), "a hello with no list has none on");
     }
 
@@ -303,13 +303,13 @@ mod tests {
     fn a_switch_guess_changes_its_entry_and_keeps_the_list() {
         let confirmed = json!({
             "keepAwake": false, "models": { "pool": "claude", "privateFolders": ["~/private"] },
-            "experiments": [{ "id": "browserAnnotations", "name": "Browser annotations", "on": true }, { "id": "projectDecisions", "on": false }],
+            "experiments": [{ "id": "openAnything", "name": "Open Anything", "on": true }, { "id": "projectDecisions", "on": false }],
         });
         let mut shown = confirmed.clone();
-        guess(&mut shown, &json!({ "experiments": { "browserAnnotations": false, "unknown": true } }));
+        guess(&mut shown, &json!({ "experiments": { "openAnything": false, "unknown": true } }));
         let switches = RunnerSettings::decode(&shown).experiments;
         assert_eq!(switches.len(), 2, "the list keeps its entries");
-        assert!(!switches[0].on && switches[0].name == "Browser annotations", "the switch shows off at once");
+        assert!(!switches[0].on && switches[0].name == "Open Anything", "the switch shows off at once");
         assert!(!switches[1].on);
         shown = confirmed.clone();
         guess(&mut shown, &json!({ "keepAwake": true, "models": { "pool": null } }));

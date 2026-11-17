@@ -46,7 +46,6 @@ code, and make it fail first when you can.
 - `@browserbear` gives the app a stand-in BrowserBear (`support/browserbear.ts`):
   its folder through `BROWSERBEAR_HOME`, with `agent/tabs.json` and its socket.
   Without it the GPUI app has none, so a run never reaches the real one.
-- `@browser-annotations` turns on the mock's browserAnnotations experiment.
 - `support/` holds the drivers. Both apps take the same JSON commands and give
   the same `dump` (`app/README.md`, "Seeing and driving it from a script"), so
   a step never asks which app it's driving.

@@ -5122,11 +5122,12 @@ message, so a later return to the thread still shows the handoff.
 
 ### The Browser panel
 
-With the `browserAnnotations` experiment enabled, the Mac app offers Annotate
-above pages displayed inside Threadbear for local threads. `AnnotatedWebPanel`
+The desktop app offers Annotate above pages displayed inside Threadbear for
+local threads, without an experiment switch (standard since 17 Nov 2026).
+The frozen Swift app's `AnnotatedWebPanel`
 wraps the built-in web and link previews, local HTML previews and URL panels.
 It uses the existing `WKWebView`; it does not need BrowserBear, Chrome or a
-debugging connection. For a local thread with the experiment enabled, the
+debugging connection. For a local thread, the desktop app's
 Browser panel's address field says **Open a page here** and loads its URL
 directly in the embedded preview, including when BrowserBear is stopped.
 It does not create an external browser tab. A BrowserBear page's **Open here
@@ -5152,10 +5153,9 @@ The GPUI app does the same (`desktop/gpui/src/annotations.rs`). Its pages
 are Chromium's, so the tools run in a world made with
 `Page.createIsolatedWorld` and the picture comes from
 `Page.captureScreenshot`, both over the page's own in-process DevTools channel.
-A web page previewed in a local thread's pane loads there while the experiment
-is on, and in the browser otherwise.
-The runner confirming the experiment off ends a session with nothing appended
-and nothing said, a screenshot still being kept included.
+A web page previewed in a local thread's pane loads there. Cancel ends a session
+with nothing appended, including while a screenshot is being kept.
+The frozen Swift app retains its old experiment gate and is no longer updated.
 
 There is no new runner request or backend field: the draft uses the existing
 text and image representation, `media.import` and, only when the user presses

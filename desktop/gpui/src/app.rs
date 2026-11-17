@@ -1212,9 +1212,6 @@ impl Threadbear {
 
     /// The runner's enabled experiments are no longer `before`.
     fn experiments_changed(&mut self, before: &EnabledExperiments, cx: &mut Context<Self>) {
-        if !self.annotations_on() {
-            crate::annotations::experiment_off(cx);
-        }
         // Decisions turned on: the open project's page works out its tab.
         if self.project_decisions_on() && !before.on("projectDecisions") {
             self.projects.tab_visit = None;

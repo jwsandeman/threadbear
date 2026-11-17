@@ -29,6 +29,13 @@ Then('Settings shows the {string} experiment {word}', async function (this: Thre
   await this.until(`the ${id} switch ${state}`, (d) => shown(d)?.experiments?.[id] === (state === 'on'));
 });
 
+Then('Settings has no {string} experiment', async function (this: ThreadbearWorld, id: string) {
+  await this.until(`no ${id} switch in Settings`, (d) => {
+    const settings = shown(d);
+    return settings?.experiments !== undefined && !(id in settings.experiments);
+  });
+});
+
 Then('Settings says {string}', async function (this: ThreadbearWorld, words: string) {
   await this.until(`Settings saying "${words}"`, (d) => shown(d)?.error === words);
 });

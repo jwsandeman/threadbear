@@ -83,30 +83,10 @@ fn shared(cx: &App) -> Option<Entity<Annotations>> {
     cx.try_global::<Shared>().map(|s| s.0.clone())
 }
 
-/// The runner confirmed the experiment off: the session ends with nothing
-/// appended and nothing said.
-pub(crate) fn experiment_off(cx: &mut App) {
-    if let Some(annotations) = shared(cx) {
-        annotations.update(cx, |a, cx| {
-            if let Some(active) = a.active.take() {
-                active.close_tools();
-            }
-            a.said = None;
-            cx.notify();
-        });
-    }
-}
-
 impl Threadbear {
-    /// The browserAnnotations experiment is on for this Mac's runner.
-    pub(crate) fn annotations_on(&self) -> bool {
-        self.experiment_on(rules::EXPERIMENT)
-    }
-
-    /// Whether `thread`'s pages can be annotated: this Mac's threads, with
-    /// the experiment on.
+    /// Whether `thread`'s pages can be annotated: this Mac's threads.
     pub(crate) fn annotates(&self, thread: &ThreadSummary) -> bool {
-        !thread.is_remote() && self.annotations_on()
+        !thread.is_remote()
     }
 }
 
@@ -144,10 +124,6 @@ impl Annotations {
             return;
         }
         let Some(app) = self.app.clone() else { return };
-        // Confirmed off with the button still drawn: nothing starts or is said.
-        if !app.read_with(cx, |app, _| app.annotations_on()).unwrap_or(false) {
-            return;
-        }
         let allowed = app.read_with(cx, |app, _| app.threads.get(&thread).is_some_and(|t| app.annotates(t))).unwrap_or(false);
         if !allowed {
             return self.say(&thread, &key, rules::LOCAL_ONLY, cx);
@@ -229,9 +205,6 @@ async fn evaluate(page: &PanelPage, expression: &str, context: i64, cx: &mut Asy
 /// where it was when Annotate was pressed.
 fn holds(app: &WeakEntity<Threadbear>, page: &Rc<PanelPage>, key: &str, thread: &str, started: &(String, u32), cx: &mut AsyncApp) -> Result<(), Stop> {
     app.read_with(cx, |app, cx| {
-        if !app.annotations_on() {
-            return Err(Stop::Quiet);
-        }
         if !app.threads.get(thread).is_some_and(|t| app.annotates(t)) {
             return Err(Stop::from(rules::THREAD_GONE));
         }
@@ -305,18 +278,12 @@ async fn run(app: &WeakEntity<Threadbear>, this: &WeakEntity<Annotations>, page:
                 }
                 let words = if images.is_empty() { rules::NO_SCREENSHOT } else { rules::ATTACHED };
                 let text = annotation.draft_addition(images.len());
-                // The experiment is read again where the draft changes:
-                // confirmed off since `holds`, nothing attaches.
                 let (window, composer) = app
                     .update(cx, |app, cx| {
-                        if !app.annotations_on() {
-                            return None;
-                        }
                         app.append_to_draft(thread, text, images, cx);
-                        Some((app.main_window, app.composers.get(thread).cloned()))
+                        (app.main_window, app.composers.get(thread).cloned())
                     })
-                    .map_err(|_| Stop::Quiet)?
-                    .ok_or(Stop::Quiet)?;
+                    .map_err(|_| Stop::Quiet)?;
                 if let Some(composer) = composer {
                     cx.update_window(window, |_, window, cx| {
                         composer.update(cx, |c, cx| c.focus(window, cx));
