@@ -1211,8 +1211,9 @@ test('a new message waits a moment for its pictures to go up, and comes with the
   assert.equal(publishedEvents(h).filter((e) => e.type === 'user.message').length, 1);
 });
 
-test('a new message whose pictures never go up shows without them once the wait is over', async () => {
-  const h = harness({ pictures: () => [] });
+test('a new message whose pictures are not up when the wait is over shows a place for each, which finds one that goes up late', async () => {
+  let up: unknown[] = [];
+  const h = harness({ pictures: () => up });
   await h.relay.call(T, 'threads.events', { threadId: T });
   await h.relay.call(T, 'threads.subscribe', { threadId: T, afterSeq: 119 });
   h.subs.get('relay:remoteThread')![0]!.onUpdate({ runnerId: 'mac-mini', status: 'running' });
@@ -1221,10 +1222,17 @@ test('a new message whose pictures never go up shows without them once the wait 
   h.clock.advance(PICTURE_WAIT_MS - 1_000);
   assert.equal(publishedEvents(h).some((e) => e.type === 'user.message'), false);
   h.clock.advance(1_000);
+  // The words and the count of pictures the app sent, so its own bubble
+  // for the message gives way to this one (PendingMessage.is_landed_by).
   const said = publishedEvents(h).find((e) => e.type === 'user.message')!;
-  assert.equal(said.text, 'Look\n\n[2 pictures]');
-  assert.deepEqual(said.images, []);
+  assert.equal(said.text, 'Look');
+  const places = [1, 2].map((n) => ({ path: `threadbear-relay:${T}/20/Picture ${n}`, mediaType: 'image/png' }));
+  assert.deepEqual(said.images, places);
   assert.equal(h.subs.get('relay:picturesAtSeqs')![0]!.closed, true);
+  await assert.rejects(h.relay.readFile('mac-mini', places[0]!.path), /didn't reach Convex from mac-mini/);
+  up = [pic(20, 1)];
+  const late = (await h.relay.readFile('mac-mini', places[0]!.path)) as { data: string };
+  assert.equal(Buffer.from(late.data, 'base64').toString(), 'bytes at https://files.example/p20-1');
 });
 
 test('files.read for another runner answers with a picture the relay holds, and nothing else', async () => {
@@ -1238,6 +1246,9 @@ test('files.read for another runner answers with a picture the relay holds, and 
   // One bigger than was asked for comes cut, and says so.
   const cut = (await h.relay.readFile('mac-mini', '/Users/b/inbox/p3-1.png', 5)) as { size: number; data: string; truncated: boolean };
   assert.deepEqual([cut.size, Buffer.from(cut.data, 'base64').toString(), cut.truncated], [bytes.length, 'bytes', true]);
+  // A picture in this runner's own inbox, as the app's bubble for a message it has just sent asks.
+  const mine = (await h.relay.readFile('mac-mini', '/inbox/a.png')) as { data: string; mediaType: string; truncated: boolean };
+  assert.deepEqual([Buffer.from(mine.data, 'base64').toString(), mine.mediaType, mine.truncated], ['bytes of /inbox/a.png', 'image/png', false]);
   // Any other path on that Mac, the same path on another runner, and a made-up placeholder.
   await assert.rejects(h.relay.readFile('mac-mini', '/Users/b/.ssh/id_ed25519'), /kept there for now/);
   await assert.rejects(h.relay.readFile('cloud', '/Users/b/inbox/p3-1.png'), /kept there for now/);

@@ -5892,14 +5892,17 @@ only way the app opens another runner's thread.
   `[N pictures]` line is taken off `text`; with none, `text` and `images: []` are
   as before. A message whose row arrived less than 20 seconds after it was sent
   and whose pictures aren't all up is held back, watched through the same query,
-  and sent late (at `8s+1`) once they are or the 20 seconds end.
+  and sent late (at `8s+1`) once they are or the 20 seconds end; it then has an
+  `images` entry for every picture its words count, up or not, and no
+  `[N pictures]` line, so its `text` and its count of `images` are the sender's.
   `files.read { path, runnerId, maxBytes? }` answers `{ path, size, modifiedAt,
   mediaType, data, truncated }` for a path held this way for a thread of that
   runner, with the bytes from the backend's file storage (25 MB at most); a
   not-up path is read again from the backend first, and `-32000` says it didn't
   reach Convex. The same path held for two threads answers from the thread used
-  last. Any other path is `-32000`, `Files on another runner are kept there for
-  now.` The query has no API version: a backend without it is asked again every
+  last. A path in this runner's own inbox (a picture the app has just sent to
+  that runner, drawn in its pending bubble) answers with that file. Any other
+  path is `-32000`, `Files on another runner are kept there for now.` The query has no API version: a backend without it is asked again every
   10 minutes, and messages show as their words meanwhile. Pictures in replies,
   pinned pictures and ones uploaded before the thread's rows were read as above
   only by the phone and the website stay as they were.

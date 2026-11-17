@@ -196,8 +196,9 @@ type Page = { messages: RelayRow[]; hasMore: boolean };
 // `path` where it is on that runner's Mac, `url` its file in file storage.
 export type RelayPicture = { n: number; path: string; url: string; mediaType: string; width?: number; height?: number };
 // The pictures held for a thread's rows, by row seq, and the rows whose
-// message waits for its pictures (left out of the events until then).
-export type RelayPictures = { held: Map<number, RelayPicture[]>; waiting?: Set<number> };
+// message waits for its pictures (left out of the events until then), and
+// the rows that have waited: theirs get a place each, up or not.
+export type RelayPictures = { held: Map<number, RelayPicture[]>; waiting?: Set<number>; waited?: Set<number> };
 // files.read's answer (files.ts FileRead).
 export type RelayFile = { path: string; size: number; modifiedAt: string; mediaType: string; data: string; truncated: boolean };
 
@@ -220,12 +221,16 @@ const MOST_PLACES = 50;
  * `images` has one for each the words say it came with, in order, so
  * [Picture N] names images[N-1]; one that isn't up has a path that names no
  * file (notUpPath), and the line counting the unplaced ones goes, as the
- * tiles show them. With none held the words stay as that runner sent them.
+ * tiles show them. With none held the words stay as that runner sent them,
+ * unless it's one that waited for its pictures (`places`): the app that
+ * sent it knows its own message by its words and how many pictures it has
+ * (the desktop's PendingMessage.is_landed_by), so it gets a place for each.
  */
-function messageWithPictures(threadId: string, r: RelayRow, held: RelayPicture[] | undefined): { text: string; images: { path: string; mediaType: string; width?: number; height?: number }[] } {
-  if (!held?.length) return { text: r.text, images: [] };
+function messageWithPictures(threadId: string, r: RelayRow, held: RelayPicture[] = [], places = false): { text: string; images: { path: string; mediaType: string; width?: number; height?: number }[] } {
+  if (!held.length && !places) return { text: r.text, images: [] };
   const { count, words } = saidOf(r);
   const most = Math.max(Math.min(count, MOST_PLACES), ...held.map((p) => p.n));
+  if (!most) return { text: r.text, images: [] };
   const images = [];
   for (let n = 1; n <= most; n++) {
     const p = held.find((x) => x.n === n);
@@ -297,8 +302,10 @@ type Watch = {
   pictures: Map<number, RelayPicture[]>;
   // Rows whose pictures have been read.
   pictureAsked: Set<number>;
-  // Rows whose message waits for its pictures to go up, and until when.
+  // Rows whose message waits for its pictures to go up, and until when,
+  // and every row that has.
   pictureWait: Map<number, number>;
+  pictureWaited: Set<number>;
   // The live read of the waiting rows' pictures, and the timer for the first wait to end.
   pictureSub?: { key: string; unsub: () => void; closed: boolean };
   pictureTimer?: TimerHandle;
@@ -407,7 +414,7 @@ export function relayEvents(threadId: string, rows: RelayRow[], row: RelayThread
     if (r.role === 'user') {
       // One waiting for its pictures to go up comes late, with them.
       if (!pictures?.waiting?.has(r.seq)) {
-        const { text, images } = messageWithPictures(threadId, r, pictures?.held.get(r.seq));
+        const { text, images } = messageWithPictures(threadId, r, pictures?.held.get(r.seq), pictures?.waited?.has(r.seq));
         out.push(env(base + 1, r, { type: 'user.message', text, images, ...(r.origin === 'phone' || r.origin === 'runner' || r.origin === 'schedule' ? { origin: r.origin } : {}) }));
       }
     } else if (r.role === 'assistant' && r.plan) {
@@ -545,7 +552,7 @@ export function mergeTail(rows: Map<number, RelayRow>, tail: Page): { gapAfter?:
  * again if the app scrolls back to it (olderMore), and seqs given for it
  * stop counting, so emit's oldest seq moves up with it. A card's seqs stay.
  */
-export function trimHeld(w: { rows: Map<number, RelayRow>; olderMore: boolean; given: Set<number>; bodies: Map<number, unknown>; cards: Map<string, Card>; pictures?: Map<number, unknown>; pictureAsked?: Set<number>; pictureWait?: Map<number, number> }): void {
+export function trimHeld(w: { rows: Map<number, RelayRow>; olderMore: boolean; given: Set<number>; bodies: Map<number, unknown>; cards: Map<string, Card>; pictures?: Map<number, unknown>; pictureAsked?: Set<number>; pictureWait?: Map<number, number>; pictureWaited?: Set<number> }): void {
   if (w.rows.size <= MAX_HELD + TRIM_SLACK) return;
   const seqs = [...w.rows.keys()].sort((a, b) => a - b);
   const drop = seqs.length - MAX_HELD;
@@ -555,6 +562,7 @@ export function trimHeld(w: { rows: Map<number, RelayRow>; olderMore: boolean; g
     w.pictures?.delete(seqs[n]!);
     w.pictureAsked?.delete(seqs[n]!);
     w.pictureWait?.delete(seqs[n]!);
+    w.pictureWaited?.delete(seqs[n]!);
   }
   w.olderMore = true;
   const from = seqs[drop]! * SCALE;
@@ -832,7 +840,7 @@ export class Relay {
     const t = this.find(threadId);
     if (!t) throw new RpcError(ErrorCode.threadNotFound, `No thread ${threadId}.`);
     if (!w) {
-      w = { threadId, runnerId: t.runnerId, rows: new Map(), bodies: new Map(), olderMore: true, loaded: false, row: null, cards: new Map(), decided: new Map(), given: new Set(), unsub: [], usedAt: this.deps.clock.now(), pictures: new Map(), pictureAsked: new Set(), pictureWait: new Map() };
+      w = { threadId, runnerId: t.runnerId, rows: new Map(), bodies: new Map(), olderMore: true, loaded: false, row: null, cards: new Map(), decided: new Map(), given: new Set(), unsub: [], usedAt: this.deps.clock.now(), pictures: new Map(), pictureAsked: new Set(), pictureWait: new Map(), pictureWaited: new Set() };
       this.watches.set(threadId, w);
     } else if (w.runnerId !== t.runnerId) {
       // Moved to another runner while watched: its commands go to the one
@@ -861,7 +869,7 @@ export class Relay {
 
   private events(w: Watch): RelayEvent[] {
     const settled = w.stoppedAt === undefined || this.deps.clock.now() - w.stoppedAt >= SETTLE_MS;
-    const events = relayEvents(w.threadId, [...w.rows.values()], w.row, [...w.cards.values()], w.olderMore, this.runnerName(w.runnerId), settled, w.bodies, { held: w.pictures, waiting: this.waitingForPictures(w) });
+    const events = relayEvents(w.threadId, [...w.rows.values()], w.row, [...w.cards.values()], w.olderMore, this.runnerName(w.runnerId), settled, w.bodies, { held: w.pictures, waiting: this.waitingForPictures(w), waited: w.pictureWaited });
     // A hole might contain the rest of this turn, or the start of the next.
     // Further tails can merge more gaps into it, so no turn marker inside
     // the whole uncertain interval is known yet. Real messages stay readable
@@ -1236,7 +1244,10 @@ export class Relay {
             // From when it was sent, by that runner's clock, and never longer than the wait itself.
             const at = Date.parse(w.rows.get(seq)?.at ?? '');
             const until = Math.min(now, Number.isFinite(at) ? at : now) + PICTURE_WAIT_MS;
-            if (until > now) w.pictureWait.set(seq, until);
+            if (until > now) {
+              w.pictureWait.set(seq, until);
+              w.pictureWaited.add(seq);
+            }
           }
         }
       } catch (e) {
@@ -1308,10 +1319,11 @@ export class Relay {
    * by the path the relay gave the app for it, from file storage. Only a
    * path held for a thread of that runner is answered, from the thread
    * used last when two hold the same path; any other file stays there.
+   * And a picture in this runner's own inbox: the app draws a message it
+   * has just sent there with the paths it sent, until that runner shows it.
    */
   async readFile(runnerId: string, path: string, maxBytes?: number): Promise<RelayFile> {
     const download = this.deps.source()?.download;
-    if (!download) throw new RpcError(ErrorCode.other, KEPT_THERE);
     let found: { picture: RelayPicture; at: string } | undefined;
     const watches = [...this.watches.values()].filter((w) => w.runnerId === runnerId).sort((a, b) => b.usedAt - a.usedAt);
     for (const w of watches) {
@@ -1326,7 +1338,11 @@ export class Relay {
       const m = NOT_UP.exec(path);
       const w = m ? watches.find((x) => x.threadId === m[1]) : undefined;
       const row = w?.rows.get(Number(m?.[2]));
-      if (!m || !w || !row) throw new RpcError(ErrorCode.other, KEPT_THERE);
+      if (!m || !w || !row) {
+        const mine = m ? undefined : this.deps.readPicture?.(path);
+        if (!mine || 'skip' in mine) throw new RpcError(ErrorCode.other, KEPT_THERE);
+        return this.fileOf(path, mine.bytes, mine.mediaType, new Date(this.deps.clock.now()).toISOString(), maxBytes);
+      }
       try {
         this.keepPictures(w, await this.read(PICTURES_FN, { threadId: w.threadId, seqs: [row.seq] }));
       } catch (e) {
@@ -1336,15 +1352,21 @@ export class Relay {
       if (!picture) throw new RpcError(ErrorCode.other, `That picture didn't reach Convex from ${this.runnerName(runnerId)}, so it's only there.`);
       found = { picture, at: row.at };
     }
+    if (!download) throw new RpcError(ErrorCode.other, KEPT_THERE);
     let bytes: Uint8Array;
     try {
       bytes = await download(found.picture.url);
     } catch (e) {
       throw new RpcError(ErrorCode.other, `Couldn't get that picture from Convex: ${(e as Error)?.message ?? e}`);
     }
+    return this.fileOf(path, bytes, found.picture.mediaType, found.at, maxBytes);
+  }
+
+  // files.read's answer: at most `maxBytes` of it, as files.ts cuts a file.
+  private fileOf(path: string, bytes: Uint8Array, mediaType: string, modifiedAt: string, maxBytes?: number): RelayFile {
     const most = Math.min(typeof maxBytes === 'number' && maxBytes > 0 ? maxBytes : FILE_DEFAULT_BYTES, FILE_MOST_BYTES);
     const sent = bytes.byteLength > most ? bytes.subarray(0, most) : bytes;
-    return { path, size: bytes.byteLength, modifiedAt: found.at, mediaType: found.picture.mediaType, data: Buffer.from(sent).toString('base64'), truncated: bytes.byteLength > most };
+    return { path, size: bytes.byteLength, modifiedAt, mediaType, data: Buffer.from(sent).toString('base64'), truncated: bytes.byteLength > most };
   }
 
   // ---------------------------------------------------------------- actions
