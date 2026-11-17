@@ -390,12 +390,9 @@ impl Threadbear {
     }
 
     /// The openAnything experiment is on for this Mac's runner: ⌘K, ⌘P and
-    /// Go > Open Anything… only then. Settings' switch first, as it changes
-    /// without a new hello, else the hello's list.
+    /// Go > Open Anything… only then.
     pub(crate) fn open_anything_on(&self) -> bool {
-        let id = threadbear_core::shortcuts::OPEN_ANYTHING_EXPERIMENT;
-        let switch = self.runner_settings.as_ref().and_then(|s| s["experiments"].as_array()?.iter().find(|e| e["id"] == id).map(|e| e["on"].as_bool() == Some(true)));
-        switch.unwrap_or_else(|| self.remote.experiments.iter().any(|e| e == id))
+        self.experiment_on(threadbear_core::shortcuts::OPEN_ANYTHING_EXPERIMENT)
     }
 
     /// The box over the window, or None while it's down: the box's own view,

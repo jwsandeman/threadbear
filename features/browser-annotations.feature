@@ -51,6 +51,66 @@ Feature: Annotate a browser page
     When I open the thread "Rebuild the three landing pages"
     Then the composer says only "Before the annotation"
 
+  @browser.annotate @browser-annotations @web-runtime @swift-pending
+  Scenario: The experiment going off ends an annotation and leaves the draft
+    Given the web runtime is installed
+    When I open the thread "Rebuild the three landing pages"
+    And I type "Before the annotation" in the composer
+    And I open "mockups/drawn.html" in the thread's folder in the pane
+    And I press Annotate over the page in the pane
+    And I select the page's "p" with the annotation tools
+    And the runner turns the "browserAnnotations" experiment off
+    Then the pane's page loses its Annotate button
+    And the page in the pane has no annotation tools
+    And the composer says only "Before the annotation"
+    When the runner turns the "browserAnnotations" experiment on
+    Then the pane's page has an Annotate button and an empty annotation line
+    When I press Annotate over the page in the pane
+    And I press Cancel annotation over the page in the pane
+    Then the annotation tools are closed
+    And the composer says only "Before the annotation"
+
+  @browser.annotate @browser-annotations @web-runtime @swift-pending
+  Scenario: A refused switch-off leaves the annotation open
+    Given the web runtime is installed
+    When I open the thread "Rebuild the three landing pages"
+    And I type "Before the annotation" in the composer
+    And I open "mockups/drawn.html" in the thread's folder in the pane
+    And I press Annotate over the page in the pane
+    And I select the page's "p" with the annotation tools
+    And the runner holds settings changes
+    And I open Settings
+    And I press "Turn Browser annotations off" in Settings
+    Then Settings shows the "browserAnnotations" experiment off
+    And the annotation tools are still open
+    When the runner refuses the settings changes it held
+    Then Settings says "Couldn't save the settings (disk full)."
+    And Settings shows the "browserAnnotations" experiment on
+    And the annotation tools are still open
+    When I attach the annotation with the comment "Make this line bigger"
+    Then the pane's annotation line says "Annotation attached to this thread's draft. Review it, then send."
+    And the composer keeps "Before the annotation" and gains the comment "Make this line bigger"
+
+  @browser.annotate @browser-annotations @web-runtime @swift-pending
+  Scenario: The experiment going off while the screenshot is kept attaches nothing
+    Given the web runtime is installed
+    When I open the thread "Rebuild the three landing pages"
+    And I type "Before the annotation" in the composer
+    And I open "mockups/drawn.html" in the thread's folder in the pane
+    And I press Annotate over the page in the pane
+    And I select the page's "p" with the annotation tools
+    And the runner holds the pictures it's given
+    And I attach the annotation with the comment "Make this line bigger"
+    Then the runner is holding the annotation's screenshot
+    When the runner turns the "browserAnnotations" experiment off
+    And the runner keeps the pictures it held
+    Then the pane's page loses its Annotate button
+    And the page in the pane has no annotation tools
+    And the composer still says only "Before the annotation"
+    When the runner turns the "browserAnnotations" experiment on
+    Then the pane's page has an Annotate button and an empty annotation line
+    And the composer still says only "Before the annotation"
+
   @browser.annotate @browser-annotations @browserbear @windows-pending @panel.web @web-runtime @swift-pending
   Scenario: Open an agent's page inside Threadbear for annotation
     Given the web runtime is installed

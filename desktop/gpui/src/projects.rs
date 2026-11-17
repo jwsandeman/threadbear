@@ -175,10 +175,10 @@ impl Threadbear {
         made
     }
 
-    /// The projectDecisions experiment is on for this Mac's runner (its hello
-    /// lists it): the Projects page gathers each project's open cards of asks.
+    /// The projectDecisions experiment is on for this Mac's runner: the
+    /// Projects page gathers each project's open cards of asks.
     pub(crate) fn project_decisions_on(&self) -> bool {
-        self.remote.experiments.iter().any(|e| e == "projectDecisions")
+        self.experiment_on("projectDecisions")
     }
 
     fn replace_project(&mut self, project: Project) {

@@ -197,6 +197,60 @@ pub fn experiment_about(does: &str) -> String {
     out.trim().to_owned()
 }
 
+/// The experiments on for this runner (docs/protocol.md, `hello`): `hello`'s
+/// list, replaced by each settings snapshot the runner confirms
+/// (`settings.get`, `settings.update`'s answer, `settings.updated`). A
+/// switch's guess (`guess`) never changes it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct EnabledExperiments(Vec<String>);
+
+impl EnabledExperiments {
+    pub fn from_hello(hello: &Value) -> EnabledExperiments {
+        EnabledExperiments(hello["experiments"].as_array().into_iter().flatten().filter_map(|e| e.as_str().map(str::to_owned)).collect())
+    }
+
+    /// A confirmed snapshot's list replaces the set, an empty one too.
+    /// Settings with no list (an older runner) leave it as it was. Says
+    /// whether the set changed.
+    pub fn confirm(&mut self, settings: &Value) -> bool {
+        let Some(list) = settings["experiments"].as_array() else { return false };
+        let on: Vec<String> = list.iter().filter(|e| e["on"].as_bool() == Some(true)).filter_map(|e| e["id"].as_str().map(str::to_owned)).collect();
+        let changed = on != self.0;
+        self.0 = on;
+        changed
+    }
+
+    pub fn on(&self, id: &str) -> bool {
+        self.0.iter().any(|e| e == id)
+    }
+}
+
+/// A `settings.update` change written over the settings shown, before the
+/// runner answers: objects within objects too, and `experiments` (switches
+/// by id) onto the list's own entries.
+pub fn guess(settings: &mut Value, change: &Value) {
+    let (Value::Object(into), Value::Object(change)) = (&mut *settings, change) else {
+        *settings = change.clone();
+        return;
+    };
+    for (key, value) in change {
+        match into.get_mut(key) {
+            Some(Value::Array(list)) if key == "experiments" && value.is_object() => {
+                for entry in list.iter_mut() {
+                    let switch = entry["id"].as_str().and_then(|id| value.get(id)).and_then(Value::as_bool);
+                    if let (Some(on), Some(entry)) = (switch, entry.as_object_mut()) {
+                        entry.insert("on".to_owned(), Value::Bool(on));
+                    }
+                }
+            }
+            Some(existing) if existing.is_object() && value.is_object() => guess(existing, value),
+            _ => {
+                into.insert(key.clone(), value.clone());
+            }
+        }
+    }
+}
+
 /// Standing instructions (docs/protocol.md, "Standing instructions"): what
 /// every thread's agent is given. `outside` is set when the file isn't what
 /// Settings last saved, so no agent is given it until Mike decides.
@@ -216,6 +270,53 @@ impl StandingInstructions {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn confirmed_settings_replace_the_enabled_experiments() {
+        let mut on = EnabledExperiments::from_hello(&json!({ "experiments": ["removed", "browserAnnotations"] }));
+        assert!(on.on("removed") && on.on("browserAnnotations") && !on.on("projectDecisions"));
+        assert!(on.confirm(&json!({ "experiments": [{ "id": "browserAnnotations", "on": false }, { "id": "projectDecisions", "on": true }] })));
+        assert!(on.on("projectDecisions"));
+        assert!(!on.on("browserAnnotations"), "a switch confirmed off is off");
+        assert!(!on.on("removed"), "an id the runner no longer lists is not kept");
+        assert!(on.confirm(&json!({ "experiments": [{ "id": "browserAnnotations", "on": true }, { "id": "projectDecisions", "on": false }] })));
+        assert!(on.on("browserAnnotations") && !on.on("projectDecisions"), "back on with no new hello");
+        assert!(!on.confirm(&json!({ "experiments": [{ "id": "browserAnnotations", "on": true }] })), "the same set again is no change");
+        assert!(on.confirm(&json!({ "experiments": [{ "id": "browserAnnotations" }] })));
+        assert_eq!(on, EnabledExperiments::default(), "an entry with no on is off");
+    }
+
+    #[test]
+    fn settings_with_no_experiment_list_keep_hellos_and_an_empty_list_clears_them() {
+        let hello = json!({ "experiments": ["browserAnnotations"] });
+        let mut on = EnabledExperiments::from_hello(&hello);
+        assert!(!on.confirm(&json!({ "idleMinutes": 10 })));
+        assert!(on.on("browserAnnotations"), "an older runner's settings say nothing of experiments");
+        assert!(!on.confirm(&Value::Null));
+        assert!(on.on("browserAnnotations"));
+        assert!(on.confirm(&json!({ "experiments": [] })));
+        assert!(!on.on("browserAnnotations"), "an empty list is the runner saying none are on");
+        assert_eq!(EnabledExperiments::from_hello(&json!({})), EnabledExperiments::default(), "a hello with no list has none on");
+    }
+
+    #[test]
+    fn a_switch_guess_changes_its_entry_and_keeps_the_list() {
+        let confirmed = json!({
+            "keepAwake": false, "models": { "pool": "claude", "privateFolders": ["~/private"] },
+            "experiments": [{ "id": "browserAnnotations", "name": "Browser annotations", "on": true }, { "id": "projectDecisions", "on": false }],
+        });
+        let mut shown = confirmed.clone();
+        guess(&mut shown, &json!({ "experiments": { "browserAnnotations": false, "unknown": true } }));
+        let switches = RunnerSettings::decode(&shown).experiments;
+        assert_eq!(switches.len(), 2, "the list keeps its entries");
+        assert!(!switches[0].on && switches[0].name == "Browser annotations", "the switch shows off at once");
+        assert!(!switches[1].on);
+        shown = confirmed.clone();
+        guess(&mut shown, &json!({ "keepAwake": true, "models": { "pool": null } }));
+        assert_eq!(shown["keepAwake"], true);
+        assert_eq!(shown["models"], json!({ "pool": null, "privateFolders": ["~/private"] }), "a change names only what it changes");
+        assert_eq!(shown["experiments"], confirmed["experiments"]);
+    }
 
     #[test]
     fn settings_read_leniently() {

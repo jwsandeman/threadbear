@@ -21,6 +21,7 @@ use threadbear_client::runner::{Client, Status};
 use threadbear_core::inbox::{self, iso_time, ThreadSummary};
 use threadbear_core::logins::RunnerLogins;
 use threadbear_core::navigation::NavigationHistory;
+use threadbear_core::runner_settings::EnabledExperiments;
 use threadbear_core::shortcuts::ShortcutBindings;
 use threadbear_dock::{DockLayout, DockModel, DockView};
 use tokio::sync::mpsc;
@@ -828,7 +829,10 @@ impl Threadbear {
                 let connected = matches!(status, Status::Connected { .. });
                 if let Status::Connected { hello, .. } = &status {
                     self.logins = RunnerLogins::from_hello(hello);
-                    self.remote.experiments = hello["experiments"].as_array().into_iter().flatten().filter_map(|e| e.as_str().map(str::to_owned)).collect();
+                    let before = std::mem::replace(&mut self.remote.experiments, EnabledExperiments::from_hello(hello));
+                    if before != self.remote.experiments {
+                        self.experiments_changed(&before, cx);
+                    }
                     self.runner_version = hello["runnerVersion"].as_str().unwrap_or("").to_owned();
                     self.upstream_on = hello["updates"]["upstream"]["state"].as_str().is_some_and(|s| s != "off");
                     self.upstream_checkout = hello["updates"]["upstream"]["checkout"].as_str().filter(|c| !c.is_empty()).map(str::to_owned);
@@ -966,7 +970,7 @@ impl Threadbear {
                     }
                 }
                 "librarian.updated" => self.librarian.status = Some(threadbear_core::librarian::Status::decode(&params["librarian"])),
-                "settings.updated" => self.runner_settings = Some(params["settings"].clone()),
+                "settings.updated" => self.confirm_settings(params["settings"].clone(), cx),
                 // A login appearing or going, its models once asked, its
                 // usage; and the pools after a save: both replace `hello`'s.
                 "accounts.updated" => self.logins.set_accounts(&params["accounts"]),
@@ -1171,7 +1175,7 @@ impl Threadbear {
             this.update(cx, |this, cx| {
                 match res {
                     Ok(v) => {
-                        this.runner_settings = Some(v["settings"].clone());
+                        this.confirm_settings(v["settings"].clone(), cx);
                         this.settings_unsupported = false;
                     }
                     // A runner from before settings.
@@ -1188,13 +1192,43 @@ impl Threadbear {
         .detach();
     }
 
+    /// Whether the runner has the experiment `id` on: its hello's list, then
+    /// each settings snapshot it confirms. A switch's guess in Settings
+    /// isn't one.
+    pub(crate) fn experiment_on(&self, id: &str) -> bool {
+        self.remote.experiments.on(id)
+    }
+
+    /// Settings the runner has confirmed: `settings.get`, `settings.update`'s
+    /// answer and `settings.updated`.
+    fn confirm_settings(&mut self, settings: Value, cx: &mut Context<Self>) {
+        let before = self.remote.experiments.clone();
+        let changed = self.remote.experiments.confirm(&settings);
+        self.runner_settings = Some(settings);
+        if changed {
+            self.experiments_changed(&before, cx);
+        }
+    }
+
+    /// The runner's enabled experiments are no longer `before`.
+    fn experiments_changed(&mut self, before: &EnabledExperiments, cx: &mut Context<Self>) {
+        if !self.annotations_on() {
+            crate::annotations::experiment_off(cx);
+        }
+        // Decisions turned on: the open project's page works out its tab.
+        if self.project_decisions_on() && !before.on("projectDecisions") {
+            self.projects.tab_visit = None;
+        }
+        cx.notify();
+    }
+
     /// `updateSettings`: shown at once; the runner's answer (or its error,
     /// which puts it back) has the last word. `change` is what
     /// `settings.update` takes.
     pub(crate) fn update_runner_settings(&mut self, change: Value, cx: &mut Context<Self>) {
         let before = self.runner_settings.clone();
         if let Some(settings) = self.runner_settings.as_mut() {
-            merge_json(settings, &change);
+            threadbear_core::runner_settings::guess(settings, &change);
         }
         let guess = self.runner_settings.clone();
         cx.notify();
@@ -1204,7 +1238,7 @@ impl Threadbear {
             this.update(cx, |this, cx| {
                 match res {
                     Ok(v) => {
-                        this.runner_settings = Some(v["settings"].clone());
+                        this.confirm_settings(v["settings"].clone(), cx);
                         this.settings_error = None;
                     }
                     Err(e) => {
@@ -1800,24 +1834,6 @@ pub(crate) enum Connection<'a> {
     Down(&'a str),
     Lost(&'a str),
     Unauthorized(&'a str),
-}
-
-/// `change`'s fields written over `into`'s, objects within objects too, as a
-/// `settings.update` changes only what it names.
-fn merge_json(into: &mut Value, change: &Value) {
-    match (into, change) {
-        (Value::Object(into), Value::Object(change)) => {
-            for (key, value) in change {
-                match into.get_mut(key) {
-                    Some(existing) if existing.is_object() && value.is_object() => merge_json(existing, value),
-                    _ => {
-                        into.insert(key.clone(), value.clone());
-                    }
-                }
-            }
-        }
-        (into, change) => *into = change.clone(),
-    }
 }
 
 pub(crate) fn project_list(projects: &Value) -> Vec<(String, String, bool)> {

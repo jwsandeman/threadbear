@@ -1152,6 +1152,9 @@ impl SettingsWindow {
         let settings = self.app.upgrade().and_then(|a| a.read(cx).runner_settings.as_ref().map(RunnerSettings::decode));
         json!({
             "tab": self.tab.name(),
+            "error": self.app.upgrade().and_then(|a| a.read(cx).settings_error.clone()).unwrap_or_default(),
+            // Each experiment's switch as Settings shows it.
+            "experiments": settings.as_ref().map(|s| s.experiments.iter().map(|e| (e.id.clone(), Value::Bool(e.on))).collect::<serde_json::Map<String, Value>>()),
             "appearance": style::appearance().name(),
             "defaultFolder": settings.as_ref().map(|s| s.default_cwd.clone()),
             "keepAwake": settings.as_ref().and_then(|s| s.keep_awake),

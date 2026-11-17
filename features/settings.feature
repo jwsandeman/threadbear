@@ -6,9 +6,7 @@ Feature: Settings
   Background:
     Given the app is connected to a runner with the demo threads
 
-  # The current Swift app refreshes from confirmed settings. GPUI still
-  # keeps the experiments it received when it connected.
-  @settings.general @project-decisions @gpui-pending
+  @settings.general @project-decisions
   Scenario: Experiment changes reach an open project without reconnecting
     When I open the project "Threadbear"
     Then the project's decisions include "Rename the Settings tabs" asking "Call the Advanced tab \"Machine\" or \"Runner\"?"
@@ -16,6 +14,32 @@ Feature: Settings
     Then the project's decisions don't include "Rename the Settings tabs"
     When the runner turns the "projectDecisions" experiment on
     Then the project's decisions include "Rename the Settings tabs" asking "Call the Advanced tab \"Machine\" or \"Runner\"?"
+
+  # The Swift app's dump has no experiment switches to read, so these two
+  # run on the GPUI app only.
+  @settings.general @project-decisions @swift-pending
+  Scenario: An experiment switch changes its feature once the runner confirms it
+    When I open the project "Threadbear"
+    And the runner holds settings changes
+    And I open Settings
+    And I press "Turn Project decisions off" in Settings
+    Then Settings shows the "projectDecisions" experiment off
+    And the project's decisions include "Rename the Settings tabs" asking "Call the Advanced tab \"Machine\" or \"Runner\"?"
+    When the runner saves the settings changes it held
+    Then the project's decisions don't include "Rename the Settings tabs"
+    And Settings shows the "projectDecisions" experiment off
+
+  @settings.general @project-decisions @swift-pending
+  Scenario: A refused experiment switch leaves its feature on
+    When I open the project "Threadbear"
+    And the runner holds settings changes
+    And I open Settings
+    And I press "Turn Project decisions off" in Settings
+    Then Settings shows the "projectDecisions" experiment off
+    When the runner refuses the settings changes it held
+    Then Settings says "Couldn't save the settings (disk full)."
+    And Settings shows the "projectDecisions" experiment on
+    And the project's decisions include "Rename the Settings tabs" asking "Call the Advanced tab \"Machine\" or \"Runner\"?"
 
   @settings.window
   Scenario: Settings opens on General, and another section can be picked

@@ -293,6 +293,13 @@ is sync off (`devices.list` lists none and says why, and pairing and
 revoking refuse with it; `""` turns it back on), and `failNext: true`
 makes the next pair or revoke fail as a backend that didn't answer.
 
+`mock.experiments` (`{ <id>: true | false }`) switches experiments as another
+client's `settings.update` does, with its `settings.updated`. `mock.settings`
+plays a slow or refusing save: `hold: true` keeps each `settings.update`
+unanswered until `hold: false`, and `failNext: true` refuses the next one.
+`mock.holdMedia` (`hold`) keeps `media.import` unanswered the same way and
+says how many are `waiting`.
+
 It also answers `runner.status`, and fakes a runner restart for the app's
 restart states: `mock.restartPending` (`waitingFor`, default the busy
 threads; `resume: {threadId}`; `cancel: true`) saves one and sends the

@@ -1510,10 +1510,10 @@ sections.
 
 Some new features start as experiments: off unless you turn them on, while
 they're tried out. Turn one on or off in Settings > General > Experiments
-(the ⓘ beside each says what it does). In the current Swift Mac app, the
-feature changes as soon as the runner confirms the switch, with nothing to
-reopen. If saving fails, the switch returns to its saved state and shows an
-error. The switches are kept under `experiments` in `runner.json` in
+(the ⓘ beside each says what it does). In the Swift Mac app and the new
+desktop app, the feature changes as soon as the runner confirms the switch,
+with nothing to reopen. If saving fails, the switch returns to its saved
+state and shows an error. The switches are kept under `experiments` in `runner.json` in
 Threadbear's data folder, read at every turn, so an agent can set them
 there too:
 

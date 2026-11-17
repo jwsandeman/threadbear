@@ -7,10 +7,8 @@ behaviour specs pass (`features/`). The table is written by
 A blank cell means no spec covers that yet, not that the feature is missing.
 The full list of features is [features.md](features.md).
 
-Experiment switches refresh the current Swift app as soon as the runner
-confirms them, including changes from another client. GPUI still refreshes
-its enabled features at connection time. The Settings scenario for changing
-an experiment on an open project is tagged `@gpui-pending` until it catches up.
+Experiment switches refresh both apps as soon as the runner confirms them,
+including changes from another client.
 
 ## The table
 
@@ -5178,3 +5176,26 @@ Fixes from Codex's review of the slice before:
   thread panels and highlights pass beside it.
 - Not checked: a real pointer drawing a stroke or a region, and a page on
   another site inside a frame.
+
+### 2026-11-17 Experiment switches without reconnecting (`settings.general`)
+
+- `EnabledExperiments` (`desktop/core/src/runner_settings.rs`) holds the
+  runner's enabled experiments: hello's list, replaced by each confirmed
+  settings snapshot (`settings.get`, `settings.update`'s answer,
+  `settings.updated`). Settings with no list keep hello's; an empty list
+  clears it.
+- Every gate reads it (`Threadbear::experiment_on`): Open Anything, nested
+  threads, project decisions, browser annotations.
+- A switch in Settings shows its guess at once (`runner_settings::guess`). The
+  gates change when the runner confirms it. A refused change puts the switch
+  back and shows the error.
+- Annotations confirmed off: the running session ends with nothing appended
+  and nothing said, a screenshot still being kept included.
+- Verification: on the GPUI app on a Mac, 3 scenarios of
+  `features/settings.feature` (a change from another client on an open
+  project, a held switch confirmed, a held switch refused) and 3 of
+  `features/browser-annotations.feature` (off during an annotation, a refused
+  switch-off during one, off while the screenshot is kept). The two switch
+  scenarios and the three annotation scenarios are Swift-pending: the Swift
+  dump has no switches or tools.
+- Not checked: a real pointer drawing a stroke or a region.

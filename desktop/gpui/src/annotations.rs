@@ -83,13 +83,24 @@ fn shared(cx: &App) -> Option<Entity<Annotations>> {
     cx.try_global::<Shared>().map(|s| s.0.clone())
 }
 
+/// The runner confirmed the experiment off: the session ends with nothing
+/// appended and nothing said.
+pub(crate) fn experiment_off(cx: &mut App) {
+    if let Some(annotations) = shared(cx) {
+        annotations.update(cx, |a, cx| {
+            if let Some(active) = a.active.take() {
+                active.close_tools();
+            }
+            a.said = None;
+            cx.notify();
+        });
+    }
+}
+
 impl Threadbear {
-    /// The browserAnnotations experiment is on for this Mac's runner:
-    /// Settings' switch first, else the hello's list (as `open_anything_on`).
+    /// The browserAnnotations experiment is on for this Mac's runner.
     pub(crate) fn annotations_on(&self) -> bool {
-        let id = rules::EXPERIMENT;
-        let switch = self.runner_settings.as_ref().and_then(|s| s["experiments"].as_array()?.iter().find(|e| e["id"] == id).map(|e| e["on"].as_bool() == Some(true)));
-        switch.unwrap_or_else(|| self.remote.experiments.iter().any(|e| e == id))
+        self.experiment_on(rules::EXPERIMENT)
     }
 
     /// Whether `thread`'s pages can be annotated: this Mac's threads, with
@@ -133,6 +144,10 @@ impl Annotations {
             return;
         }
         let Some(app) = self.app.clone() else { return };
+        // Confirmed off with the button still drawn: nothing starts or is said.
+        if !app.read_with(cx, |app, _| app.annotations_on()).unwrap_or(false) {
+            return;
+        }
         let allowed = app.read_with(cx, |app, _| app.threads.get(&thread).is_some_and(|t| app.annotates(t))).unwrap_or(false);
         if !allowed {
             return self.say(&thread, &key, rules::LOCAL_ONLY, cx);
@@ -214,6 +229,9 @@ async fn evaluate(page: &PanelPage, expression: &str, context: i64, cx: &mut Asy
 /// where it was when Annotate was pressed.
 fn holds(app: &WeakEntity<Threadbear>, page: &Rc<PanelPage>, key: &str, thread: &str, started: &(String, u32), cx: &mut AsyncApp) -> Result<(), Stop> {
     app.read_with(cx, |app, cx| {
+        if !app.annotations_on() {
+            return Err(Stop::Quiet);
+        }
         if !app.threads.get(thread).is_some_and(|t| app.annotates(t)) {
             return Err(Stop::from(rules::THREAD_GONE));
         }
@@ -242,10 +260,20 @@ async fn capture(app: &WeakEntity<Threadbear>, page: &PanelPage, session: &str, 
         return Err(Stop::Quiet);
     }
     let Ok(client) = app.read_with(cx, |app, _| app.client.clone()) else { return Err(Stop::Quiet) };
-    let Some(file) = crate::composer::stage_private(&crate::composer::paste_base(), &format!("annotation-{session}.png"), &bytes) else { return Ok(None) };
-    let kept = crate::call(client, "media.import", json!({ "path": file.to_string_lossy() })).await;
-    crate::composer::unstage(&file);
+    let Some(file) = crate::composer::stage_private(&crate::composer::paste_base(), &format!("annotation-{session}.png"), &bytes).map(Staged) else { return Ok(None) };
+    let kept = crate::call(client, "media.import", json!({ "path": file.0.to_string_lossy() })).await;
+    drop(file);
     Ok(kept.ok().and_then(|v| ImageRef::decode(&v["image"])))
+}
+
+/// The screenshot's staged file, removed when this goes: the runner has its
+/// copy, or the session ended while it was being kept.
+struct Staged(std::path::PathBuf);
+
+impl Drop for Staged {
+    fn drop(&mut self) {
+        crate::composer::unstage(&self.0);
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -277,12 +305,18 @@ async fn run(app: &WeakEntity<Threadbear>, this: &WeakEntity<Annotations>, page:
                 }
                 let words = if images.is_empty() { rules::NO_SCREENSHOT } else { rules::ATTACHED };
                 let text = annotation.draft_addition(images.len());
+                // The experiment is read again where the draft changes:
+                // confirmed off since `holds`, nothing attaches.
                 let (window, composer) = app
                     .update(cx, |app, cx| {
+                        if !app.annotations_on() {
+                            return None;
+                        }
                         app.append_to_draft(thread, text, images, cx);
-                        (app.main_window, app.composers.get(thread).cloned())
+                        Some((app.main_window, app.composers.get(thread).cloned()))
                     })
-                    .map_err(|_| Stop::Quiet)?;
+                    .map_err(|_| Stop::Quiet)?
+                    .ok_or(Stop::Quiet)?;
                 if let Some(composer) = composer {
                     cx.update_window(window, |_, window, cx| {
                         composer.update(cx, |c, cx| c.focus(window, cx));

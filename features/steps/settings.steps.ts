@@ -3,12 +3,34 @@ import { Then, When } from '@cucumber/cucumber';
 import type { ThreadbearWorld } from '../support/world.ts';
 
 /** The Settings window while it's open, from either app's dump. */
-type SettingsInfo = { tab: string; keepAwake?: boolean | null; fullSync?: boolean | null; privateFolders?: string[] | null; labReviewers?: string[] | null };
+type SettingsInfo = { tab: string; keepAwake?: boolean | null; fullSync?: boolean | null; privateFolders?: string[] | null; labReviewers?: string[] | null; error?: string; experiments?: Record<string, boolean> };
 const shown = (d: unknown) => (d as { settingsWindow?: SettingsInfo | null }).settingsWindow;
 
 When('the runner turns the {string} experiment {word}', async function (this: ThreadbearWorld, id: string, state: string) {
   if (state !== 'on' && state !== 'off') throw new Error('An experiment is on or off');
   await this.app.do({ cmd: 'mock', method: 'experiments', params: { [id]: state === 'on' } });
+});
+
+// The mock keeps each settings.update unanswered, then saves or refuses it.
+When('the runner holds settings changes', async function (this: ThreadbearWorld) {
+  await this.app.do({ cmd: 'mock', method: 'settings', params: { hold: true } });
+});
+
+When('the runner saves the settings changes it held', async function (this: ThreadbearWorld) {
+  await this.app.do({ cmd: 'mock', method: 'settings', params: { hold: false } });
+});
+
+When('the runner refuses the settings changes it held', async function (this: ThreadbearWorld) {
+  await this.app.do({ cmd: 'mock', method: 'settings', params: { failNext: true, hold: false } });
+});
+
+Then('Settings shows the {string} experiment {word}', async function (this: ThreadbearWorld, id: string, state: string) {
+  if (state !== 'on' && state !== 'off') throw new Error('An experiment is on or off');
+  await this.until(`the ${id} switch ${state}`, (d) => shown(d)?.experiments?.[id] === (state === 'on'));
+});
+
+Then('Settings says {string}', async function (this: ThreadbearWorld, words: string) {
+  await this.until(`Settings saying "${words}"`, (d) => shown(d)?.error === words);
 });
 
 When('I open Settings', async function (this: ThreadbearWorld) {

@@ -466,6 +466,21 @@ let pendingRestart;
 // starts its turn (and its user.message) that much later, as a message
 // queued behind a running turn is. Both 0 by default.
 let slow = { ms: 0, queueMs: 0 };
+// mock.settings: `hold` keeps each settings.update unanswered until it's
+// false again, `failNext` refuses the next one. mock.holdMedia holds
+// media.import the same way and says how many are `waiting`.
+let settingsHold = null;
+let settingsFailNext = false;
+let mediaHold = null;
+function hold(held, on) {
+  if (on && !held) {
+    let release;
+    const promise = new Promise((resolve) => { release = resolve; });
+    return { promise, release, waiting: 0 };
+  }
+  if (!on && held) held.release();
+  return on ? held : null;
+}
 // The runner's own update (protocol "Runner updates"), set by mock.updates.
 let updates = { state: 'idle', oldRunners: [] };
 
@@ -1398,6 +1413,10 @@ async function dispatch(client, method, p) {
       return { thread: t.summary };
     }
     case 'media.import': {
+      if (mediaHold) {
+        mediaHold.waiting += 1;
+        await mediaHold.promise;
+      }
       const source = String(p.path ?? '');
       if (!fs.existsSync(source)) throw rpcError(-32602, `No file at ${source}`);
       const ext = path.extname(source).toLowerCase() || '.png';
@@ -1545,9 +1564,30 @@ async function dispatch(client, method, p) {
       return { settings };
     // A confirmed change from another client, through the same settings
     // handler and notification as a real runner. The app stays connected.
-    case 'mock.experiments':
-      return dispatch(client, 'settings.update', { experiments: p });
+    case 'mock.experiments': {
+      const [held, failing] = [settingsHold, settingsFailNext];
+      [settingsHold, settingsFailNext] = [null, false];
+      try {
+        return await dispatch(client, 'settings.update', { experiments: p });
+      } finally {
+        [settingsHold, settingsFailNext] = [held, failing];
+      }
+    }
+    case 'mock.settings': {
+      if (typeof p.failNext === 'boolean') settingsFailNext = p.failNext;
+      if (typeof p.hold === 'boolean') settingsHold = hold(settingsHold, p.hold);
+      return { hold: Boolean(settingsHold), failNext: settingsFailNext };
+    }
+    case 'mock.holdMedia': {
+      if (typeof p.hold === 'boolean') mediaHold = hold(mediaHold, p.hold);
+      return { hold: Boolean(mediaHold), waiting: mediaHold?.waiting ?? 0 };
+    }
     case 'settings.update': {
+      if (settingsHold) await settingsHold.promise;
+      if (settingsFailNext) {
+        settingsFailNext = false;
+        throw rpcError(-32000, "Couldn't save the settings (disk full).");
+      }
       if (p.experiments !== undefined) {
         if (!p.experiments || typeof p.experiments !== 'object' || Array.isArray(p.experiments)) throw rpcError(-32602, 'experiments must be an object');
         for (const [id, on] of Object.entries(p.experiments)) {

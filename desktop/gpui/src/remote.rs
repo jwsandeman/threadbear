@@ -43,8 +43,9 @@ pub(crate) struct RemoteState {
     pub(crate) logins_refresh: Option<Task<()>>,
     /// `runners.list`: every runner, this Mac's too.
     pub(crate) all_runners: Vec<RunnerInfo>,
-    /// `hello.experiments`: what's on for this runner.
-    pub(crate) experiments: Vec<String>,
+    /// What's on for this runner: `hello.experiments`, then each settings
+    /// snapshot it confirms (`Threadbear::confirm_settings`).
+    pub(crate) experiments: threadbear_core::runner_settings::EnabledExperiments,
     /// The runner has said which other Macs' threads there are (or that it
     /// can't), so a thread not among them isn't coming.
     pub(crate) heard: bool,
