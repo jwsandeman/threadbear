@@ -3986,7 +3986,7 @@ export class ConvexSync {
    * with the owner key only (a runner key can't read other runners' threads).
    * Undefined with sync off or before the backend is at RELAY_API_VERSION.
    */
-  relaySource(): { post: Post; subscribe?: Subscribe; key: string; apiVersion: number; upload: Upload } | undefined {
+  relaySource(): { post: Post; subscribe?: Subscribe; key: string; apiVersion: number; upload: Upload; download: Download } | undefined {
     if (this.off || !this.deps.key || (this.backendApiVersion ?? 0) < RELAY_API_VERSION) return undefined;
     const subscriber = this.subscriber;
     return {
@@ -3995,8 +3995,11 @@ export class ConvexSync {
       key: this.deps.key,
       apiVersion: this.backendApiVersion ?? 0,
       upload: (url: string, bytes: Uint8Array, mediaType: string) => this.upload(url, bytes, mediaType),
+      // Another runner's pictures, from file storage (relay.ts readFile).
+      download: this.deps.download ?? this.relayDownload,
     };
   }
+  private relayDownload = convexDownloader();
 
   private startStats(): void {
     const { sample, key } = this.deps;

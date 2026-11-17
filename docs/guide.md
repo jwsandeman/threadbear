@@ -1092,9 +1092,12 @@ and sends what you do there (messages, approvals, Stop, archive) for that
 Mac to pick up, the way your phone does, so there's no network link between
 the two Macs to set up. Pictures you paste into a message, or into a new
 thread there, go with it (up to 6, 10 MB each), held in Convex only until
-that Mac has fetched them. You see its messages and a line for each tool it
-used; the tool output, diffs and pictures stay on that Mac for now, and a
-tool row says so. Editing a message, its highlights and patches, and
+that Mac has fetched them. You see its messages, with the pictures pasted
+into them, and a line for each tool it used; the tool output, diffs and
+tools' pictures stay on that Mac for now, and a tool row says so. A pasted
+picture shows a moment after its message, once that Mac has sent it up
+(not at all with `"sync": { "pastedPictures": false }` there, or for a
+picture over 10 MB). Editing a message, its highlights and patches, and
 changing its login or model are done on that Mac. Agents see them the
 same way: `list_threads` lists and searches them (each row says which Mac),
 `read_thread` reads them, `send_message` messages them, and they can stop,

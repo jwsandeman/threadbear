@@ -48,6 +48,31 @@ export function unplacedPictures(text: string, count: number): number {
   return count - pictureCuts(text, count).length;
 }
 
+// The line a mirrored message ends with for its pictures no marker places
+// (sync.ts toMessageDoc): "[1 picture]", "[3 pictures]".
+const COUNT_LINE = /(?:^|\n\n)\[(?:1 picture|(\d{1,3}) pictures)\]$/;
+
+/**
+ * What a mirrored message's words say of its pictures, for a reader that
+ * has only the words (relay.ts): how many it came with, and the words
+ * without the line counting the unplaced ones. The most that fits: the
+ * unplaced ones plus every marker that then names a picture.
+ */
+export function picturesSaid(text: string): { count: number; words: string } {
+  const line = COUNT_LINE.exec(text);
+  const unplaced = line ? Number(line[1] ?? 1) : 0;
+  const words = line ? text.slice(0, line.index) : text;
+  const named = new Set<number>();
+  for (const m of words.matchAll(MARKER)) named.add(Number(m[1]));
+  let count = unplaced + named.size;
+  for (;;) {
+    let placed = 0;
+    for (const n of named) if (n >= 1 && n <= count) placed++;
+    if (unplaced + placed === count) return { count, words };
+    count = unplaced + placed;
+  }
+}
+
 // The Claude API turns down a text block of nothing but whitespace, as
 // between two pictures pasted one after the other.
 function pushWords(parts: MessagePart[], text: string): void {

@@ -132,6 +132,45 @@ export const remoteMessages = query({
   },
 });
 
+// How many messages one picturesAtSeqs reads, and pictures of each.
+const PICTURE_SEQS_MAX = 50;
+const PICTURES_PER_SEQ = 30;
+
+/**
+ * The uploaded pictures of the messages at `seqs` in another runner's
+ * thread, each with its file's URL: what that runner put up for the phone
+ * and the website (replyImages; a pasted one's `src` is "picture:N"). Read
+ * by seq, so a thread's other pictures are never read. Owner only.
+ */
+export const picturesAtSeqs = query({
+  args: { key: v.string(), threadId: v.string(), seqs: v.array(v.number()) },
+  returns: v.array(
+    v.object({
+      seq: v.number(),
+      path: v.string(),
+      src: v.optional(v.string()),
+      pinned: v.optional(v.boolean()),
+      url: v.string(),
+      mediaType: v.string(),
+      width: v.optional(v.number()),
+      height: v.optional(v.number()),
+    }),
+  ),
+  handler: async (ctx, { key, threadId, seqs }) => {
+    await runnerAuth(ctx, key, 'picturesAtSeqs');
+    const out = [];
+    for (const seq of [...new Set(seqs.filter(isSeq))].sort((a, b) => a - b).slice(0, PICTURE_SEQS_MAX)) {
+      const rows = await ctx.db.query('replyImages').withIndex('by_thread_seq', (q) => q.eq('threadId', threadId).eq('seq', seq)).take(PICTURES_PER_SEQ);
+      for (const img of rows) {
+        const url = await ctx.storage.getUrl(img.storageId);
+        if (!url) continue;
+        out.push({ seq: img.seq, path: img.path, ...(img.src ? { src: img.src } : {}), ...(img.pinned ? { pinned: true } : {}), url, mediaType: img.mediaType, ...(img.width ? { width: img.width } : {}), ...(img.height ? { height: img.height } : {}) });
+      }
+    }
+    return out;
+  },
+});
+
 /** One thread's row (its state, open approval and card), live while it's open. Null once it's gone. */
 export const remoteThread = query({
   args: { key: v.string(), threadId: v.string() },

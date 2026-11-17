@@ -6,7 +6,7 @@
 // scenario's thread id.
 //
 //   node runner/scripts/parity-seed.ts <convex url> <owner key>
-import { convexPoster } from '../src/sync.ts';
+import { convexPoster, convexUploader } from '../src/sync.ts';
 import { playInto } from '../test/helpers/routes.ts';
 import { SCENARIOS } from '../test/helpers/scenario-list.ts';
 
@@ -17,7 +17,7 @@ if (!url || !key) {
 }
 const runnerId = 'parityrun001';
 const post = convexPoster(url);
-const { sync, ids } = await playInto(post, { key, runnerId, name: 'Parity runner' }, SCENARIOS.map((s) => s.play));
+const { sync, ids } = await playInto(post, { key, runnerId, name: 'Parity runner' }, SCENARIOS.map((s) => s.play), convexUploader());
 await sync.stop();
 const { token } = (await post('mutation', 'sync:issueToken', { key, kind: 'browser', name: 'parity run' })) as { token: string };
 console.log(JSON.stringify({ token, runnerId, threads: SCENARIOS.map((s, i) => ({ name: s.name, shows: s.shows, threadId: ids[i] })) }, null, 2));

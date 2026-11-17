@@ -128,6 +128,8 @@ export type RelayHandler = {
   call(threadId: string, method: string, params: Record<string, unknown>): Promise<unknown>;
   create(runnerId: string, params: Record<string, unknown>): Promise<unknown>;
   listFolder(runnerId: string, path: string): Promise<unknown>;
+  /** One of another runner's messages' pictures, from the backend's file storage; any other path is refused. */
+  readFile?(runnerId: string, path: string, maxBytes?: number): Promise<unknown>;
   logins(runnerId: string): Promise<unknown>;
 };
 
@@ -935,7 +937,11 @@ export class RpcServer {
         // hasOwn, so "constructor" and friends aren't methods.
         // A folder on another runner, for the folder browser on one of its threads.
         if (method === 'files.list' && typeof p.runnerId === 'string' && this.opts.relay) return this.opts.relay.listFolder(p.runnerId, reqString(p, 'path'));
-        if (method === 'files.read' && typeof p.runnerId === 'string') throw new RpcError(ErrorCode.other, 'Files on another runner are kept there for now.');
+        if (method === 'files.read' && typeof p.runnerId === 'string') {
+          // Only a picture of one of its messages that the relay holds (relay.ts readFile).
+          if (this.opts.relay?.readFile) return this.opts.relay.readFile(p.runnerId, reqString(p, 'path'), typeof p.maxBytes === 'number' ? p.maxBytes : undefined);
+          throw new RpcError(ErrorCode.other, 'Files on another runner are kept there for now.');
+        }
         if (method === 'remoteThreads.logins') {
           if (!this.opts.relay) throw new RpcError(ErrorCode.other, "This Mac's runner can't reach other runners through Convex.");
           return this.opts.relay.logins(reqString(p, 'runnerId'));

@@ -5880,16 +5880,38 @@ only way the app opens another runner's thread.
   its `tool.result` at 8s+6, and up to two `edit.diff`s at 8s+3 and 8s+4, unless an
   old runner's card has those; any more files are named in the result. The app fills
   the row in by `itemId`. Withheld, the result says why. Otherwise the stub stands.
-  Reasoning, sub-agents and pictures stay on that runner from here. `files.read` with
-  a `runnerId` is `-32000`, and the app doesn't ask: it says the file is kept on that
-  machine.
+  Reasoning, sub-agents and tools' pictures stay on that runner from here.
+- **Pictures in messages.** A `user.message` whose row says it came with pictures
+  (`[Picture N]` markers, or the `[N pictures]` line) gets its `images` from that
+  runner's uploads (`replyImages` rows with `src` `picture:N`, written unless its
+  `sync.pastedPictures` is false), read once by `relay:picturesAtSeqs { key, threadId,
+  seqs }` → `[{ seq, path, src?, pinned?, url, mediaType, width?, height? }]`.
+  `images[N-1]` is picture N: `{ path, mediaType, width?, height? }`, `path` being
+  the file's path on that runner's Mac. A picture that isn't up has the path
+  `threadbear-relay:<threadId>/<seq>/Picture <N>`. With any picture held, the
+  `[N pictures]` line is taken off `text`; with none, `text` and `images: []` are
+  as before. A message whose row arrived less than 20 seconds after it was sent
+  and whose pictures aren't all up is held back, watched through the same query,
+  and sent late (at `8s+1`) once they are or the 20 seconds end.
+  `files.read { path, runnerId, maxBytes? }` answers `{ path, size, modifiedAt,
+  mediaType, data, truncated }` for a path held this way for a thread of that
+  runner, with the bytes from the backend's file storage (25 MB at most); a
+  not-up path is read again from the backend first, and `-32000` says it didn't
+  reach Convex. The same path held for two threads answers from the thread used
+  last. Any other path is `-32000`, `Files on another runner are kept there for
+  now.` The query has no API version: a backend without it is asked again every
+  10 minutes, and messages show as their words meanwhile. Pictures in replies,
+  pinned pictures and ones uploaded before the thread's rows were read as above
+  only by the phone and the website stay as they were.
 - **Reads.** A thread is watched only while a client is subscribed to it,
   through `relay:remoteTail` (its newest 15 rows) and `relay:remoteThread`
   (its one row); a minute after the last subscriber goes, both stop. Older
   rows are read once by page (`relay:remoteMessages`, 50 at a time) and kept
   in this runner for half an hour. A tail that starts past the newest row
   held (the Mac slept) reads the rows between once, by `afterSeq`, rather
-  than leave a hole. `runner.status` has `relay: { watching, held, reads, bytes }`:
+  than leave a hole. Pictures are read by row seq, only for held messages
+  that say they have some, 50 messages a read; a held-back message's are
+  watched live until it's sent. `runner.status` has `relay: { watching, held, reads, bytes }`:
   threads watched now, rows held, and since start the reads (and live
   updates) and the JSON bytes they brought back, to measure what it costs.
 - **Acting.** `threads.update` takes `archivedBy: "agent"` with an
@@ -7132,6 +7154,7 @@ anyone's); "any runner" is any good key. Anything not sorted is owner only.
 | `discardPictures` | owner only | deletes pictures uploaded through `pictureUploadUrl` for a command that wasn't queued, only ones nothing names |
 | `remoteAccounts` | owner only | another runner's logins, with their usage from API 77 |
 | `remoteBody` | owner only | one tool's output on another runner's thread (full sync) |
+| `picturesAtSeqs` | owner only | the uploaded pictures (`replyImages`) of the messages at up to 50 seqs of another runner's thread, each with its file's URL |
 | `fileRequest` | its own | a request for a thread on another runner, from one of its own threads (Asking another runner); never changed after; at most 5 waiting (one over two hours old doesn't count) and 50 kept, oldest going first, for a week at most |
 | `runnerRequest` | its own | a request its runner filed; the owner reads any |
 | `decideRequest` | owner only | claims a pending request, marks a claimed one allowed (with where it started) or hands it back, or denies a pending one |

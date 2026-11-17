@@ -914,3 +914,34 @@ test('a send naming the runner it is shown on never reaches another', async () =
     await c.call('threads.send', { threadId: thread.id, text: 'still mine' });
   } finally { c.close(); await server.close(); }
 });
+
+// A picture pasted into another Mac's thread showed there and not here (17
+// Nov 2026): the app asks its own runner for the file with that runner's
+// id, and the relay answers for the pictures it holds.
+test("files.read for another runner goes to the relay, and without one it's refused as before", async () => {
+  const asked: unknown[] = [];
+  const relay = {
+    owns: () => false,
+    call: async () => ({}),
+    create: async () => ({}),
+    listFolder: async () => ({}),
+    logins: async () => ({}),
+    readFile: async (runnerId: string, path: string, maxBytes?: number) => {
+      asked.push([runnerId, path, maxBytes]);
+      return { path, size: 3, modifiedAt: '2026-11-17T00:00:00.000Z', mediaType: 'image/png', data: 'cG5n', truncated: false };
+    },
+  };
+  const withRelay = await serve({ relay });
+  const c = await RunnerClient.connect(withRelay.url, TOKEN);
+  try {
+    const read = await c.call('files.read', { path: '/Users/b/inbox/p.png', runnerId: 'mac-mini', maxBytes: 1000 });
+    assert.deepEqual(read, { path: '/Users/b/inbox/p.png', size: 3, modifiedAt: '2026-11-17T00:00:00.000Z', mediaType: 'image/png', data: 'cG5n', truncated: false });
+    assert.deepEqual(asked, [['mac-mini', '/Users/b/inbox/p.png', 1000]]);
+    await assert.rejects(c.call('files.read', { runnerId: 'mac-mini' }), (e: { code: number }) => e.code === -32602);
+  } finally { c.close(); await withRelay.server.close(); }
+  const without = await serve({});
+  const d = await RunnerClient.connect(without.url, TOKEN);
+  try {
+    await assert.rejects(d.call('files.read', { path: '/Users/b/inbox/p.png', runnerId: 'mac-mini' }), (e: { message: string }) => /kept there for now/.test(e.message));
+  } finally { d.close(); await without.server.close(); }
+});
