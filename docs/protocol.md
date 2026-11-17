@@ -5892,9 +5892,13 @@ only way the app opens another runner's thread.
   `[N pictures]` line is taken off `text`; with none, `text` and `images: []` are
   as before. A message whose row arrived less than 20 seconds after it was sent
   and whose pictures aren't all up is held back, watched through the same query,
-  and sent late (at `8s+1`) once they are or the 20 seconds end; it then has an
-  `images` entry for every picture its words count, up or not, and no
-  `[N pictures]` line, so its `text` and its count of `images` are the sender's.
+  and sent late (at `8s+1`) once they are or the 20 seconds end. The 20 seconds
+  run from when a live tail brought the row, if its time is within 5 minutes
+  of now. With at least one picture held, `images` has an entry for every
+  picture the words count, so `text` and the count of `images` are the sender's.
+  A late message is replayed to a subscriber that omits `relaySeen`, as a late
+  result is. A message with `origin` `runner` or `schedule` is never read for
+  pictures.
   `files.read { path, runnerId, maxBytes? }` answers `{ path, size, modifiedAt,
   mediaType, data, truncated }` for a path held this way for a thread of that
   runner, with the bytes from the backend's file storage (25 MB at most); a

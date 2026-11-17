@@ -1211,9 +1211,8 @@ test('a new message waits a moment for its pictures to go up, and comes with the
   assert.equal(publishedEvents(h).filter((e) => e.type === 'user.message').length, 1);
 });
 
-test('a new message whose pictures are not up when the wait is over shows a place for each, which finds one that goes up late', async () => {
-  let up: unknown[] = [];
-  const h = harness({ pictures: () => up });
+test('a new message whose pictures never go up shows as its words once the wait is over', async () => {
+  const h = harness({ pictures: () => [] });
   await h.relay.call(T, 'threads.events', { threadId: T });
   await h.relay.call(T, 'threads.subscribe', { threadId: T, afterSeq: 119 });
   h.subs.get('relay:remoteThread')![0]!.onUpdate({ runnerId: 'mac-mini', status: 'running' });
@@ -1222,17 +1221,80 @@ test('a new message whose pictures are not up when the wait is over shows a plac
   h.clock.advance(PICTURE_WAIT_MS - 1_000);
   assert.equal(publishedEvents(h).some((e) => e.type === 'user.message'), false);
   h.clock.advance(1_000);
-  // The words and the count of pictures the app sent, so its own bubble
-  // for the message gives way to this one (PendingMessage.is_landed_by).
+  // Words alone can name pictures that never were, so no place is made for any.
+  const said = publishedEvents(h).find((e) => e.type === 'user.message')!;
+  assert.equal(said.text, 'Look\n\n[2 pictures]');
+  assert.deepEqual(said.images, []);
+  assert.equal(h.subs.get('relay:picturesAtSeqs')![0]!.closed, true);
+});
+
+test('with one of two up when the wait is over, the other keeps its place and is found if it goes up late', async () => {
+  let up: unknown[] = [];
+  const h = harness({ pictures: () => up });
+  await h.relay.call(T, 'threads.events', { threadId: T });
+  await h.relay.call(T, 'threads.subscribe', { threadId: T, afterSeq: 119 });
+  h.subs.get('relay:remoteTail')![0]!.onUpdate({ messages: [...rows.slice(-2), { seq: 20, role: 'user', text: 'Look\n\n[2 pictures]', turn: 'cccc3333', at: ago(0) }], hasMore: true });
+  await new Promise((r) => setImmediate(r));
+  up = [pic(20, 1)];
+  h.subs.get('relay:picturesAtSeqs')![0]!.onUpdate(up);
+  assert.equal(publishedEvents(h).some((e) => e.type === 'user.message'), false);
+  h.clock.advance(PICTURE_WAIT_MS);
+  // The sender's words and count of pictures, so its own bubble gives way (PendingMessage.is_landed_by).
   const said = publishedEvents(h).find((e) => e.type === 'user.message')!;
   assert.equal(said.text, 'Look');
-  const places = [1, 2].map((n) => ({ path: `threadbear-relay:${T}/20/Picture ${n}`, mediaType: 'image/png' }));
-  assert.deepEqual(said.images, places);
-  assert.equal(h.subs.get('relay:picturesAtSeqs')![0]!.closed, true);
-  await assert.rejects(h.relay.readFile('mac-mini', places[0]!.path), /didn't reach Convex from mac-mini/);
+  const second = `threadbear-relay:${T}/20/Picture 2`;
+  assert.deepEqual(said.images, [shown(20, 1), { path: second, mediaType: 'image/png' }]);
+  await assert.rejects(h.relay.readFile('mac-mini', second), /didn't reach Convex from mac-mini/);
+  up = [pic(20, 1), pic(20, 2)];
+  const late = (await h.relay.readFile('mac-mini', second)) as { data: string };
+  assert.equal(Buffer.from(late.data, 'base64').toString(), 'bytes at https://files.example/p20-2');
+});
+
+test("a row that reaches Convex long after it was sent still waits for its pictures, and a sleeping Mac's backlog doesn't", async () => {
+  let up: unknown[] = [];
+  const h = harness({ pictures: () => up });
+  await h.relay.call(T, 'threads.events', { threadId: T });
+  await h.relay.call(T, 'threads.subscribe', { threadId: T, afterSeq: 119 });
+  // Sent a minute ago (that runner's flush was held up), and an hour ago (this Mac slept).
+  h.subs.get('relay:remoteTail')![0]!.onUpdate({ messages: [...rows.slice(-2), { seq: 18, role: 'user', text: 'Old\n\n[1 picture]', turn: 'cccc3333', at: ago(3600) }, { seq: 20, role: 'user', text: '[1 picture]', turn: 'dddd4444', at: ago(60) }], hasMore: true });
+  await new Promise((r) => setImmediate(r));
+  assert.deepEqual(publishedEvents(h).filter((e) => e.type === 'user.message').map((e) => e.seq), [18 * SCALE + 1]);
   up = [pic(20, 1)];
-  const late = (await h.relay.readFile('mac-mini', places[0]!.path)) as { data: string };
-  assert.equal(Buffer.from(late.data, 'base64').toString(), 'bytes at https://files.example/p20-1');
+  h.subs.get('relay:picturesAtSeqs')![0]!.onUpdate(up);
+  assert.deepEqual(publishedEvents(h).at(-1)!.images, [shown(20, 1)]);
+});
+
+test("a message that waited reaches a client that asks from past it, with or without relaySeen", async () => {
+  let up: unknown[] = [];
+  const h = harness({ pictures: () => up });
+  await h.relay.call(T, 'threads.events', { threadId: T });
+  await h.relay.call(T, 'threads.subscribe', { threadId: T, afterSeq: 119 });
+  h.subs.get('relay:remoteTail')![0]!.onUpdate({ messages: [...rows.slice(-2), { seq: 20, role: 'user', text: '[1 picture]', turn: 'cccc3333', at: ago(0) }, { seq: 21, role: 'assistant', text: 'Looking', turn: 'cccc3333', at: ago(0) }], hasMore: true });
+  await new Promise((r) => setImmediate(r));
+  // The picture lands with nobody listening: the message is published to no one.
+  up = [pic(20, 1)];
+  h.subs.get('relay:picturesAtSeqs')![0]!.onUpdate(up);
+  // An older client, back with only its last seq (the reply's, past the message).
+  const back = (await h.relay.call(T, 'threads.subscribe', { threadId: T, afterSeq: 169 })) as { events: Shown[] };
+  assert.ok(back.events.some((e) => e.seq === 161 && e.type === 'user.message' && e.images!.length === 1));
+});
+
+test("an agent's message quoting a picture marker is not taken to have pictures", async () => {
+  const quoted: RelayRow[] = [{ seq: 3, role: 'user', text: 'They wrote: this [Picture 1] is wrong\n\n[1 picture]', origin: 'runner', turn: 'aaaa1111', at: ago(0) }];
+  const h = harness({ rows: quoted, pictures: () => [] });
+  const page = (await h.relay.call(T, 'threads.events', { threadId: T })) as { events: Shown[] };
+  assert.equal(page.events.find((e) => e.type === 'user.message')!.text, quoted[0]!.text);
+  assert.equal(pictureCalls(h).length, 0);
+});
+
+test('a picture answers for the runner its thread has moved to', async () => {
+  const h = harness({ rows: pictureRows, pictures: () => [pic(3, 1), pic(3, 2)] });
+  await h.relay.call(T, 'threads.events', { threadId: T });
+  h.remote.runners.push({ id: 'cloud', name: 'cloud', online: true, lastSeenAt: at(0) });
+  h.remote.threads[0] = { ...h.remote.threads[0]!, runnerId: 'cloud' };
+  const read = (await h.relay.readFile('cloud', '/Users/b/inbox/p3-1.png')) as { size: number };
+  assert.ok(read.size > 0);
+  await assert.rejects(h.relay.readFile('mac-mini', '/Users/b/inbox/p3-1.png'), /kept there for now/);
 });
 
 test('files.read for another runner answers with a picture the relay holds, and nothing else', async () => {

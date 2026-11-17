@@ -148,6 +148,9 @@ const PICTURE_SEQS = 50;
 // runner sends the row, then uploads each picture. One that goes up later
 // than this shows only when the thread is next read from the start.
 export const PICTURE_WAIT_MS = 20_000;
+// A row a live tail brings counts as just sent if its time is within this
+// of now: an outage's backlog, or the rows a sleeping Mac missed, don't wait.
+const FRESH_MS = 5 * 60_000;
 // A backend without the read is asked again this often: the read has no API
 // version of its own, and the backend may be updated while this runner runs.
 const PICTURES_RETRY_MS = 10 * 60_000;
@@ -196,9 +199,8 @@ type Page = { messages: RelayRow[]; hasMore: boolean };
 // `path` where it is on that runner's Mac, `url` its file in file storage.
 export type RelayPicture = { n: number; path: string; url: string; mediaType: string; width?: number; height?: number };
 // The pictures held for a thread's rows, by row seq, and the rows whose
-// message waits for its pictures (left out of the events until then), and
-// the rows that have waited: theirs get a place each, up or not.
-export type RelayPictures = { held: Map<number, RelayPicture[]>; waiting?: Set<number>; waited?: Set<number> };
+// message waits for its pictures (left out of the events until then).
+export type RelayPictures = { held: Map<number, RelayPicture[]>; waiting?: Set<number> };
 // files.read's answer (files.ts FileRead).
 export type RelayFile = { path: string; size: number; modifiedAt: string; mediaType: string; data: string; truncated: boolean };
 
@@ -207,7 +209,9 @@ const saidByRow = new WeakMap<RelayRow, { count: number; words: string }>();
 function saidOf(r: RelayRow): { count: number; words: string } {
   let s = saidByRow.get(r);
   if (!s) {
-    s = r.role === 'user' ? picturesSaid(r.text) : { count: 0, words: r.text };
+    // An agent's or a schedule's message has no pictures, whatever its
+    // words quote (one thread passing on what was typed in another).
+    s = r.role === 'user' && r.origin !== 'runner' && r.origin !== 'schedule' ? picturesSaid(r.text) : { count: 0, words: r.text };
     saidByRow.set(r, s);
   }
   return s;
@@ -221,16 +225,15 @@ const MOST_PLACES = 50;
  * `images` has one for each the words say it came with, in order, so
  * [Picture N] names images[N-1]; one that isn't up has a path that names no
  * file (notUpPath), and the line counting the unplaced ones goes, as the
- * tiles show them. With none held the words stay as that runner sent them,
- * unless it's one that waited for its pictures (`places`): the app that
- * sent it knows its own message by its words and how many pictures it has
- * (the desktop's PendingMessage.is_landed_by), so it gets a place for each.
+ * tiles show them: the words and the count of pictures are then the
+ * sender's, which is how the app that sent it knows its own message (the
+ * desktop's PendingMessage.is_landed_by). With none held the words stay as
+ * that runner sent them: words alone can name a picture that never was.
  */
-function messageWithPictures(threadId: string, r: RelayRow, held: RelayPicture[] = [], places = false): { text: string; images: { path: string; mediaType: string; width?: number; height?: number }[] } {
-  if (!held.length && !places) return { text: r.text, images: [] };
+function messageWithPictures(threadId: string, r: RelayRow, held: RelayPicture[] = []): { text: string; images: { path: string; mediaType: string; width?: number; height?: number }[] } {
+  if (!held.length) return { text: r.text, images: [] };
   const { count, words } = saidOf(r);
   const most = Math.max(Math.min(count, MOST_PLACES), ...held.map((p) => p.n));
-  if (!most) return { text: r.text, images: [] };
   const images = [];
   for (let n = 1; n <= most; n++) {
     const p = held.find((x) => x.n === n);
@@ -303,9 +306,12 @@ type Watch = {
   // Rows whose pictures have been read.
   pictureAsked: Set<number>;
   // Rows whose message waits for its pictures to go up, and until when,
-  // and every row that has.
+  // and every row that has: its message is one that can come late.
   pictureWait: Map<number, number>;
   pictureWaited: Set<number>;
+  // Messages a live tail brought, and when: they wait from then, however
+  // long that runner took to send the row.
+  pictureFresh: Map<number, number>;
   // The live read of the waiting rows' pictures, and the timer for the first wait to end.
   pictureSub?: { key: string; unsub: () => void; closed: boolean };
   pictureTimer?: TimerHandle;
@@ -414,7 +420,7 @@ export function relayEvents(threadId: string, rows: RelayRow[], row: RelayThread
     if (r.role === 'user') {
       // One waiting for its pictures to go up comes late, with them.
       if (!pictures?.waiting?.has(r.seq)) {
-        const { text, images } = messageWithPictures(threadId, r, pictures?.held.get(r.seq), pictures?.waited?.has(r.seq));
+        const { text, images } = messageWithPictures(threadId, r, pictures?.held.get(r.seq));
         out.push(env(base + 1, r, { type: 'user.message', text, images, ...(r.origin === 'phone' || r.origin === 'runner' || r.origin === 'schedule' ? { origin: r.origin } : {}) }));
       }
     } else if (r.role === 'assistant' && r.plan) {
@@ -552,7 +558,7 @@ export function mergeTail(rows: Map<number, RelayRow>, tail: Page): { gapAfter?:
  * again if the app scrolls back to it (olderMore), and seqs given for it
  * stop counting, so emit's oldest seq moves up with it. A card's seqs stay.
  */
-export function trimHeld(w: { rows: Map<number, RelayRow>; olderMore: boolean; given: Set<number>; bodies: Map<number, unknown>; cards: Map<string, Card>; pictures?: Map<number, unknown>; pictureAsked?: Set<number>; pictureWait?: Map<number, number>; pictureWaited?: Set<number> }): void {
+export function trimHeld(w: { rows: Map<number, RelayRow>; olderMore: boolean; given: Set<number>; bodies: Map<number, unknown>; cards: Map<string, Card>; pictures?: Map<number, unknown>; pictureAsked?: Set<number>; pictureWait?: Map<number, number>; pictureWaited?: Set<number>; pictureFresh?: Map<number, number> }): void {
   if (w.rows.size <= MAX_HELD + TRIM_SLACK) return;
   const seqs = [...w.rows.keys()].sort((a, b) => a - b);
   const drop = seqs.length - MAX_HELD;
@@ -563,6 +569,7 @@ export function trimHeld(w: { rows: Map<number, RelayRow>; olderMore: boolean; g
     w.pictureAsked?.delete(seqs[n]!);
     w.pictureWait?.delete(seqs[n]!);
     w.pictureWaited?.delete(seqs[n]!);
+    w.pictureFresh?.delete(seqs[n]!);
   }
   w.olderMore = true;
   const from = seqs[drop]! * SCALE;
@@ -840,7 +847,7 @@ export class Relay {
     const t = this.find(threadId);
     if (!t) throw new RpcError(ErrorCode.threadNotFound, `No thread ${threadId}.`);
     if (!w) {
-      w = { threadId, runnerId: t.runnerId, rows: new Map(), bodies: new Map(), olderMore: true, loaded: false, row: null, cards: new Map(), decided: new Map(), given: new Set(), unsub: [], usedAt: this.deps.clock.now(), pictures: new Map(), pictureAsked: new Set(), pictureWait: new Map(), pictureWaited: new Set() };
+      w = { threadId, runnerId: t.runnerId, rows: new Map(), bodies: new Map(), olderMore: true, loaded: false, row: null, cards: new Map(), decided: new Map(), given: new Set(), unsub: [], usedAt: this.deps.clock.now(), pictures: new Map(), pictureAsked: new Set(), pictureWait: new Map(), pictureWaited: new Set(), pictureFresh: new Map() };
       this.watches.set(threadId, w);
     } else if (w.runnerId !== t.runnerId) {
       // Moved to another runner while watched: its commands go to the one
@@ -869,7 +876,7 @@ export class Relay {
 
   private events(w: Watch): RelayEvent[] {
     const settled = w.stoppedAt === undefined || this.deps.clock.now() - w.stoppedAt >= SETTLE_MS;
-    const events = relayEvents(w.threadId, [...w.rows.values()], w.row, [...w.cards.values()], w.olderMore, this.runnerName(w.runnerId), settled, w.bodies, { held: w.pictures, waiting: this.waitingForPictures(w), waited: w.pictureWaited });
+    const events = relayEvents(w.threadId, [...w.rows.values()], w.row, [...w.cards.values()], w.olderMore, this.runnerName(w.runnerId), settled, w.bodies, { held: w.pictures, waiting: this.waitingForPictures(w) });
     // A hole might contain the rest of this turn, or the start of the next.
     // Further tails can merge more gaps into it, so no turn marker inside
     // the whole uncertain interval is known yet. Real messages stay readable
@@ -1034,6 +1041,9 @@ export class Relay {
       this.live(w);
       return;
     }
+    // New to this runner and sent just now: its pictures are on their way.
+    const now = this.deps.clock.now();
+    for (const m of tail.messages) if (m.role === 'user' && !w.rows.has(m.seq) && Math.abs(now - Date.parse(m.at)) < FRESH_MS) w.pictureFresh.set(m.seq, now);
     const { gapAfter } = mergeTail(w.rows, tail);
     trimHeld(w);
     if (gapAfter !== undefined) {
@@ -1121,7 +1131,9 @@ export class Relay {
     if (!events && !w.pictureRead && this.picturesWanted(w).length) void this.readPictures(w).then(() => this.emit(w), () => {});
     const from = oldestGiven(w.given);
     for (const e of events ?? this.events(w)) {
-      if (e.seq < from || w.given.has(e.seq)) continue;
+      // A message that waited for its pictures is owed even from before
+      // the oldest seq given: the app asked past it while it was held back.
+      if ((e.seq < from && !this.waitedMessage(w, e.seq)) || w.given.has(e.seq)) continue;
       w.given.add(e.seq);
       this.deps.publish({ method: 'thread.event', params: { threadId: w.threadId, event: e } } as unknown as Notification);
     }
@@ -1196,6 +1208,11 @@ export class Relay {
     return true;
   }
 
+  // Whether a relay seq is the message of a row that has waited for its pictures.
+  private waitedMessage(w: Watch, seq: number): boolean {
+    return seq % SCALE === 1 && w.pictureWaited.has((seq - 1) / SCALE);
+  }
+
   // Rows whose message stays out of the events for now: pictures not read
   // yet, or still going up.
   private waitingForPictures(w: Watch): Set<number> {
@@ -1241,9 +1258,12 @@ export class Relay {
           for (const seq of some) {
             w.pictureAsked.add(seq);
             if (this.hasItsPictures(w, seq)) continue;
-            // From when it was sent, by that runner's clock, and never longer than the wait itself.
+            // From when a live tail brought it, else from when it was sent by
+            // that runner's clock, and never longer than the wait itself.
             const at = Date.parse(w.rows.get(seq)?.at ?? '');
-            const until = Math.min(now, Number.isFinite(at) ? at : now) + PICTURE_WAIT_MS;
+            const from = w.pictureFresh.get(seq) ?? (Number.isFinite(at) ? at : now);
+            w.pictureFresh.delete(seq);
+            const until = Math.min(now, from) + PICTURE_WAIT_MS;
             if (until > now) {
               w.pictureWait.set(seq, until);
               w.pictureWaited.add(seq);
@@ -1325,7 +1345,8 @@ export class Relay {
   async readFile(runnerId: string, path: string, maxBytes?: number): Promise<RelayFile> {
     const download = this.deps.source()?.download;
     let found: { picture: RelayPicture; at: string } | undefined;
-    const watches = [...this.watches.values()].filter((w) => w.runnerId === runnerId).sort((a, b) => b.usedAt - a.usedAt);
+    // By the runner the index lists each thread on now: a watch follows a move only at its next call.
+    const watches = [...this.watches.values()].filter((w) => (this.find(w.threadId)?.runnerId ?? w.runnerId) === runnerId).sort((a, b) => b.usedAt - a.usedAt);
     for (const w of watches) {
       for (const [seq, list] of w.pictures) {
         const picture = list.find((p) => p.path === path);
@@ -1558,7 +1579,8 @@ export class Relay {
         // app takes a seq it already has as nothing.
         const from = seen ? (seen[0]?.[0] ?? after) : (w.given.size ? oldestGiven(w.given) : after);
         // Turn starts can also arrive late, after a gap's first row is known.
-        const late = (seq: number) => seq % SCALE !== 1;
+        // And a message that waited for its pictures.
+        const late = (seq: number) => seq % SCALE !== 1 || this.waitedMessage(w, seq);
         const events = all.filter((e) => e.seq > after || (e.seq >= from && (seen ? !hasSeen(seen, e.seq) : late(e.seq))));
         for (const e of events) w.given.add(e.seq);
         if (!w.given.size) w.given.add(after);
