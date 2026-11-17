@@ -93,6 +93,46 @@ Feature: Design reviews
     Then the review window shows what was sent: "C" and "C, please."
     And nothing can be changed in the review
 
+  # The Swift app's reply box does both of these, but its script commands
+  # can't press a key in that box or put a picture in it.
+  @review.picks @swift-pending
+  Scenario: Return in the reply box sends, and Shift-Return adds a line
+    When I open the review
+    And I tick "C" in the review
+    And I write "C, please." in the review
+    And I press Shift-Return in the review's reply box
+    Then the review's reply has 2 lines
+    And the review has not been sent
+    When I press Return in the review's reply box
+    Then the review window has closed
+    And the transcript shows my message "Review: Account picker"
+    When I press "Open review"
+    Then the review window shows what was sent: "C" and "C, please."
+
+  @review.picks @swift-pending
+  Scenario: A picture pasted in the reply box goes with the answer
+    When I open the review
+    And I write "Like this" in the review
+    And I paste the picture into the review's reply box
+    Then the review's reply holds 1 picture and says "Like this [Picture 1]"
+    When I close the review
+    And I open the review
+    Then the review's reply holds 1 picture and says "Like this [Picture 1]"
+    And the review's Send says "Send reply"
+    When I press Send in the review
+    Then the review window has closed
+    And the transcript shows my message "Review: Account picker"
+    When I press "Open review"
+    Then the review window shows 1 picture was sent
+
+  @review.picks @swift-pending
+  Scenario: A picture alone is an answer
+    When I open the review
+    And I paste the picture into the review's reply box
+    Then the review's Send says "Send reply"
+    When I press Return in the review's reply box
+    Then the review window has closed
+
   @review.nav
   Scenario: Next steps through every option, then shows them all to choose from
     When I open the review

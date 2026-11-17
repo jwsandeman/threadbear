@@ -48,6 +48,21 @@ fn utf16_len(text: &str) -> usize {
     text.encode_utf16().count()
 }
 
+// ---------------------------------------------------------------- the reply box
+
+/// What the reply box holds, as the draft keeps it (`ReviewSession.setReply`):
+/// each chip's mark a [Picture N] marker in the words.
+pub fn reply_from_box(text: &str, images: Vec<ImageRef>) -> (String, Vec<ImageRef>) {
+    (crate::composer::message_text(&crate::composer::normalized(text, images.len()), 1), images)
+}
+
+/// A draft's reply back in the box (`ReviewSession.replyNote`): a mark where
+/// each picture's marker is, and the pictures in the order of their marks.
+pub fn box_from_reply(reply: &str, images: &[ImageRef]) -> (String, Vec<ImageRef>) {
+    let (text, order) = crate::composer::edit_draft(reply, images.len());
+    (text, order.into_iter().map(|i| images[i].clone()).collect())
+}
+
 // ---------------------------------------------------------------- the draft
 
 impl ReviewDraft {
@@ -55,8 +70,9 @@ impl ReviewDraft {
         self.notes.values().any(|note| !note.trim().is_empty())
     }
 
+    /// Words or pictures in the reply box.
     pub fn has_reply(&self) -> bool {
-        self.reply.as_deref().is_some_and(|reply| !reply.trim().is_empty())
+        self.reply.as_deref().is_some_and(|reply| !reply.trim().is_empty()) || !self.images.is_empty()
     }
 
     /// The runner checks again. This only keeps Send from offering an empty
@@ -88,6 +104,9 @@ impl ReviewDraft {
         if let Some(reply) = &self.reply {
             out.insert("reply".into(), json!(reply));
         }
+        if !self.images.is_empty() {
+            out.insert("images".into(), Value::Array(self.images.iter().map(crate::inline_chips::image_json).collect()));
+        }
         if self.none {
             out.insert("none".into(), json!(true));
         }
@@ -103,6 +122,7 @@ impl ReviewDraft {
             picked_ids: self.picked_ids.clone(),
             notes: self.notes.iter().filter_map(|(id, note)| (!note.trim().is_empty()).then(|| (id.clone(), note.trim().to_owned()))).collect(),
             reply: (!reply.is_empty()).then(|| reply.to_owned()),
+            images: self.images.clone(),
             none: self.none,
         }
     }
@@ -564,11 +584,19 @@ impl ReviewSession {
     // in `SAVE_AFTER_MS`, unless `autosaves` says it's in conflict.
 
     pub fn set_reply(&mut self, text: &str) -> bool {
+        self.set_reply_note(text, Vec::new())
+    }
+
+    /// What the reply box holds (`setReply(_ note:)`): its words, with a
+    /// [Picture N] marker where each picture's chip is, and the pictures in
+    /// that order.
+    pub fn set_reply_note(&mut self, text: &str, images: Vec<ImageRef>) -> bool {
         if !self.editable() {
             return false;
         }
         let mut next = self.draft.clone();
         next.reply = (!text.is_empty()).then(|| text.to_owned());
+        next.images = images;
         self.edit(next)
     }
 
@@ -2009,6 +2037,47 @@ mod tests {
         assert_eq!(s.draft().reply, None, "an empty box is no reply");
         s.begin_submit();
         assert_eq!(s.send_label(), "Sending…");
+    }
+
+    #[test]
+    fn pictures_in_the_reply_box_go_with_the_draft() {
+        let mut s = session(rail());
+        assert!(s.set_reply_note("Like this [Picture 1]", vec![image("shot")]));
+        assert_eq!(s.draft().reply.as_deref(), Some("Like this [Picture 1]"));
+        assert_eq!(s.draft().images, vec![image("shot")]);
+        assert!(s.dirty());
+        let sent = s.draft().to_json();
+        assert_eq!(sent["images"], json!([{ "path": "/nonexistent/shot.png", "mediaType": "image/png" }]));
+        assert_eq!(ReviewDraft::decode(&sent).as_ref(), Some(s.draft()), "it reads back the same");
+        assert_eq!(s.draft().normalized().images, vec![image("shot")]);
+        assert!(!s.set_reply_note("Like this [Picture 1]", vec![image("shot")]), "the same again is no edit");
+        // Words alone, as a script types them: the pictures go.
+        assert!(s.set_reply("Like this"));
+        assert!(s.draft().images.is_empty());
+        assert_eq!(s.draft().to_json().get("images"), None, "none is no field");
+    }
+
+    #[test]
+    fn the_reply_boxs_chips_are_markers_in_the_draft_and_chips_again_in_the_box() {
+        let mark = crate::composer::PICTURE_MARK_STR;
+        let (reply, images) = reply_from_box(&format!("Like {mark} not {mark}"), vec![image("a"), image("b")]);
+        assert_eq!(reply, "Like [Picture 1] not [Picture 2]");
+        assert_eq!(box_from_reply(&reply, &images), (format!("Like {mark} not {mark}"), vec![image("a"), image("b")]));
+        // Markers the other way round: the box's pictures follow its marks.
+        assert_eq!(box_from_reply("[Picture 2] then [Picture 1]", &images), (format!("{mark} then {mark}"), vec![image("b"), image("a")]));
+        assert_eq!(reply_from_box("Words alone", Vec::new()), ("Words alone".to_owned(), Vec::new()));
+        assert_eq!(box_from_reply("Words alone", &[]), ("Words alone".to_owned(), Vec::new()));
+    }
+
+    #[test]
+    fn a_picture_alone_is_an_answer() {
+        let mut s = session(rail());
+        assert!(!s.can_submit());
+        s.set_reply_note("[Picture 1]", vec![image("shot")]);
+        assert!(s.can_submit());
+        assert_eq!(s.send_label(), "Send reply");
+        let options = &rail().options;
+        assert!(ReviewDraft { images: vec![image("shot")], ..Default::default() }.can_submit(options), "with no words at all");
     }
 
     #[test]

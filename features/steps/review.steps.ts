@@ -4,9 +4,13 @@
 // open. Clicks go to the review's own window by tooltip, as a person's would.
 import { Given, Then, When } from '@cucumber/cucumber';
 import assert from 'node:assert/strict';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { okValue, sleep } from '../support/driver.ts';
 import { SHOTS_REVIEW, shotsReview } from '../support/review-demo.ts';
 import type { ThreadbearWorld } from '../support/world.ts';
+
+const samplePicture = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'support', 'sample.png');
 
 /** The demo thread's review (app/Tools/mock-runner/fixtures/demo-design-review). */
 const DEMO_REVIEW = 'review_account_picker';
@@ -23,6 +27,8 @@ type ReviewState = {
   pickedIds: string[];
   none: boolean;
   reply: string;
+  /** Pictures in the reply box's draft, or sent with the answer. */
+  replyPictures: number;
   sendLabel: string;
   editable: boolean;
   actual: boolean;
@@ -134,6 +140,33 @@ When('I write {string} in the review', async function (this: ThreadbearWorld, wo
 When('I paste {string} in the review with ⌘V', async function (this: ThreadbearWorld, words: string) {
   await this.app.do({ cmd: 'clipboard', set: words });
   await this.app.do({ cmd: 'menu-key', key: 'v', modifiers: ['cmd'], review: reviewId(this) });
+});
+
+// The keys in the reply box, as a click in it gives them, then the key.
+When(/^I press (Shift-Return|Return) in the review's reply box$/, async function (this: ThreadbearWorld, key: string) {
+  await review(this, { open: false, focusReply: true });
+  await this.app.do({ cmd: 'menu-key', key: 'enter', modifiers: key === 'Shift-Return' ? ['shift'] : [], review: reviewId(this) });
+});
+
+When("I paste the picture into the review's reply box", async function (this: ThreadbearWorld) {
+  await review(this, { open: false, focusReply: true, pastePicture: samplePicture });
+});
+
+Then("the review's reply has {int} lines", async function (this: ThreadbearWorld, lines: number) {
+  await untilReview(this, `a reply of ${lines} lines`, (s) => s.reply.split('\n').length === lines);
+});
+
+Then('the review has not been sent', async function (this: ThreadbearWorld) {
+  const s = await review(this, { open: false });
+  assert.equal(s.status, 'pending');
+});
+
+Then("the review's reply holds {int} picture(s) and says {string}", async function (this: ThreadbearWorld, count: number, words: string) {
+  await untilReview(this, `${count} picture(s) with "${words}"`, (s) => s.replyPictures === count && s.reply.trim() === words);
+});
+
+Then('the review window shows {int} picture(s) was/were sent', async function (this: ThreadbearWorld, count: number) {
+  await untilReview(this, `the answered review with ${count} picture(s)`, (s) => s.status === 'answered' && s.replyPictures === count);
 });
 
 When('I press Send in the review', async function (this: ThreadbearWorld) {

@@ -264,23 +264,6 @@ impl Composer {
         input
     }
 
-    /// Pictures for an ask's box, from its picture button
-    /// (AskAnswerBox.choosePictures): chips where the cursor was, as a paste
-    /// would put them.
-    fn choose_answer_pictures(&mut self, ask: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let paths = cx.prompt_for_paths(PathPromptOptions { files: true, directories: false, multiple: true, prompt: Some("Add".into()) });
-        cx.spawn_in(window, async move |this, cx| {
-            if let Ok(Ok(Some(paths))) = paths.await {
-                this.update_in(cx, |this, window, cx| {
-                    let input = this.answer_box(ask, window, cx);
-                    this.take_paths_in(&input, paths, window, cx);
-                })
-                .ok();
-            }
-        })
-        .detach();
-    }
-
     fn focus_answer_box(&mut self, ask: usize, window: &mut Window, cx: &mut Context<Self>) {
         let input = self.answer_box(ask, window, cx);
         input.update(cx, |s, cx| s.focus(window, cx));
@@ -970,85 +953,14 @@ impl AskHost for Composer {
     /// as in the composer (AskAnswerBox, Mike 1 Nov).
     fn ask_box_field(&mut self, ask: usize, field: Textarea, cx: &mut Context<Self>) -> Textarea {
         let Some(input) = self.card.inputs.get(&ask).cloned() else { return field };
-        let this = cx.entity().downgrade();
-        let tokens = this.clone();
-        let (clicks, click_input) = (this.clone(), input.clone());
-        field
-            .token(move |ctx, _window, cx| match tokens.upgrade() {
-                Some(this) => this.read(cx).render_chip(ctx, cx),
-                None => div().into_any_element(),
-            })
-            .on_paste(move |item, window, cx| this.upgrade().is_some_and(|this| this.update(cx, |this, cx| this.take_clipboard_in(&input, item, window, cx))))
-            // A click on a picture's chip opens it among this box's others,
-            // as in the message box (Composer::open_picture).
-            .on_token_click(move |event, window, cx| {
-                if let Some(this) = clicks.upgrade() {
-                    this.update(cx, |this, cx| this.open_picture(&click_input, event.token().id(), window, cx));
-                }
-            })
+        self.box_field(&input, field, cx)
     }
 
     /// Its pictures over the words, 44 square with × on hover, and the
     /// picture button at the right (AskAnswerBox's thumbs and addButton).
     fn ask_box_pictures(&mut self, ask: usize, cx: &mut Context<Self>) -> Option<(Option<AnyElement>, AnyElement)> {
         let input = self.card.inputs.get(&ask).cloned()?;
-        let chips = Self::chips_in(&input, cx);
-        let strip = (!chips.is_empty()).then(|| {
-            let mut row = h_flex().gap(px(6.));
-            for (n, (_, id)) in chips.into_iter().enumerate() {
-                let path = self.pictures.get(&id).map(|c| c.image.as_ref().map_or_else(|| c.source.clone(), |i| std::path::PathBuf::from(&i.path)));
-                let in_yet = self.pictures.get(&id).is_some_and(|c| c.image.is_some());
-                let (remove_input, remove_id) = (input.clone(), id.clone());
-                let tile = div()
-                    .relative()
-                    .size(px(44.))
-                    .rounded(px(6.))
-                    .overflow_hidden()
-                    .border(gpui_kit::px(0.5))
-                    .border_color(style::hairline(cx))
-                    .bg(style::chip_fill(cx))
-                    .when_some(path, |d, path| d.child(img(path).size(px(44.)).object_fit(ObjectFit::Cover).when(!in_yet, |i| i.opacity(0.5))));
-                let remove = crate::composer::remove_badge(("answer-picture-remove", ask * 100 + n)).on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                    // Not the thumbnail's click under it, which opens the picture.
-                    cx.stop_propagation();
-                    this.remove_picture_in(&remove_input, remove_id.clone(), window, cx);
-                }));
-                let (open_input, open_id) = (input.clone(), id.clone());
-                let group: SharedString = format!("answer-picture-{ask}-{n}").into();
-                row = row.child(
-                    div()
-                        .id(("answer-picture", ask * 100 + n)).role(Role::Button)
-                        .group(group.clone())
-                        .relative()
-                        .cursor_pointer()
-                        .child(tile)
-                        // Placed itself in the corner, as the message box's are
-                        // (Composer::render_strip).
-                        .child(div().absolute().top(px(2.)).right(px(2.)).invisible().group_hover(group, |s| s.visible()).child(remove))
-                        .tip(crate::viewer::TILE_TIP)
-                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                            this.open_picture(&open_input, &open_id, window, cx);
-                        })),
-                );
-            }
-            row.into_any_element()
-        });
-        let add = div()
-            .id(("answer-add-pictures", ask)).role(Role::Button)
-            .flex_none()
-            .size(px(22.))
-            .mb(px((style::size::BODY_LINE - 22.) / 2.))
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded(px(5.))
-            .cursor_pointer()
-            .hover(|s| s.bg(style::hover_fill(cx)))
-            .child(Icon::from(IconName::ImagePlus).with_size(px(14.)).text_color(style::secondary_label(cx)))
-            .tip("Add pictures to this answer (or paste or drop them in the box)")
-            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.choose_answer_pictures(ask, window, cx)))
-            .into_any_element();
-        Some((strip, add))
+        Some(self.box_pictures(&input, ask, "Add pictures to this answer (or paste or drop them in the box)", cx))
     }
 
     fn ask_box_bounds(&self, ask: usize) -> Option<std::rc::Rc<std::cell::Cell<Bounds<Pixels>>>> {

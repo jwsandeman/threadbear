@@ -28,7 +28,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use threadbear_client::runner::{Client, RpcError};
-use threadbear_core::reducer::DesignReview;
+use threadbear_core::reducer::{DesignReview, ImageRef};
 use threadbear_core::review::{self as rules, DraftCache, ReviewMode, ReviewSession, SharedDraftCache, ZoomStep};
 
 mod rail;
@@ -281,6 +281,12 @@ pub(crate) struct ReviewWindow {
     /// The thread's folder: a relative link in the agent's notes is from there.
     cwd: String,
     reply: Entity<TextareaState>,
+    /// The thread's message box, whose picture chips the reply box borrows
+    /// (composer_boxes.rs): found at the first draw, for this Mac's threads.
+    composer: Option<Entity<crate::composer::Composer>>,
+    composer_sought: bool,
+    /// The draft's pictures the box last showed, beside `reply_synced`.
+    reply_pictures_synced: Vec<ImageRef>,
     /// The draft last put in the box. A render can run before the box's
     /// Change event, so compare drafts before replacing text being edited.
     reply_synced: String,
@@ -308,15 +314,11 @@ impl ReviewWindow {
     fn new(parts: Parts, review: DesignReview, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let session = ReviewSession::new(&parts.thread_id, review, parts.cache);
         let typed = session.draft().reply.clone().unwrap_or_default();
-        let reply = cx.new(|cx| TextareaState::new(window, cx).placeholder("Add a reply").auto_grow(1, 13).default_value(typed.clone()));
-        let mut subs = vec![cx.subscribe_in(&reply, window, |this, state, ev: &InputEvent, _, cx| match ev {
-            InputEvent::Change => {
-                let text = state.read(cx).value().to_string();
-                this.reply_synced = text.clone();
-                if this.session.set_reply(&text) {
-                    this.edited(cx);
-                }
-            }
+        // Return sends and Shift-Return adds a line (`ReviewReplyBox`).
+        let reply = cx.new(|cx| TextareaState::new(window, cx).placeholder("Add a reply").auto_grow(1, 13).submit_on_enter(true).default_value(typed.clone()));
+        let mut subs = vec![cx.subscribe_in(&reply, window, |this, _, ev: &InputEvent, _, cx| match ev {
+            InputEvent::Change => this.reply_changed(cx),
+            InputEvent::PressEnter { shift: false, .. } => this.submit(cx),
             InputEvent::Focus | InputEvent::Blur => cx.notify(),
             _ => {}
         })];
@@ -365,7 +367,10 @@ impl ReviewWindow {
             session,
             cwd: parts.cwd,
             reply,
+            composer: None,
+            composer_sought: false,
             reply_synced: typed,
+            reply_pictures_synced: Vec::new(),
             focus,
             save_timer: None,
             call_task: None,
@@ -419,16 +424,87 @@ impl ReviewWindow {
         self.sync_reply_box(window, cx);
     }
 
+    /// The thread's message box, once: the reply box joins its boxes, so a
+    /// picture pasted, dropped or chosen here is a chip as it is there.
+    /// Another Mac's thread has none.
+    fn find_composer(&mut self, cx: &mut Context<Self>) {
+        if self.composer_sought {
+            return;
+        }
+        self.composer_sought = true;
+        let thread = &self.session.thread_id;
+        let Some(app) = self.app.upgrade() else { return };
+        let app = app.read(cx);
+        if app.threads.get(thread).is_none_or(|t| t.is_remote()) {
+            return;
+        }
+        let Some(composer) = app.composers.get(thread).cloned() else { return };
+        composer.update(cx, |c, _| c.adopt_box(&self.reply));
+        // A picture copied in is in the reply from then.
+        self._subs.push(cx.observe(&composer, |this, _, cx| this.pictures_changed(cx)));
+        self.composer = Some(composer);
+    }
+
+    /// What the box holds: its words, a [Picture N] marker for each chip,
+    /// and those pictures.
+    fn reply_note(&self, cx: &App) -> (String, Vec<ImageRef>) {
+        match &self.composer {
+            Some(composer) => {
+                let (text, images) = composer.read(cx).box_note(&self.reply, cx);
+                rules::reply_from_box(&text, images)
+            }
+            None => (self.reply.read(cx).value().to_string(), Vec::new()),
+        }
+    }
+
+    /// The box changed (`ReviewReplyBox.onChange`): what it holds is the
+    /// draft's reply.
+    fn reply_changed(&mut self, cx: &mut Context<Self>) {
+        let (text, images) = self.reply_note(cx);
+        self.reply_synced = text.clone();
+        self.reply_pictures_synced = images.clone();
+        if self.session.set_reply_note(&text, images) {
+            self.edited(cx);
+        }
+    }
+
+    /// The message box's pictures changed: one of the reply's may be in now.
+    /// Left alone while the box has yet to show a draft from elsewhere.
+    fn pictures_changed(&mut self, cx: &mut Context<Self>) {
+        let draft = self.session.shown_draft();
+        let shown = draft.reply.as_deref().unwrap_or_default() == self.reply_synced && draft.images == self.reply_pictures_synced;
+        if shown && self.session.editable() && self.reply_note(cx).1 != self.reply_pictures_synced {
+            self.reply_changed(cx);
+        }
+        cx.notify();
+    }
+
+    /// A picture in the reply box is still being copied in: Send waits.
+    fn reply_copying(&self, cx: &App) -> bool {
+        self.composer.as_ref().is_some_and(|c| c.read(cx).box_copying(&self.reply, cx))
+    }
+
     /// The box shows the draft's reply when something other than typing
     /// changed it: the runner's copy from another window, or an answer.
     fn sync_reply_box(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let wanted = self.session.shown_draft().reply.clone().unwrap_or_default();
+        self.find_composer(cx);
+        let draft = self.session.shown_draft();
+        let (wanted, wanted_pictures) = (draft.reply.clone().unwrap_or_default(), draft.images.clone());
         // A changed runner draft or answer still wins over an unreported local edit.
-        if self.reply_synced != wanted {
-            if self.reply.read(cx).value().as_ref() != wanted.as_str() {
-                self.reply.update(cx, |s, cx| s.set_value(wanted.clone(), window, cx));
+        if self.reply_synced != wanted || self.reply_pictures_synced != wanted_pictures {
+            if self.reply_note(cx) != (wanted.clone(), wanted_pictures.clone()) {
+                match &self.composer {
+                    // Each marker a chip for its picture again.
+                    Some(composer) => {
+                        let (text, pictures) = rules::box_from_reply(&wanted, &wanted_pictures);
+                        let content = composer.update(cx, |c, _| c.content_for(&text, &pictures));
+                        self.reply.update(cx, |s, cx| s.set_value(content, window, cx));
+                    }
+                    None => self.reply.update(cx, |s, cx| s.set_value(wanted.clone(), window, cx)),
+                }
             }
             self.reply_synced = wanted;
+            self.reply_pictures_synced = wanted_pictures;
         }
         let editable = self.session.editable();
         self.reply.update(cx, |s, cx| s.set_disabled(!editable, cx));
@@ -516,7 +592,7 @@ impl ReviewWindow {
     /// sent the window gets out of the way (Mike, 28 Oct). A failed send stays
     /// open with its error and the draft kept.
     pub(crate) fn submit(&mut self, cx: &mut Context<Self>) {
-        if !self.session.begin_submit() {
+        if self.reply_copying(cx) || !self.session.begin_submit() {
             return;
         }
         self.save_timer = None;
@@ -788,18 +864,24 @@ impl ReviewWindow {
         if !self.session.editable() || self.reply_focused(window, cx) {
             return;
         }
-        let Some(words) = cx.read_from_clipboard().and_then(|c| c.text()).filter(|w| !w.is_empty()) else { return };
+        let Some(item) = cx.read_from_clipboard() else { return };
         let handle = self.reply.read(cx).focus_handle(cx);
+        // A picture, or a copy of a box's chips, goes in as chips.
+        if let Some(composer) = self.composer.clone() {
+            window.focus(&handle, cx);
+            crate::web_panels::keyboard_to_app(window);
+            if composer.update(cx, |c, cx| c.take_clipboard_in(&self.reply, &item, window, cx)) {
+                self.reply_changed(cx);
+                return;
+            }
+        }
+        let Some(words) = item.text().filter(|w| !w.is_empty()) else { return };
         window.focus(&handle, cx);
         crate::web_panels::keyboard_to_app(window);
         // Replace its selection, or insert at its cursor, as its own Paste does.
         self.reply.update(cx, |s, cx| s.replace(words, window, cx));
         // Save and Send must see the paste before the box's Change arrives.
-        let text = self.reply.read(cx).value().to_string();
-        self.reply_synced = text.clone();
-        if self.session.set_reply(&text) {
-            self.edited(cx);
-        }
+        self.reply_changed(cx);
     }
 
     fn reply_focused(&self, window: &Window, cx: &App) -> bool {
@@ -1276,6 +1358,17 @@ pub(crate) async fn automation(app: &WeakEntity<Threadbear>, main: AnyWindowHand
                 if let Some(reply) = cmd["reply"].as_str() {
                     v.set_reply(reply, window, cx);
                 }
+                // A picture at the reply box's cursor, as a paste of one
+                // puts it (the main window's `paste-image`).
+                if let Some(path) = cmd["pastePicture"].as_str() {
+                    v.find_composer(cx);
+                    if let Some(composer) = v.composer.clone() {
+                        // After what's typed, where the cursor is left.
+                        let end = v.reply.read(cx).value().len();
+                        v.reply.update(cx, |s, cx| s.set_selected_range(end..end, cx));
+                        composer.update(cx, |c, cx| c.take_paths_in(&v.reply, vec![PathBuf::from(path)], window, cx));
+                    }
+                }
                 if let Some(browse) = cmd["browse"].as_i64() {
                     v.browse(browse as i32, cx);
                 }
@@ -1290,7 +1383,7 @@ pub(crate) async fn automation(app: &WeakEntity<Threadbear>, main: AnyWindowHand
         })
     })
     .map_err(|e| e.to_string())?;
-    let busy = |view: &Entity<ReviewWindow>, cx: &mut AsyncApp| view.read_with(cx, |v, _| v.session.saving() || v.session.submitting());
+    let busy = |view: &Entity<ReviewWindow>, cx: &mut AsyncApp| view.read_with(cx, |v, cx| v.session.saving() || v.session.submitting() || v.reply_copying(cx));
     if cmd["save"].as_bool() == Some(true) {
         view.update(cx, |v, cx| v.save_now(cx));
     }
@@ -1330,6 +1423,8 @@ impl ReviewWindow {
             "pickedIds": draft.picked_ids,
             "notes": draft.notes,
             "reply": draft.reply.clone().unwrap_or_default(),
+            // The draft's pictures, or what was sent once it's over.
+            "replyPictures": s.shown_draft().images.len(),
             "none": draft.none,
             "shot": s.shot(),
             "peeking": s.peeking,

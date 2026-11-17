@@ -349,6 +349,9 @@ pub struct ReviewDraft {
     pub picked_ids: Vec<String>,
     pub notes: BTreeMap<String, String>,
     pub reply: Option<String>,
+    /// Pictures from the reply box, placed in `reply` by [Picture N] markers
+    /// as a message's are.
+    pub images: Vec<ImageRef>,
     pub none: bool,
 }
 
@@ -376,7 +379,8 @@ impl ReviewDraft {
             .unwrap_or_default();
         let mut picked_ids = picked_ids;
         picked_ids.truncate(REVIEW_OPTIONS_MAX);
-        Some(ReviewDraft { picked_ids, notes, reply: string(c, "reply").map(|r| review_text(r, REVIEW_REPLY_MAX)), none: boolean(c, "none").unwrap_or(false) })
+        let images = lossy_first(c, "images", REVIEW_REPLY_IMAGES_MAX, ImageRef::decode);
+        Some(ReviewDraft { picked_ids, notes, reply: string(c, "reply").map(|r| review_text(r, REVIEW_REPLY_MAX)), images, none: boolean(c, "none").unwrap_or(false) })
     }
 }
 
@@ -423,6 +427,7 @@ pub const REVIEW_OPTIONS_MAX: usize = 12;
 /// An option's shots (maxReviewShots) and a draft's reply (reviewDraft).
 pub const REVIEW_SHOTS_MAX: usize = 8;
 pub const REVIEW_REPLY_MAX: usize = 8000;
+pub const REVIEW_REPLY_IMAGES_MAX: usize = 50;
 
 fn review_text(text: String, max: usize) -> String {
     match text.char_indices().nth(max) {

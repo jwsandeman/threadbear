@@ -5199,3 +5199,17 @@ Fixes from Codex's review of the slice before:
   scenarios and the three annotation scenarios are Swift-pending: the Swift
   dump has no switches or tools.
 - Not checked: a real pointer drawing a stroke or a region.
+### 2026-11-17 The review window's reply box in the GPUI app (`review.picks`)
+
+- Return in the reply box sends the review; Shift-Return adds a line.
+- A picture pasted, dropped or chosen in the reply box is a chip in the box
+  with a thumbnail above it, copied in with `media.import`. The draft's
+  `reply` holds a `[Picture N]` marker for each and `images` the pictures.
+  A picture alone is an answer. Send waits while a picture is copying.
+- The box uses the thread's composer for its chips (`composer_boxes.rs`), as
+  an ask's answer box does. A review from another Mac's thread has a plain
+  box.
+- A sent review shows its pictures under the reply.
+- Verification: `features/review.feature` `@review.picks` passes on the GPUI
+  app on a Mac, 8 scenarios, three of them new and `@swift-pending`.
+- Not checked: a real ⌘V of a screenshot and a real drop in the reply box.

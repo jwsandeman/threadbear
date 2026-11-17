@@ -1074,7 +1074,7 @@ async function dispatch(client, method, p) {
       if (method === 'reviews.respond') {
         // Receipt of the reply is a fake turn, without a CLI or model.
         const text = reviewReply(next, draft);
-        persist(t.summary.id, { type: 'user.message', text, images: [], reviewId: next.id, reviewResponse: draft }, next.replyTurnId);
+        persist(t.summary.id, { type: 'user.message', text, images: draft.images ?? [], reviewId: next.id, reviewResponse: draft }, next.replyTurnId);
         persist(t.summary.id, { type: 'turn.started', turnId: next.replyTurnId }, next.replyTurnId);
         persist(t.summary.id, { type: 'assistant.text', itemId: 'review_reply_' + next.id, text: 'I received your review. This is the mock runner, so no code was changed.' }, next.replyTurnId);
         persist(t.summary.id, { type: 'turn.completed', turnId: next.replyTurnId, outcome: 'completed', durationMs: 0 }, next.replyTurnId);

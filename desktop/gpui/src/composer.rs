@@ -63,6 +63,9 @@ pub struct Composer {
     /// Each chip's place among the box's pictures, worked out each render so
     /// the renderer (which can't edit the input) can read it.
     chip_numbers: HashMap<SharedString, usize>,
+    /// Boxes outside the pane whose chips are this composer's
+    /// (composer_boxes.rs).
+    pub(crate) extra_boxes: Vec<WeakEntity<TextareaState>>,
     /// The chip the pointer is over, and the card showing it after a beat.
     hovered_chip: Option<(SharedString, Bounds<Pixels>)>,
     peek_shown: Option<(SharedString, Bounds<Pixels>)>,
@@ -216,6 +219,7 @@ impl Composer {
             mentions: HashMap::new(),
             next_picture: 0,
             chip_numbers: HashMap::new(),
+            extra_boxes: Vec::new(),
             hovered_chip: None,
             peek_shown: None,
             hover_serial: 0,
@@ -272,7 +276,7 @@ impl Composer {
     pub(crate) fn clear_sent_draft(&mut self, stored: &str, window: &mut Window, cx: &mut Context<Self>) {
         if self.input.read(cx).value().as_ref() == stored {
             self.input.update(cx, |s, cx| s.set_value("", window, cx));
-            self.pictures.clear();
+            self.clear_pictures(cx);
             self.mentions.clear();
         }
         cx.notify();
@@ -290,7 +294,7 @@ impl Composer {
     pub(crate) fn clear_scheduled_draft(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.chips(cx).is_empty() {
             self.input.update(cx, |s, cx| s.set_value("", window, cx));
-            self.pictures.clear();
+            self.clear_pictures(cx);
             self.mentions.clear();
             cx.notify();
         }
@@ -580,7 +584,7 @@ impl Composer {
         }
         let picks = self.saved_picks();
         self.input.update(cx, |s, cx| s.set_value("", window, cx));
-        self.pictures.clear();
+        self.clear_pictures(cx);
         self.mentions.clear();
         self.clear_picks(cx);
         let composer = cx.entity().downgrade();
@@ -685,7 +689,7 @@ impl Composer {
     /// The box holding exactly `text`, its marks as chips of `images`.
     fn set_box(&mut self, text: String, images: Vec<ImageRef>, window: &mut Window, cx: &mut Context<Self>) {
         self.input.update(cx, |s, cx| s.set_value("", window, cx));
-        self.pictures.clear();
+        self.clear_pictures(cx);
         self.mentions.clear();
         self.apply_restore(RestoreDraft::plain(text, images), window, cx);
     }
@@ -1144,10 +1148,11 @@ impl Composer {
         cx.notify();
     }
 
-    fn renumber_chips(&mut self, cx: &App) {
+    pub(crate) fn renumber_chips(&mut self, cx: &App) {
         self.chip_numbers = self.chips(cx).into_iter().enumerate().map(|(i, (_, id))| (id, i + 1)).collect();
-        // A Something else box's chips count from 1 in each box.
-        for input in self.card.answer_inputs() {
+        // A Something else box's chips count from 1 in each box, as an
+        // adopted box's do.
+        for input in self.card.answer_inputs().into_iter().chain(self.adopted_boxes()) {
             for (i, (_, id)) in Self::chips_in(&input, cx).into_iter().enumerate() {
                 self.chip_numbers.insert(id, i + 1);
             }

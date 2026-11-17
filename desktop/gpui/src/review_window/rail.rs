@@ -161,7 +161,8 @@ impl ReviewWindow {
         }
         let none = self.session.draft().none;
         let editable = self.session.editable();
-        let can_send = self.session.can_submit();
+        // Send waits for a picture still being copied in.
+        let can_send = self.session.can_submit() && !self.reply_copying(cx);
         let submitting = self.session.submitting();
         let active = window.is_window_active();
         let focused = self.reply.read(cx).focus_handle(cx).is_focused(window);
@@ -171,6 +172,20 @@ impl ReviewWindow {
         // click anywhere in it puts the cursor in it. The edge is drawn inside
         // its 6 of padding, as the Swift box's strokeBorder is.
         let reply = self.reply.clone();
+        let field = crate::composer::bare_textarea(Textarea::new(&self.reply)).w_full().text_size(px(style::size::WORK)).line_height(px(style::natural_line(style::size::WORK)));
+        // Its pictures: chips among the words, their thumbnails over them
+        // and the picture button at the right, as an ask's Something else
+        // box has them (`ReviewReplyBox`, an AskAnswerBox).
+        let (field, pictures) = match self.composer.clone().filter(|_| editable) {
+            Some(composer) => composer.update(cx, |c, cx| {
+                c.renumber_chips(cx);
+                let field = c.box_field(&reply, field, cx);
+                (field, Some(c.box_pictures(&reply, 0, "Add pictures to this reply (or paste or drop them in the box)", cx)))
+            }),
+            None => (field, None),
+        };
+        let (strip, add) = pictures.map_or((None, None), |(strip, add)| (strip, Some(add)));
+        let drop_target = self.composer.clone().filter(|_| editable).map(|composer| (composer, reply.clone()));
         let reply_box = div()
             .id("review-reply")
             .w_full()
@@ -186,7 +201,17 @@ impl ReviewWindow {
                 window.focus(&handle, cx);
                 crate::web_panels::keyboard_to_app(window);
             })
-            .child(crate::composer::bare_textarea(Textarea::new(&self.reply)).w_full().text_size(px(style::size::WORK)).line_height(px(style::natural_line(style::size::WORK))));
+            // A picture let go over the box goes in where it's let go.
+            .when_some(drop_target, |d, (composer, reply)| {
+                d.drag_over::<ExternalPaths>(|s, _, _, cx| s.border_color(style::accent(cx))).on_drop(move |paths: &ExternalPaths, window, cx| {
+                    let at = window.mouse_position();
+                    composer.update(cx, |c, cx| {
+                        c.caret_to_drop(&reply, at, cx);
+                        c.take_drop_in(&reply, paths.paths().to_vec(), window, cx);
+                    });
+                })
+            })
+            .child(v_flex().w_full().gap(px(6.)).children(strip).child(h_flex().w_full().items_end().gap(px(4.)).child(div().flex_1().min_w_0().child(field)).children(add)));
         // None: tinted while it's chosen, as the Swift button's tint is.
         let none_tip = if none { "Take back none of them" } else { "None of them will do" };
         let none_fill = if none && active { accent.opacity(0.25) } else { style::primary_opacity(cx, 0.08) };
@@ -248,6 +273,14 @@ impl ReviewWindow {
             // As tall as it needs up to the reply box's most, then it scrolls,
             // so a long one leaves room for the options and keeps Done on screen.
             column = column.child(div().id("review-sent-reply").w_full().max_h(px(220.)).overflow_y_scroll().child(reply));
+        }
+        // The pictures that went with it, in the reply's order.
+        if !sent.images.is_empty() {
+            let mut row = h_flex().w_full().flex_wrap().gap(px(6.));
+            for image in &sent.images {
+                row = row.child(div().size(px(44.)).rounded(px(6.)).overflow_hidden().border(gpui_kit::px(0.5)).border_color(style::hairline(cx)).bg(style::chip_fill(cx)).child(img(std::path::PathBuf::from(&image.path)).size(px(44.)).object_fit(ObjectFit::Cover)));
+            }
+            column = column.child(row);
         }
         column
             .child(
