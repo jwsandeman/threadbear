@@ -5199,6 +5199,8 @@ Fixes from Codex's review of the slice before:
   scenarios and the three annotation scenarios are Swift-pending: the Swift
   dump has no switches or tools.
 - Not checked: a real pointer drawing a stroke or a region.
+- Swift counterpart: `cf5ed57f`. `c0e05455` also documents the mock runner's
+  `mock.experiments`, `mock.settings` and `mock.holdMedia` in `app/README.md`.
 ### 2026-11-17 The review window's reply box in the GPUI app (`review.picks`)
 
 - Return in the reply box sends the review; Shift-Return adds a line.
