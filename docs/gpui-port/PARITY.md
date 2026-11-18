@@ -264,6 +264,34 @@ run or a screenshot from the running app. A slice with no runtime check doesn't
 count. (Ghostex's port log is where this shape comes from; its slices 214 to 268
 built parsers and gates with no launch of the app, which is the trap.)
 
+### 2026-11-19 Another Mac's pictures in replies (`rich.localpicture`)
+
+- `![alt](address)` in a reply of another Mac's thread draws the picture
+  that Mac sent up for it. The app asks its runner by the address as written
+  (`files.read` with the thread's `runnerId` and `reply: true`) when the
+  reply is first drawn, and again 2 minutes after one that couldn't be got.
+- Only an address that names a file is asked for: an absolute path, a `~/`
+  path or a `file:///` URL. A web address is never asked for or fetched.
+- The picture is drawn from the bytes the runner hands over, decoded before
+  the reply redraws. A file this Mac has at the same address is never read.
+- Until it comes, and when it doesn't, it's a link with its alt text, as
+  before. An SVG stays a link.
+- A tool's pictures on another Mac's thread need no app change: the runner
+  gives the tool's result a place for each, and the tiles ask for them.
+- Not here: the Swift app, which shows them as links (`@swift-pending`).
+- Files: `desktop/gpui/src/{remote_pictures,rows,chips,automation}.rs`,
+  `desktop/gpui/src/rows/markdown.rs`, `app/Tools/mock-runner/server.mjs`,
+  `features/remote-threads.feature` and its steps.
+- Verification: on the Mac mini, GPUI, `@remote-threads`,
+  `@rich.localpicture`, `@transcript.images` and `@rich.picturechips`, 40 of
+  40, with the app kept off screen (`THREADBEAR_KEEP_BEHIND=1`). The new
+  scenario: the picture mac-mini sent up is drawn, a picture file of this
+  Mac's at an address the reply names and a web picture are links, and the
+  runner is never asked for the web address. A shot of the headless app shows
+  the picture at the column's width on the first frame after it comes. The
+  remote_pictures and markdown unit tests (9). Not run: Windows, Linux, the
+  Swift app, and a window in front on a real screen.
+
 ### 2026-11-13 Restarting onto the next version hands over, and threads keep their place (`system.handover`, `system.selfupdate`)
 
 - The GPUI app's restart onto a staged build was the window going and coming

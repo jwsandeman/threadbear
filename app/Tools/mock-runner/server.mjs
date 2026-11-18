@@ -389,6 +389,10 @@ const BRUCE_FILES = {
   blob: '/Users/alex/Library/Application Support/Threadbear/threads/mini_media/blobs/mini_media_c0_0.txt',
 };
 const bruceModifiedAt = new Date(Date.now() - 3600_000).toISOString();
+// A picture one of mac-mini's replies names, which that Mac has sent up, and
+// every file of another runner's this one has been asked for (`mock.remoteFileAsks`).
+const BRUCE_REPLY_PICTURE = '/Users/alex/Pictures/backup-sizes.png';
+const remoteFileAsks = [];
 if (!process.env.TB_MOCK_NO_REMOTE) addRemoteDemo();
 /** The schedules (docs/protocol.md, "Schedules"), soonest first. */
 let schedules = [];
@@ -639,7 +643,17 @@ async function dispatch(client, method, p) {
       // Another runner's file asked of this one, as the GPUI app asks for
       // mac-mini's pictures: refused as the real runner refuses it
       // (runner/src/rpc.ts), never this Mac's file at the same path.
-      if (!client.as && typeof p.runnerId === 'string') throw rpcError(-32000, 'Files on another runner are kept there for now.');
+      if (!client.as && typeof p.runnerId === 'string') {
+        remoteFileAsks.push({ path: String(p.path), reply: p.reply === true });
+        // A reply's picture, asked for as one: handed over, as the relay
+        // hands over what that runner uploaded for the address
+        // (runner/src/relay.ts replyPicture). Any other stays there.
+        if (p.reply === true && p.path === BRUCE_REPLY_PICTURE) {
+          const bytes = bruceFile(BRUCE_FILES.picture);
+          return { path: p.path, size: bytes.length, modifiedAt: bruceModifiedAt, mediaType: 'image/png', data: bytes.toString('base64'), truncated: false };
+        }
+        throw rpcError(-32000, 'Files on another runner are kept there for now.');
+      }
       return readFile(client, p);
     case 'files.list':
       if (client.as) await sleep(400);
@@ -1692,6 +1706,8 @@ async function dispatch(client, method, p) {
       broadcastProjects();
       return { ok: true };
     }
+    case 'mock.remoteFileAsks':
+      return { asks: remoteFileAsks };
     case 'mock.phoneOnlyPicture': {
       const t = need(p.threadId);
       const first = t.events.find((e) => e.type === 'user.message');

@@ -524,6 +524,9 @@ fn step(app: &Entity<Threadbear>, cmd: &Value, window: &mut Window, cx: &mut App
         // Swift app's `tiles`: "picture" for one that's drawn, else its words
         // (another Mac's, asked of its runner: remote_pictures.rs).
         "tiles" => crate::remote_pictures::tiles_command(app, cmd, cx),
+        // What each picture the last reply with any names is drawn as:
+        // "picture", or "link" (another Mac's are asked of its runner).
+        "reply-pictures" => crate::remote_pictures::reply_pictures_command(app, cx),
         // Where things are on screen, for a real event there (features/tools/real-gestures.ts).
         "row-point" => crate::row_swipe::row_point_command(app, cmd, window, cx),
         // Where a row's swipe has got to, whatever's moving it: a real

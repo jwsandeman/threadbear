@@ -1,5 +1,8 @@
 import { Given, Then, When } from '@cucumber/cucumber';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { sleep } from '../support/driver.ts';
 import type { ThreadbearWorld } from '../support/world.ts';
 
@@ -91,6 +94,40 @@ Then('the move sheet is closed', async function (this: ThreadbearWorld) {
 Then('the move sheet stayed closed', async function (this: ThreadbearWorld) {
   const d = await this.app.dump();
   assert.ok(!d.moveSheet, 'the sheet came up');
+});
+
+// A reply on mac-mini with three pictures: one the mock's runner hands over
+// for mac-mini (server.mjs BRUCE_REPLY_PICTURE), a real picture file on this
+// Mac, and a web address.
+const SENT_UP = '/Users/alex/Pictures/backup-sizes.png';
+const WEB = 'https://example.com/backup.png';
+const mine = new WeakMap<ThreadbearWorld, string>();
+
+Given("mac-mini's reply names a picture it sent up, a picture file of this Mac's and a web picture", async function (this: ThreadbearWorld) {
+  const file = path.join(fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'tb-reply-picture-'))), 'mine.png');
+  // A 1 by 1 PNG.
+  fs.writeFileSync(file, Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64'));
+  mine.set(this, file);
+  const text = `The backup finished. Sizes by day: ![sizes](${SENT_UP})\n\nNot these: ![mine](${file}) ![web](${WEB})`;
+  await this.app.do({ cmd: 'mock', method: 'replaceReply', params: { threadId: 'mini_backup', text } });
+});
+
+Then('the pictures of its reply are drawn as {string}', async function (this: ThreadbearWorld, words: string) {
+  await this.until('its reply', (d) => d.transcript.rows.some((r) => r.kind === 'assistant'));
+  let said = '';
+  for (let tries = 0; tries < 60; tries += 1) {
+    said = await this.app.do({ cmd: 'reply-pictures' }).catch((e) => String(e));
+    if (said.replace(/^reply-pictures /, '') === `ok ${words}`) return;
+    await sleep(150);
+  }
+  assert.fail(`the reply's pictures are drawn as "${said}", not "${words}"`);
+});
+
+Then("the runner was asked for the reply's pictures on mac-mini, but never for the web picture", async function (this: ThreadbearWorld) {
+  const answer = await this.app.do({ cmd: 'mock', method: 'remoteFileAsks' });
+  const asks = (JSON.parse(answer.replace(/^(\w+ )?ok /, '')).asks as { path: string; reply: boolean }[]).filter((a) => a.reply);
+  assert.deepEqual(asks.map((a) => a.path).sort(), [SENT_UP, mine.get(this)!].sort());
+  assert.ok(!asks.some((a) => a.path === WEB));
 });
 
 // Both apps' `tiles`: what each picture of the message says when it isn't

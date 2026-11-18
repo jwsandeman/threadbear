@@ -103,6 +103,17 @@ Feature: Other runners' threads
     When I open the thread "Check the photo library backup"
     Then the pictures of my message say "Couldn't get it from mac-mini"
 
+  # A picture in its reply is asked of the runner by its address, as a reply's:
+  # what mac-mini sent up for it is drawn. A file this Mac has at an address
+  # the reply names is never drawn, and a web address is never asked for.
+  # The Swift app shows another Mac's reply pictures as links.
+  @rich.localpicture @remote-threads @swift-pending
+  Scenario: Another Mac's reply draws the picture its runner hands over, and never a file of this Mac's
+    Given mac-mini's reply names a picture it sent up, a picture file of this Mac's and a web picture
+    When I open the thread "Check the photo library backup"
+    Then the pictures of its reply are drawn as "picture | link | link"
+    And the runner was asked for the reply's pictures on mac-mini, but never for the web picture
+
   # Its chip names the same file on mac-mini: pressed here it opens nothing, as
   # this Mac's file at that path isn't the one meant (Codex, 12 Nov).
   @rich.picturechips @remote-threads

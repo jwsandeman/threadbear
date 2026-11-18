@@ -101,6 +101,18 @@ pub(crate) fn starts_with_heading(text: &str) -> bool {
 /// fetched: what an agent writes can't make the app load an address by
 /// itself.
 pub(crate) fn pictures(text: &str, local: bool) -> std::borrow::Cow<'_, str> {
+    pictures_where(text, |address| local && draws_here(address))
+}
+
+/// Whether an address names a picture file that's on this Mac now.
+pub(crate) fn draws_here(address: &str) -> bool {
+    picture_path(address).is_some_and(|path| is_picture_file(&path))
+}
+
+/// `pictures` with the caller saying which addresses are drawn: another
+/// Mac's thread draws the ones its runner has handed over
+/// (`remote_pictures::reply_picture`), and every other stays a link.
+pub(crate) fn pictures_where(text: &str, mut drawn: impl FnMut(&str) -> bool) -> std::borrow::Cow<'_, str> {
     use std::borrow::Cow;
     if !text.contains("![") {
         return Cow::Borrowed(text);
@@ -109,7 +121,7 @@ pub(crate) fn pictures(text: &str, local: bool) -> std::borrow::Cow<'_, str> {
     let mut swaps: Vec<(usize, usize, String)> = Vec::new();
     collect_images(&tree, &mut |image| {
         let Some(at) = &image.position else { return };
-        if local && picture_path(&image.url).is_some_and(|path| is_picture_file(&path)) {
+        if drawn(&image.url) {
             return;
         }
         let alt = if image.alt.is_empty() { image.url.as_str() } else { image.alt.as_str() };
@@ -257,6 +269,18 @@ pub(crate) fn picture_file(path: &str) -> std::path::PathBuf {
         path
     } else {
         std::path::PathBuf::new()
+    }
+}
+
+/// `picture_source` for a thread on `runner`, or on this Mac with none.
+/// Another Mac's draws only what its runner handed over for that address
+/// (`from_runner`), from those pixels: never this Mac's file at the address,
+/// and nothing for any other address.
+pub(crate) fn thread_picture_source(uri: &gpui_kit::SharedUri, runner: Option<&str>, from_runner: &crate::remote_pictures::Drawn) -> gpui_kit::ImageSource {
+    let Some(runner) = runner else { return picture_source(uri, true) };
+    match from_runner.get(&(runner.to_owned(), uri.to_string())) {
+        Some(pixels) => gpui_kit::ImageSource::Render(pixels.clone()),
+        None => picture_source(uri, false),
     }
 }
 
@@ -678,6 +702,45 @@ mod tests {
         let reply = format!("![shot]({})", shot.display());
         assert_eq!(pictures(&reply, true), reply, "a picture on this Mac is drawn");
         assert!(pictures(&reply, false).starts_with("[\\[shot\\]]"), "another Mac's thread draws none from here");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Another Mac's reply (19 Nov 2026): the pictures its runner handed
+    /// over are drawn from those bytes, by the address as written; this
+    /// Mac's file at the same address never is.
+    #[test]
+    fn another_macs_reply_draws_what_its_runner_handed_over_and_never_this_macs_file() {
+        use std::sync::Arc;
+        let dir = std::env::temp_dir().join(format!("tb-remote-reply-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let here = dir.join("shot.png");
+        std::fs::write(&here, b"\x89PNG\r\n\x1a\n, a png's first bytes").unwrap();
+        let here = here.to_string_lossy().into_owned();
+        let reply = format!("![theirs](/Users/b/x/chart.png) ![mine]({here}) ![web](https://x.y/c.png)");
+        // Only what the caller says has come stays a picture, and it's asked about each address as written.
+        let mut asked = Vec::new();
+        let shown = super::pictures_where(&reply, |address| {
+            asked.push(address.to_owned());
+            address == "/Users/b/x/chart.png"
+        });
+        assert_eq!(asked, ["/Users/b/x/chart.png", here.as_str(), "https://x.y/c.png"]);
+        assert_eq!(shown, format!("![theirs](/Users/b/x/chart.png) [\\[mine\\]](<{here}>) [\\[web\\]](<https://x.y/c.png>)"));
+        // The image loader gets the runner's bytes for the one that came...
+        let theirs = Arc::new(gpui_kit::RenderImage::new(vec![image::Frame::new(image::RgbaImage::new(1, 1))]));
+        let from_runner: crate::remote_pictures::Drawn = Arc::new([(("mac-mini".to_owned(), "/Users/b/x/chart.png".to_owned()), theirs.clone())].into_iter().collect());
+        let source = |address: &str, runner: Option<&str>| super::thread_picture_source(&address.to_owned().into(), runner, &from_runner);
+        assert!(matches!(source("/Users/b/x/chart.png", Some("mac-mini")), gpui_kit::ImageSource::Render(pixels) if Arc::ptr_eq(&pixels, &theirs)));
+        // ...nothing for this Mac's file at an address it names, nor for another runner's thread...
+        for (address, runner) in [(here.as_str(), "mac-mini"), ("/Users/b/x/chart.png", "cloud"), ("https://x.y/c.png", "mac-mini")] {
+            match source(address, Some(runner)) {
+                gpui_kit::ImageSource::Resource(gpui_kit::Resource::Path(path)) => assert_eq!(path.to_string_lossy(), "", "{address} on {runner}"),
+                _ => panic!("{address} on {runner} drew something"),
+            }
+        }
+        // ...and this Mac's own thread is as before: its file, never the other Mac's bytes.
+        #[cfg(not(windows))]
+        assert!(matches!(source(&here, None), gpui_kit::ImageSource::Resource(gpui_kit::Resource::Path(path)) if path.to_string_lossy() == here));
+        assert!(!matches!(source("/Users/b/x/chart.png", None), gpui_kit::ImageSource::Render(_)));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

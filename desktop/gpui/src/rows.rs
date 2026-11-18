@@ -439,7 +439,9 @@ impl ThreadPane {
         let drafts = crate::draft_boxes::DraftBoxes { origin: self.origin(), cwd: self.summary.cwd.clone(), row: row_id.to_owned() };
         let chips = crate::chips::ThreadChipPills { row: row_id.to_owned() };
         let row_id = row_id.to_owned();
-        let local = self.summary.runner_id.is_none();
+        // Another Mac's thread: the pictures its runner has handed over (remote_pictures.rs).
+        let runner = self.summary.runner_id.clone();
+        let from_runner = crate::remote_pictures::drawn(cx);
         crate::open_gate::text_view(doc, self.origin(), &self.summary.cwd)
             .on_link_click(move |url: &SharedString, event: &ClickEvent, window: &mut Window, cx: &mut App| {
                 // Asked which link is under the pointer (reply_links.rs), or
@@ -456,9 +458,10 @@ impl ThreadPane {
             // `[title](button:<id>)` as a pill that presses it.
             // Only this thread's own buttons, pressed as this thread.
             .plugin(crate::reply_buttons::Pills { thread: self.summary.id.clone() })
-            // Pictures from files on this Mac, in this Mac's threads only
-            // (`markdown::picture_source`).
-            .image_source(move |uri| markdown::picture_source(uri, local))
+            // Pictures from files on this Mac, in this Mac's threads only,
+            // and in another Mac's the ones its runner handed over
+            // (`markdown::thread_picture_source`).
+            .image_source(move |uri| markdown::thread_picture_source(uri, runner.as_deref(), &from_runner))
             // A closed ```slack, ```email or ```draft fence as the draft's box.
             .plugin(drafts)
             // A thread's id as its chip (`with_thread_chips`).
@@ -467,11 +470,33 @@ impl ThreadPane {
             .plugin(crate::rich_boxes::RichBoxes)
     }
 
+    /// A reply's text with the pictures it draws left as pictures and the
+    /// rest as links (`markdown::pictures`): this Mac's files in this Mac's
+    /// thread, and in another Mac's the ones its runner has handed over,
+    /// each asked for when the reply is first drawn (remote_pictures.rs).
+    fn reply_pictures<'a>(&self, text: &'a str, cx: &mut Context<Self>) -> std::borrow::Cow<'a, str> {
+        let Some(runner) = self.summary.runner_id.clone() else { return markdown::pictures(text, true) };
+        if !text.contains("![") {
+            return std::borrow::Cow::Borrowed(text);
+        }
+        let client = self.client_handle();
+        let redraw: AnyWeakEntity = cx.entity().downgrade().into();
+        markdown::pictures_where(text, |address| crate::remote_pictures::reply_picture(&runner, address, &client, redraw.clone(), cx))
+    }
+
+    /// The same, as the reply was last drawn: nothing is asked for.
+    pub(crate) fn reply_pictures_drawn<'a>(&self, text: &'a str, cx: &App) -> std::borrow::Cow<'a, str> {
+        match &self.summary.runner_id {
+            None => markdown::pictures(text, true),
+            Some(runner) => markdown::pictures_where(text, |address| crate::remote_pictures::reply_picture_drawn(runner, address, cx)),
+        }
+    }
+
     /// The reading column's text: markdown, selectable, links going where they
     /// go. `row.rs`'s `TextItem::text` is the whole reply so far; `prepare`
     /// escapes work links and `set_text` appends what's new.
     fn assistant_row(&mut self, ix: usize, row: &Row, item: &TextItem, cx: &mut Context<Self>) -> AnyElement {
-        let source = markdown::prepare(&markdown::pictures(&item.text, self.summary.runner_id.is_none()), &self.summary.id);
+        let source = markdown::prepare(&self.reply_pictures(&item.text, cx), &self.summary.id);
         // Thread ids as chips (chips.rs).
         let source = self.with_thread_chips(source, cx);
         let doc = self.markdown_state(&item.item_id, &source, cx);
@@ -799,6 +824,34 @@ impl crate::thread::ThreadPane {
                 _ => None,
             })
             .ok_or_else(|| format!("no row of {count} pictures in this thread"))
+    }
+
+    /// What each picture the last reply with any names is drawn as, for
+    /// scripts: "picture", or "link".
+    #[cfg(feature = "automation")]
+    pub(crate) fn last_reply_pictures(&self, cx: &App) -> Result<Vec<&'static str>, String> {
+        let text = self
+            .feed
+            .model()
+            .rows()
+            .iter()
+            .rev()
+            .find_map(|row| match &row.content {
+                RowContent::Assistant(item) if item.text.contains("![") => Some(item.text.clone()),
+                _ => None,
+            })
+            .ok_or("no reply with a picture in this thread")?;
+        let mut said = Vec::new();
+        let runner = self.summary.runner_id.clone();
+        let _ = markdown::pictures_where(&text, |address| {
+            let drawn = match &runner {
+                None => markdown::draws_here(address),
+                Some(runner) => crate::remote_pictures::reply_picture_drawn(runner, address, cx),
+            };
+            said.push(if drawn { "picture" } else { "link" });
+            drawn
+        });
+        Ok(said)
     }
 }
 

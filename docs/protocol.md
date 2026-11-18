@@ -5942,7 +5942,8 @@ only way the app opens another runner's thread.
   again if 30 seconds have passed; a row less than 20 seconds old is read again
   every 2 seconds until then, and never past 20 seconds from the asking. One
   that isn't up is `-32000`, `Files on another runner are kept there for now.`
-  The event itself is unchanged.
+  The event itself is unchanged. The desktop app asks for each such address
+  when the reply is first drawn, and shows a link until the picture comes.
 - **Reads.** A thread is watched only while a client is subscribed to it,
   through `relay:remoteTail` (its newest 15 rows) and `relay:remoteThread`
   (its one row); a minute after the last subscriber goes, both stop. Older
