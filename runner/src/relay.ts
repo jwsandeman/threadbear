@@ -29,7 +29,8 @@
 // phone's tap does (a `picture` command, held a day), unless it's already
 // held. A reply's event is as that runner sent it; a picture its markdown
 // names is read from that runner's uploads (replyImages again) when the
-// app asks for it by that address.
+// app asks for it by that address, saying it's a reply's (`reply: true`):
+// nothing else answers that, and no other read answers with one.
 //
 // Seqs. The rows' seqs are the other runner's event seqs, with gaps where
 // events weren't mirrored. Each row's seq s becomes eight here: 8s a
@@ -52,6 +53,7 @@ import type { Notification } from './runner.ts';
 import type { RemoteThread, RemoteThreads } from './thread-index.ts';
 import type { Download, Post, Subscribe, Upload } from './sync.ts';
 import { picturesSaid } from './pictures.ts';
+import { markdownImageSources } from './share-images.ts';
 import { ErrorCode, RpcError, remoteCreateMode, type LabReviewLedger } from './protocol.ts';
 import { seal } from './secrets.ts';
 
@@ -225,7 +227,19 @@ export type RelayPicture = { n: number; path: string; url: string; mediaType: st
 export type RelayPictures = { held: Map<number, RelayPicture[]>; waiting?: Set<number>; tools?: Set<number> };
 // One uploaded picture of a reply: `src` is its address as the reply's
 // markdown has it, `path` the file it names on that runner's Mac.
-type ReplyPicture = { src: string; path: string; url: string; mediaType: string };
+type ReplyPicture = { src: string; url: string; mediaType: string };
+// An address a reply's picture may have: a file's, as that runner uploads
+// them (share-images.ts localImagePath). Never a web address.
+function replyAddress(address: string): boolean {
+  if (!address || address.length > 4096 || /[\0-\x1f]/.test(address)) return false;
+  return (address.startsWith('/') && !address.startsWith('//')) || address.startsWith('~/') || address.startsWith('file:///') || address.startsWith('file://localhost/');
+}
+// How many pictures a tool's body says it handed back.
+function pictureCount(body: { images?: unknown }): number {
+  return typeof body.images === 'number' && Number.isSafeInteger(body.images) && body.images > 0 ? body.images : 0;
+}
+// A command that runner didn't answer in time: still waiting for it in Convex.
+class NoAnswer extends RpcError {}
 // files.read's answer (files.ts FileRead).
 export type RelayFile = { path: string; size: number; modifiedAt: string; mediaType: string; data: string; truncated: boolean };
 
@@ -357,6 +371,11 @@ type Watch = {
   replyPictures: Map<number, ReplyPicture[]>;
   replyAsked: Map<number, number>;
   replyRead?: Promise<void>;
+  // The last tool picture asked of that runner, which takes a thread's
+  // commands one at a time, and the last one it didn't answer.
+  toolAsk?: Promise<void>;
+  toolAsks?: number;
+  toolAskLost?: { upTo: number; error: unknown };
 };
 
 export type RelayEvent = { seq: number; ts: string; threadId: string; turnId?: string; type: string; [k: string]: unknown };
@@ -514,7 +533,7 @@ export function relayEvents(threadId: string, rows: RelayRow[], row: RelayThread
           const more = diffs.slice(shown.length).map((d) => d.path);
           // Its pictures: a place for each the app can ask for (files.read),
           // and a count of the rest, or of them all when it can't.
-          const count = typeof body.images === 'number' && Number.isSafeInteger(body.images) && body.images > 0 ? body.images : 0;
+          const count = pictureCount(body);
           const places = pictures?.tools?.has(r.seq) ? Math.min(count, TOOL_PICTURES_MOST) : 0;
           const kept = count - places;
           const keptLine = kept ? `${kept === 1 ? `1${places ? ' more' : ''} picture is` : `${kept}${places ? ' more' : ''} pictures are`} kept on ${runnerName}.` : '';
@@ -1392,37 +1411,40 @@ export class Relay {
    * files.read for another runner (rpc.ts): a picture of one of its threads,
    * from file storage. One of its messages', by the path the relay gave the
    * app for it; one a tool handed back, by the place the relay gave it
-   * (toolPicturePath), asked of that runner if it isn't up; one a reply
-   * names, by its address in the reply or its path there. Only for a thread
-   * of that runner, from the thread used last when two hold the same path;
-   * any other file stays there. And a picture in this runner's own inbox:
-   * the app draws a message it has just sent there with the paths it sent,
-   * until that runner shows it.
+   * (toolPicturePath), asked of that runner if it isn't up. Only for a
+   * thread of that runner, from the thread used last when two hold the same
+   * path; any other file stays there. And a picture in this runner's own
+   * inbox: the app draws a message it has just sent there with the paths it
+   * sent, until that runner shows it. With `reply`, only a picture a reply
+   * names, by its address in the reply (replyPicture).
    */
-  async readFile(runnerId: string, path: string, maxBytes?: number): Promise<RelayFile> {
+  async readFile(runnerId: string, path: string, maxBytes?: number, opts: { reply?: boolean } = {}): Promise<RelayFile> {
     const download = this.deps.source()?.download;
     const now = () => new Date(this.deps.clock.now()).toISOString();
     let found: { picture: { url: string; mediaType: string }; at: string } | undefined;
     // By the runner the index lists each thread on now: a watch follows a move only at its next call.
     const watches = [...this.watches.values()].filter((w) => (this.find(w.threadId)?.runnerId ?? w.runnerId) === runnerId).sort((a, b) => b.usedAt - a.usedAt);
-    for (const w of watches) {
+    // A reply's: only what that runner uploaded for the address, never a
+    // message's or a tool's by the same path, nor this runner's own file.
+    if (opts.reply) found = download ? await this.replyPicture(watches, path) : undefined;
+    for (const w of opts.reply ? [] : watches) {
       for (const [seq, list] of w.pictures) {
         const picture = list.find((p) => p.path === path);
         if (picture) found ??= { picture, at: w.rows.get(seq)?.at ?? now() };
       }
       if (found) break;
     }
-    const tool = found ? null : TOOL_PICTURE.exec(path);
+    const tool = found || opts.reply ? null : TOOL_PICTURE.exec(path);
     if (tool) {
       const w = watches.find((x) => x.threadId === tool[1]);
       const seq = Number(tool[2]);
       const n = Number(tool[3]);
       const body = w?.bodies.get(seq);
       // Only a place the relay gave: an opened tool's, up to how many it handed back.
-      if (!w || !download || !w.toolPictures.has(seq) || body?.state !== 'text' || n < 1 || n > Math.min(body.images ?? 0, TOOL_PICTURES_MOST)) throw new RpcError(ErrorCode.other, KEPT_THERE);
-      found = { picture: await this.toolPicture(runnerId, w.threadId, seq, n - 1, path), at: w.rows.get(seq)?.at ?? now() };
+      if (!w || !download || !w.toolPictures.has(seq) || body?.state !== 'text' || n < 1 || n > Math.min(pictureCount(body), TOOL_PICTURES_MOST)) throw new RpcError(ErrorCode.other, KEPT_THERE);
+      found = { picture: await this.toolPicture(w, runnerId, seq, n - 1, path), at: w.rows.get(seq)?.at ?? now() };
     }
-    if (!found) {
+    if (!found && !opts.reply) {
       // One that wasn't up when its message was given: looked for again.
       const m = NOT_UP.exec(path);
       const w = m ? watches.find((x) => x.threadId === m[1]) : undefined;
@@ -1439,7 +1461,6 @@ export class Relay {
       } else if (!m) {
         const mine = this.deps.readPicture?.(path);
         if (mine && !('skip' in mine)) return this.fileOf(path, mine.bytes, mine.mediaType, now(), maxBytes);
-        found = download ? await this.replyPicture(watches, path) : undefined;
       }
     }
     if (!found || !download) throw new RpcError(ErrorCode.other, KEPT_THERE);
@@ -1456,7 +1477,8 @@ export class Relay {
   // first tool opened that has some. Without the read (it has no API
   // version of its own) the tool's result goes on counting them, and the
   // backend is asked again later.
-  private async toolPicturesOn(threadId: string, seq: number): Promise<boolean> {
+  // Undefined when the backend couldn't be asked.
+  private async toolPicturesOn(threadId: string, seq: number): Promise<boolean | undefined> {
     if (!this.deps.source()?.download) return false;
     if (this.toolPicturesKnown) return true;
     const now = this.deps.clock.now();
@@ -1469,17 +1491,20 @@ export class Relay {
       if (backendRefused(e)) {
         this.toolPicturesOffUntil = now + PICTURES_RETRY_MS;
         this.deps.log.info("relay: the backend doesn't hand over tools' pictures yet, so other runners' tools count theirs");
-      } else {
-        this.deps.log.warn("relay could not ask about tools' pictures", { threadId, error: String(e) });
+        return false;
       }
-      return false;
+      this.deps.log.warn("relay could not ask about tools' pictures", { threadId, error: String(e) });
+      return undefined;
     }
   }
 
   // One picture a tool handed back: what's held of it, or, with nothing
   // held, that runner asked to upload it (a `picture` command, as the phone
-  // sends) and what's held once it has.
-  private toolPicture(runnerId: string, threadId: string, seq: number, index: number, path: string): Promise<{ url: string; mediaType: string }> {
+  // sends) and what's held once it has. One command at a time for a thread,
+  // as that runner takes them: each has TOOL_PICTURE_ASK_MS from its own
+  // sending, and one that gets no answer fails those that waited behind it.
+  private toolPicture(w: Watch, runnerId: string, seq: number, index: number, path: string): Promise<{ url: string; mediaType: string }> {
+    const threadId = w.threadId;
     const key = `${runnerId} ${path}`;
     const under = this.toolPictureReads.get(key);
     if (under) return under;
@@ -1495,7 +1520,21 @@ export class Relay {
         throw new RpcError(ErrorCode.other, `Couldn't ask Convex for that picture: ${(e as Error)?.message ?? e}`);
       }
       if (picture) return picture;
-      await this.command(runnerId, threadId, 'picture', { seq, index }, { done: true, ms: TOOL_PICTURE_ASK_MS });
+      const mine = (w.toolAsks = (w.toolAsks ?? 0) + 1);
+      const before = w.toolAsk;
+      const ask = (async () => {
+        await before?.catch(() => {});
+        if (w.toolAskLost && mine <= w.toolAskLost.upTo) throw w.toolAskLost.error;
+        try {
+          await this.command(runnerId, threadId, 'picture', { seq, index }, { done: true, ms: TOOL_PICTURE_ASK_MS });
+        } catch (e) {
+          // Every ask made so far waits behind this one.
+          if (e instanceof NoAnswer) w.toolAskLost = { upTo: w.toolAsks ?? mine, error: e };
+          throw e;
+        }
+      })();
+      w.toolAsk = ask;
+      await ask;
       try {
         picture = await held();
       } catch (e) {
@@ -1517,29 +1556,31 @@ export class Relay {
   private keepReplyPictures(w: Watch, rows: unknown): void {
     if (!Array.isArray(rows)) return;
     for (const raw of rows as Record<string, unknown>[]) {
-      if (!isRelaySeq(raw?.seq) || raw.pinned === true || typeof raw.src !== 'string' || /^picture:\d{1,3}$/.test(raw.src)) continue;
-      if (typeof raw.path !== 'string' || typeof raw.url !== 'string' || typeof raw.mediaType !== 'string' || w.rows.get(raw.seq)?.role !== 'assistant') continue;
+      if (!isRelaySeq(raw?.seq) || raw.pinned === true || typeof raw.src !== 'string' || !replyAddress(raw.src)) continue;
+      if (typeof raw.url !== 'string' || typeof raw.mediaType !== 'string' || w.rows.get(raw.seq)?.role !== 'assistant') continue;
       const list = w.replyPictures.get(raw.seq) ?? [];
       if (list.some((p) => p.src === raw.src)) continue;
-      list.push({ src: raw.src, path: raw.path, url: raw.url, mediaType: raw.mediaType });
+      list.push({ src: raw.src, url: raw.url, mediaType: raw.mediaType });
       w.replyPictures.set(raw.seq, list);
     }
   }
 
   /**
-   * A picture a reply names, for the path the app asks by: the address as
-   * the reply's markdown has it, or the file's path there. The held replies
-   * that name it are read (the newest PICTURE_SEQS of a thread), when it's
-   * first asked for and again once PICTURES_AGAIN_MS have passed; a reply
-   * that has only just come is read again until PICTURE_WAIT_MS from its
-   * sending, as that runner sends the row before it uploads the picture.
+   * A picture a reply names, for the address the app asks by: the one the
+   * reply's markdown has, a file's. The held replies with a picture of that
+   * address are read (the newest PICTURE_SEQS of a thread), when it's first
+   * asked for and again once PICTURES_AGAIN_MS have passed; a reply that
+   * has only just come is read again until PICTURE_WAIT_MS from its sending
+   * (from this asking, for one stamped later), as that runner sends the
+   * row before it uploads the picture.
    */
   private async replyPicture(watches: Watch[], path: string): Promise<{ picture: ReplyPicture; at: string } | undefined> {
-    if (!path || path.length > 4096) return undefined;
+    if (!replyAddress(path)) return undefined;
+    const start = this.deps.clock.now();
     const heldIn = (w: Watch) => {
       // The newest reply that names it: an agent that writes over a file shows the latest.
       for (const seq of [...w.replyPictures.keys()].sort((a, b) => b - a)) {
-        const picture = w.replyPictures.get(seq)!.find((p) => p.src === path || p.path === path);
+        const picture = w.replyPictures.get(seq)!.find((p) => p.src === path);
         if (picture) return { picture, at: w.rows.get(seq)?.at ?? new Date(this.deps.clock.now()).toISOString() };
       }
       return undefined;
@@ -1547,12 +1588,15 @@ export class Relay {
     for (const w of watches) {
       const held = heldIn(w);
       if (held) return held;
-      const naming = [...w.rows.values()].filter((r) => r.role === 'assistant' && r.text.includes('![') && r.text.includes(path)).sort((a, b) => b.seq - a.seq).slice(0, PICTURE_SEQS);
+      const naming = [...w.rows.values()]
+        .filter((r) => r.role === 'assistant' && r.text.includes('![') && r.text.includes(path) && markdownImageSources(r.text).includes(path))
+        .sort((a, b) => b.seq - a.seq)
+        .slice(0, PICTURE_SEQS);
       if (!naming.length) continue;
-      // Until when the newest of them may still be uploading.
+      // Until when each may still be uploading: none, for a row with no time.
       const wait = (r: RelayRow) => {
         const sent = Date.parse(r.at);
-        return Math.min(this.deps.clock.now(), Number.isFinite(sent) ? sent : this.deps.clock.now()) + PICTURE_WAIT_MS;
+        return Number.isFinite(sent) ? Math.min(start, sent) + PICTURE_WAIT_MS : 0;
       };
       for (;;) {
         while (w.replyRead) await w.replyRead.catch(() => {});
@@ -1652,7 +1696,7 @@ export class Relay {
           timer = this.deps.clock.setTimeout(expire, left);
           return;
         }
-        end(() => (opts.done ? reject(new RpcError(ErrorCode.other, `${name} hasn't answered yet. It's waiting for it in Convex.`)) : resolve(taken ?? { state: 'pending' })));
+        end(() => (opts.done ? reject(new NoAnswer(ErrorCode.other, `${name} hasn't answered yet. It's waiting for it in Convex.`)) : resolve(taken ?? { state: 'pending' })));
       };
       let timer = this.deps.clock.setTimeout(expire, ms);
       unsub = subscribe(
@@ -1677,7 +1721,11 @@ export class Relay {
   private async heldBody(w: Watch, seq: number | undefined): Promise<{ state: string | null }> {
     if (seq === undefined || !Number.isSafeInteger(seq)) throw new RpcError(ErrorCode.other, 'seq is required');
     const held = w.bodies.get(seq);
-    if (held) return { state: held.state };
+    if (held) {
+      // One opened while the backend had no read for its pictures: its places are in the thread's next read.
+      if (held.state === 'text' && pictureCount(held) && !w.toolPictures.has(seq) && (await this.toolPicturesOn(w.threadId, seq))) w.toolPictures.add(seq);
+      return { state: held.state };
+    }
     let body: HeldBody = null;
     try {
       body = (await this.read('sync:remoteBody', { threadId: w.threadId, seq })) as HeldBody;
@@ -1689,7 +1737,12 @@ export class Relay {
     // Nothing yet can mean it hasn't gone up yet, and with no `ok` it hasn't answered
     // yet (a tool still running in the background): asked again next time.
     if (body && (body.state !== 'text' || body.ok !== undefined)) {
-      if (body.state === 'text' && body.images && (await this.toolPicturesOn(w.threadId, seq))) w.toolPictures.add(seq);
+      if (body.state === 'text' && pictureCount(body)) {
+        const on = await this.toolPicturesOn(w.threadId, seq);
+        // The backend couldn't be asked: the stub stands, and it's asked again next time.
+        if (on === undefined) return { state: null };
+        if (on) w.toolPictures.add(seq);
+      }
       w.bodies.set(seq, body);
       this.emit(w);
     }

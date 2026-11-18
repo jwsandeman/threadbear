@@ -926,8 +926,8 @@ test("files.read for another runner goes to the relay, and without one it's refu
     create: async () => ({}),
     listFolder: async () => ({}),
     logins: async () => ({}),
-    readFile: async (runnerId: string, path: string, maxBytes?: number) => {
-      asked.push([runnerId, path, maxBytes]);
+    readFile: async (runnerId: string, path: string, maxBytes?: number, opts?: { reply?: boolean }) => {
+      asked.push([runnerId, path, maxBytes, ...(opts?.reply ? ['reply'] : [])]);
       return { path, size: 3, modifiedAt: '2026-11-17T00:00:00.000Z', mediaType: 'image/png', data: 'cG5n', truncated: false };
     },
   };
@@ -937,6 +937,10 @@ test("files.read for another runner goes to the relay, and without one it's refu
     const read = await c.call('files.read', { path: '/Users/b/inbox/p.png', runnerId: 'mac-mini', maxBytes: 1000 });
     assert.deepEqual(read, { path: '/Users/b/inbox/p.png', size: 3, modifiedAt: '2026-11-17T00:00:00.000Z', mediaType: 'image/png', data: 'cG5n', truncated: false });
     assert.deepEqual(asked, [['mac-mini', '/Users/b/inbox/p.png', 1000]]);
+    // A picture a reply names says so (`reply: true`), and nothing else counts as that.
+    await c.call('files.read', { path: '/Users/b/x/chart.png', runnerId: 'mac-mini', reply: true });
+    await c.call('files.read', { path: '/Users/b/x/chart.png', runnerId: 'mac-mini', reply: 'yes' });
+    assert.deepEqual(asked.slice(1), [['mac-mini', '/Users/b/x/chart.png', undefined, 'reply'], ['mac-mini', '/Users/b/x/chart.png', undefined]]);
     await assert.rejects(c.call('files.read', { runnerId: 'mac-mini' }), (e: { code: number }) => e.code === -32602);
   } finally { c.close(); await withRelay.server.close(); }
   const without = await serve({});

@@ -70,6 +70,13 @@ test("the owner key queues a picture command for the thread's runner, which may 
   assert.equal(await claimAndFinish(b.ctx, sync.claimUpload, sync.finishUpload, { ticket, storageId: b.file('shot'), bytes: 1 }), true);
   assert.equal(await call(b.ctx, sync.addHeldPicture, { key: MINI_KEY, threadId: 'B', seq: 14, index: 0, storageId: 'shot', mediaType: 'image/png', width: 10, height: 8 }), null);
   assert.deepEqual(await call(b.ctx, relay.toolPictureAt, { key: OWNER, threadId: 'B', seq: 14, index: 0 }), { url: 'https://files.example/shot', mediaType: 'image/png', width: 10, height: 8 });
+  // Asked for again while one waits (a tile pressed twice): the one command, not another.
+  const first = await call(b.ctx, relay.queueCommand, { key: OWNER, runnerId: MINI, threadId: 'B', kind: 'picture', args: { seq: 14, index: 1 } });
+  assert.equal(await call(b.ctx, relay.queueCommand, { key: OWNER, runnerId: MINI, threadId: 'B', kind: 'picture', args: { seq: 14, index: 1 } }), first);
+  assert.notEqual(await call(b.ctx, relay.queueCommand, { key: OWNER, runnerId: MINI, threadId: 'B', kind: 'picture', args: { seq: 14, index: 2 } }), first);
+  // Once that runner has taken it, the next asking is a new one.
+  assert.equal(await call(b.ctx, sync.takeCommand, { key: MINI_KEY, commandId: first }), true);
+  assert.notEqual(await call(b.ctx, relay.queueCommand, { key: OWNER, runnerId: MINI, threadId: 'B', kind: 'picture', args: { seq: 14, index: 1 } }), first);
   // A picture command needs a thread, and a runner key can't queue one.
   assert.equal(await outcome(call(b.ctx, relay.queueCommand, { key: OWNER, runnerId: MINI, kind: 'picture', args: { seq: 14, index: 0 } })), 'badArgs');
   assert.equal(await outcome(call(b.ctx, relay.queueCommand, { key: MINI_KEY, runnerId: MINI, threadId: 'B', kind: 'picture', args: { seq: 14, index: 0 } })), 'forbidden');

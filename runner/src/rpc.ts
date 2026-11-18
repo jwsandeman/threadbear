@@ -129,7 +129,7 @@ export type RelayHandler = {
   create(runnerId: string, params: Record<string, unknown>): Promise<unknown>;
   listFolder(runnerId: string, path: string): Promise<unknown>;
   /** One of another runner's messages' pictures, from the backend's file storage; any other path is refused. */
-  readFile?(runnerId: string, path: string, maxBytes?: number): Promise<unknown>;
+  readFile?(runnerId: string, path: string, maxBytes?: number, opts?: { reply?: boolean }): Promise<unknown>;
   logins(runnerId: string): Promise<unknown>;
 };
 
@@ -938,8 +938,8 @@ export class RpcServer {
         // A folder on another runner, for the folder browser on one of its threads.
         if (method === 'files.list' && typeof p.runnerId === 'string' && this.opts.relay) return this.opts.relay.listFolder(p.runnerId, reqString(p, 'path'));
         if (method === 'files.read' && typeof p.runnerId === 'string') {
-          // Only a picture of one of its messages that the relay holds (relay.ts readFile).
-          if (this.opts.relay?.readFile) return this.opts.relay.readFile(p.runnerId, reqString(p, 'path'), typeof p.maxBytes === 'number' ? p.maxBytes : undefined);
+          // Only a picture of one of its threads (relay.ts readFile); `reply` for one a reply names.
+          if (this.opts.relay?.readFile) return this.opts.relay.readFile(p.runnerId, reqString(p, 'path'), typeof p.maxBytes === 'number' ? p.maxBytes : undefined, p.reply === true ? { reply: true } : undefined);
           throw new RpcError(ErrorCode.other, 'Files on another runner are kept there for now.');
         }
         if (method === 'remoteThreads.logins') {

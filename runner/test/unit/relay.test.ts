@@ -1460,8 +1460,9 @@ test('a backend without the tool picture read keeps the line counting them, and 
   assert.deepEqual(result.images, []);
   assert.match(String(result.text), /1 picture is kept on mac-mini\.$/);
   await assert.rejects(h.relay.readFile('mac-mini', toolPath(14, 1)), /kept there for now/);
-  // Another tool opened meanwhile doesn't ask again.
+  // Another tool opened meanwhile doesn't ask again, and nor does that one opened again.
   await h.relay.call(T, 'threads.heldBody', { threadId: T, seq: 5 });
+  await h.relay.call(T, 'threads.heldBody', { threadId: T, seq: 14 });
   assert.equal(toolCalls(h).length, 1);
   // Ten minutes on, with the backend updated, the next tool opened gets its places.
   has = true;
@@ -1473,6 +1474,30 @@ test('a backend without the tool picture read keeps the line counting them, and 
   await h.relay.call('second', 'threads.heldBody', { threadId: 'second', seq: 14 });
   const later = publishedEvents(h).filter((e) => e.seq === 14 * SCALE + 6).at(-1)!;
   assert.equal(later.images!.length, 1);
+  // And the one opened before, opened again: its place is in the thread's next read.
+  assert.deepEqual(await h.relay.call(T, 'threads.heldBody', { threadId: T, seq: 14 }), { state: 'text' });
+  const { events } = (await h.relay.call(T, 'threads.events', { threadId: T })) as { events: Shown[] };
+  assert.deepEqual(events.find((e) => e.seq === 14 * SCALE + 6)!.images, [{ path: toolPath(14, 1), mediaType: 'image/png' }]);
+});
+
+test("a tool opened while the backend can't be asked about its pictures stays held, and is asked again when it's next opened", async () => {
+  let down = true;
+  const h = harness({
+    body: () => shots(2),
+    toolPicture: () => {
+      if (down) throw new Error('fetch failed');
+      return null;
+    },
+  });
+  await h.relay.call(T, 'threads.events', { threadId: T });
+  h.subscribed.add(T);
+  await h.relay.call(T, 'threads.subscribe', { threadId: T, afterSeq: 14 * SCALE + 7 });
+  assert.deepEqual(await h.relay.call(T, 'threads.heldBody', { threadId: T, seq: 14 }), { state: null });
+  assert.equal(publishedEvents(h).find((e) => e.seq === 14 * SCALE + 6), undefined);
+  down = false;
+  assert.deepEqual(await h.relay.call(T, 'threads.heldBody', { threadId: T, seq: 14 }), { state: 'text' });
+  assert.equal(publishedEvents(h).find((e) => e.seq === 14 * SCALE + 6)!.images!.length, 2);
+  assert.equal(toolCalls(h).length, 2);
 });
 
 test("reading a tool's picture asks its runner for that one, and answers with it once it's up", async () => {
@@ -1523,6 +1548,43 @@ test("a tool's picture that runner won't hand over says why, and one that never 
   assert.equal(pictureCommands(h).length, 3);
 });
 
+test("a tool's pictures are asked of its runner one at a time, and one that gets no answer fails those waiting behind it", async () => {
+  const h = harness({ body: () => shots(3) });
+  await h.relay.call(T, 'threads.events', { threadId: T });
+  await h.relay.call(T, 'threads.heldBody', { threadId: T, seq: 14 });
+  const outcomes: string[] = [];
+  const tiles = [1, 2, 3].map((n) => h.relay.readFile('mac-mini', toolPath(14, n)).then(() => outcomes.push(`${n} came`), (e) => outcomes.push(`${n}: ${(e as Error).message}`)));
+  await patiently(() => pictureCommands(h).length === 1);
+  await tick();
+  assert.deepEqual(pictureCommands(h).map((c) => c.args.args), [{ seq: 14, index: 0 }]);
+  // The first is refused there: the next one goes.
+  h.subs.get('relay:commandState')![0]!.onUpdate({ state: 'failed', note: 'That picture is gone.' });
+  await patiently(() => pictureCommands(h).length === 2);
+  assert.deepEqual(pictureCommands(h)[1]!.args.args, { seq: 14, index: 1 });
+  // That one gets no answer in thirty seconds: the third isn't sent after it.
+  await patiently(() => (h.subs.get('relay:commandState')?.length ?? 0) === 2);
+  h.clock.advance(30_000);
+  await Promise.all(tiles);
+  assert.deepEqual(outcomes.sort(), ['1: That picture is gone.', "2: mac-mini hasn't answered yet. It's waiting for it in Convex.", "3: mac-mini hasn't answered yet. It's waiting for it in Convex."]);
+  assert.equal(pictureCommands(h).length, 2);
+  // Asked for again (a click on the tile), it's sent.
+  const again = h.relay.readFile('mac-mini', toolPath(14, 3));
+  await patiently(() => pictureCommands(h).length === 3);
+  assert.deepEqual(pictureCommands(h)[2]!.args.args, { seq: 14, index: 2 });
+  h.clock.advance(30_000);
+  await assert.rejects(again, /hasn't answered yet/);
+});
+
+test("a count of pictures that isn't a whole number gives no places, and none is asked for", async () => {
+  const h = harness({ body: () => ({ ...shots(2), images: 2.5 }) });
+  await h.relay.call(T, 'threads.events', { threadId: T });
+  await h.relay.call(T, 'threads.heldBody', { threadId: T, seq: 14 });
+  const { events } = (await h.relay.call(T, 'threads.events', { threadId: T })) as { events: Shown[] };
+  assert.deepEqual(events.find((e) => e.seq === 14 * SCALE + 6)!.images, []);
+  await assert.rejects(h.relay.readFile('mac-mini', toolPath(14, 2)), /kept there for now/);
+  assert.equal(toolCalls(h).length + pictureCommands(h).length, 0);
+});
+
 test("only a picture of a tool that was opened is asked for: no other tool's, thread's or runner's", async () => {
   const h = harness({ body: (a) => (a.seq === 14 ? shots(2) : null) });
   await h.relay.call(T, 'threads.events', { threadId: T });
@@ -1538,47 +1600,69 @@ test("only a picture of a tool that was opened is asked for: no other tool's, th
 
 // Pictures in an agent's reply there (`![alt](/path/chart.png)`): that
 // runner uploads them for the phone and the website. The reply's event is
-// unchanged; the app asks for the address the markdown names.
-const replyRows = (age: number): RelayRow[] => [
+// unchanged; the app asks for the address the markdown names, saying it's a
+// reply's (files.read's `reply: true`).
+const replyRows = (age: number, at = ago(age)): RelayRow[] => [
   { seq: 3, role: 'user', text: 'Chart it', turn: 'aaaa1111', at: ago(age + 10) },
-  { seq: 5, role: 'assistant', text: 'Here: ![the chart](/Users/b/x/chart.png) and ![home](~/shots/a.png) and ![web](https://example.com/y.png)', summary: true, turn: 'aaaa1111', at: ago(age) },
+  { seq: 5, role: 'assistant', text: 'Here: ![the chart](/Users/b/x/chart.png) and ![home](~/shots/a.png) and ![web](https://example.com/y.png) and ![pin](/Users/b/pinned.png)', summary: true, turn: 'aaaa1111', at },
   { seq: 7, role: 'assistant', text: 'No picture in this one.', turn: 'aaaa1111', at: ago(age) },
 ];
 const chart = { seq: 5, path: '/Users/b/x/chart.png', src: '/Users/b/x/chart.png', url: 'https://files.example/chart', mediaType: 'image/png', width: 400, height: 300 };
 const home = { seq: 5, path: '/Users/b/shots/a.png', src: '~/shots/a.png', url: 'https://files.example/a', mediaType: 'image/png' };
+const replyRead = (h: ReturnType<typeof harness>, address: string, runnerId = 'mac-mini') => h.relay.readFile(runnerId, address, undefined, { reply: true });
 
-test("a reply's picture is read when it's asked for, by the address the reply names or its path there", async () => {
-  const h = harness({ rows: replyRows(3600), pictures: () => [chart, home, { seq: 5, path: '/Users/b/pinned.png', pinned: true, url: 'https://files.example/pinned', mediaType: 'image/png' }] });
+test("a reply's picture is read when it's asked for, by the address the reply names", async () => {
+  // Rows the backend shouldn't have, to see they're not taken: a pinned one and a web address.
+  const pinned = { seq: 5, path: '/Users/b/pinned.png', src: '/Users/b/pinned.png', pinned: true, url: 'https://files.example/pinned', mediaType: 'image/png' };
+  const web = { seq: 5, path: '/tmp/y.png', src: 'https://example.com/y.png', url: 'https://files.example/y', mediaType: 'image/png' };
+  const h = harness({ rows: replyRows(3600), pictures: () => [chart, home, pinned, web] });
   const page = (await h.relay.call(T, 'threads.events', { threadId: T })) as { events: Shown[] };
   // The reply is as that runner sent it, and reading the thread reads no pictures.
   assert.equal(page.events.find((e) => e.type === 'assistant.text')!.text, replyRows(3600)[1]!.text);
   assert.equal(pictureCalls(h).length, 0);
-  const read = (await h.relay.readFile('mac-mini', '/Users/b/x/chart.png')) as { path: string; size: number; modifiedAt: string; mediaType: string; data: string; truncated: boolean };
+  // Not a reply's picture unless the app says so: refused as any other file there, with nothing read.
+  await assert.rejects(h.relay.readFile('mac-mini', '/Users/b/x/chart.png'), /kept there for now/);
+  assert.equal(pictureCalls(h).length, 0);
+  const read = (await replyRead(h, '/Users/b/x/chart.png')) as { path: string; size: number; modifiedAt: string; mediaType: string; data: string; truncated: boolean };
   const bytes = 'bytes at https://files.example/chart';
   assert.deepEqual(read, { path: '/Users/b/x/chart.png', size: bytes.length, modifiedAt: ago(3600), mediaType: 'image/png', data: Buffer.from(bytes).toString('base64'), truncated: false });
   // Only the reply that names it was read.
   assert.deepEqual(pictureCalls(h).map((c) => c.args), [{ key: 'owner', threadId: T, seqs: [5] }]);
-  // As written with ~, and by the path it stands for.
-  for (const path of ['~/shots/a.png', '/Users/b/shots/a.png']) {
-    const other = (await h.relay.readFile('mac-mini', path)) as { data: string };
-    assert.equal(Buffer.from(other.data, 'base64').toString(), 'bytes at https://files.example/a', path);
-  }
+  // As written with ~.
+  const other = (await replyRead(h, '~/shots/a.png')) as { data: string };
+  assert.equal(Buffer.from(other.data, 'base64').toString(), 'bytes at https://files.example/a');
   assert.equal(pictureCalls(h).length, 1, 'held from the one read');
-  // A pinned picture, a web address and a file no reply names stay there.
-  for (const path of ['/Users/b/pinned.png', 'https://example.com/y.png', '/Users/b/.ssh/id_ed25519']) await assert.rejects(h.relay.readFile('mac-mini', path), /kept there for now/, path);
-  await assert.rejects(h.relay.readFile('cloud', '/Users/b/x/chart.png'), /kept there for now/);
+  // A pinned picture, a web address, the path an address stands for, part of
+  // an address and a file no reply names stay there, with nothing more read.
+  for (const path of ['/Users/b/pinned.png', 'https://example.com/y.png', '/Users/b/shots/a.png', '/Users/b/x', 's', '/Users/b/.ssh/id_ed25519']) await assert.rejects(replyRead(h, path), /kept there for now/, path);
+  await assert.rejects(replyRead(h, '/Users/b/x/chart.png', 'cloud'), /kept there for now/);
+  assert.equal(pictureCalls(h).length, 1);
+  // Held as a reply's, it still isn't any other file's answer.
+  await assert.rejects(h.relay.readFile('mac-mini', '/Users/b/x/chart.png'), /kept there for now/);
+});
+
+test("a reply's picture never answers with this runner's own file at that address", async () => {
+  // The harness's inbox answers for /inbox/…, as for a message this Mac has just sent there.
+  const mine = '/inbox/p.png';
+  const rows = replyRows(3600);
+  rows[1] = { ...rows[1]!, text: `![mine](${mine})` };
+  const h = harness({ rows, pictures: () => [] });
+  await h.relay.call(T, 'threads.events', { threadId: T });
+  await assert.rejects(replyRead(h, mine), /kept there for now/);
+  const sent = (await h.relay.readFile('mac-mini', mine)) as { data: string };
+  assert.equal(Buffer.from(sent.data, 'base64').toString(), `bytes of ${mine}`);
 });
 
 test("a reply's picture that never went up is asked for once, then again half a minute on", async () => {
   let up: unknown[] = [];
   const h = harness({ rows: replyRows(3600), pictures: () => up });
   await h.relay.call(T, 'threads.events', { threadId: T });
-  await assert.rejects(h.relay.readFile('mac-mini', '/Users/b/x/chart.png'), /kept there for now/);
-  await assert.rejects(h.relay.readFile('mac-mini', '/Users/b/x/chart.png'), /kept there for now/);
+  await assert.rejects(replyRead(h, '/Users/b/x/chart.png'), /kept there for now/);
+  await assert.rejects(replyRead(h, '/Users/b/x/chart.png'), /kept there for now/);
   assert.equal(pictureCalls(h).length, 1);
   up = [chart];
   h.clock.advance(30_001);
-  const read = (await h.relay.readFile('mac-mini', '/Users/b/x/chart.png')) as { data: string };
+  const read = (await replyRead(h, '/Users/b/x/chart.png')) as { data: string };
   assert.equal(Buffer.from(read.data, 'base64').toString(), 'bytes at https://files.example/chart');
   assert.equal(pictureCalls(h).length, 2);
 });
@@ -1587,7 +1671,7 @@ test("a reply that has just come is read again until its picture is up, for twen
   let up: unknown[] = [];
   const h = harness({ rows: replyRows(5), pictures: () => up });
   await h.relay.call(T, 'threads.events', { threadId: T });
-  const reading = h.relay.readFile('mac-mini', '/Users/b/x/chart.png');
+  const reading = replyRead(h, '/Users/b/x/chart.png');
   await patiently(() => pictureCalls(h).length === 1);
   await tick();
   h.clock.advance(2000);
@@ -1599,10 +1683,10 @@ test("a reply that has just come is read again until its picture is up, for twen
   assert.equal(Buffer.from(read.data, 'base64').toString(), 'bytes at https://files.example/chart');
   assert.equal(pictureCalls(h).length, 3);
   // Its other picture, asked for at the same moment, shares the read.
-  await assert.rejects(Promise.race([h.relay.readFile('mac-mini', '~/shots/a.png'), tick().then(() => Promise.reject(new Error('still waiting')))]), /still waiting/);
+  await assert.rejects(Promise.race([replyRead(h, '~/shots/a.png'), tick().then(() => Promise.reject(new Error('still waiting')))]), /still waiting/);
   assert.equal(pictureCalls(h).length, 3);
   // One that never comes gives up when the twenty seconds from its sending end.
-  const never = h.relay.readFile('mac-mini', '~/shots/a.png');
+  const never = replyRead(h, '~/shots/a.png');
   let failed: unknown;
   never.catch((e) => (failed = e));
   for (let i = 0; i < 12 && !failed; i++) {
@@ -1613,6 +1697,25 @@ test("a reply that has just come is read again until its picture is up, for twen
   await assert.rejects(never, /kept there for now/);
 });
 
+test("a reply stamped ahead of this Mac's clock is waited on for twenty seconds from the asking, and one with no time not at all", async () => {
+  const h = harness({ rows: replyRows(0, new Date(Date.now() + 5 * 60_000).toISOString()), pictures: () => [] });
+  await h.relay.call(T, 'threads.events', { threadId: T });
+  let failed: unknown;
+  const ahead = replyRead(h, '/Users/b/x/chart.png');
+  ahead.catch((e) => (failed = e));
+  for (let i = 0; i < 12 && !failed; i++) {
+    await tick();
+    await tick();
+    h.clock.advance(2000);
+  }
+  await assert.rejects(ahead, /kept there for now/);
+  assert.ok(pictureCalls(h).length <= 11, `${pictureCalls(h).length} reads`);
+  const timeless = harness({ rows: replyRows(0, 'not a date'), pictures: () => [] });
+  await timeless.relay.call(T, 'threads.events', { threadId: T });
+  await assert.rejects(replyRead(timeless, '/Users/b/x/chart.png'), /kept there for now/);
+  assert.equal(pictureCalls(timeless).length, 1);
+});
+
 test('a backend without the pictures read answers a reply picture as kept there, and is not asked again for ten minutes', async () => {
   const h = harness({
     rows: replyRows(3600),
@@ -1621,8 +1724,8 @@ test('a backend without the pictures read answers a reply picture as kept there,
     },
   });
   await h.relay.call(T, 'threads.events', { threadId: T });
-  await assert.rejects(h.relay.readFile('mac-mini', '/Users/b/x/chart.png'), /kept there for now/);
+  await assert.rejects(replyRead(h, '/Users/b/x/chart.png'), /kept there for now/);
   h.clock.advance(60_000);
-  await assert.rejects(h.relay.readFile('mac-mini', '/Users/b/x/chart.png'), /kept there for now/);
+  await assert.rejects(replyRead(h, '/Users/b/x/chart.png'), /kept there for now/);
   assert.equal(pictureCalls(h).length, 1);
 });

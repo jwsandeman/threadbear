@@ -77,6 +77,8 @@ export type Play = {
   loginMoved(): void;
   /** The agent runs a command, which hands back this text and these pictures (paths of real files). */
   tool(command: string, text: string, images?: ImageRef[]): void;
+  /** Writes a file into the thread's media folder, where a tool's pictures are kept, and gives its path. */
+  media(name: string, bytes: Uint8Array): string;
 };
 
 export async function threeWays(play: (p: Play) => void | Promise<void>, opts: { full?: boolean } = {}) {
@@ -162,7 +164,7 @@ export async function threeWays(play: (p: Play) => void | Promise<void>, opts: {
   };
   const views = { here: here(), relay: await viaRelay(), phone: await viaPhone() };
   await sync.stop();
-  return { views, refused, backend: b, threadId: id, runnerId: RUNNER, relay, relayEvents, post, upload, home: h.cfg.home };
+  return { views, refused, backend: b, threadId: id, runnerId: RUNNER, relay, relayEvents, post, sync, home: h.cfg.home };
 }
 
 // Without a subscriber of its own a ConvexSync opens a real Convex client for its url, and
@@ -211,6 +213,13 @@ export async function playInto(post: Post, runner: { key: string; runnerId: stri
         s.out({ kind: 'event', event: { type: 'tool.result', itemId: id, ok: true, text: 'ok', truncated: false, images: [] } });
         const answered = [...(h.runner.mustGet(thread.id).rt.turn?.messages ?? [])];
         s.result('completed', undefined, undefined, answerAll ? { answered } : {});
+      },
+      media: (name, bytes) => {
+        const dir = path.join(h.cfg.home, 'threads', thread.id, 'media');
+        fs.mkdirSync(dir, { recursive: true });
+        const file = path.join(dir, name);
+        fs.writeFileSync(file, bytes);
+        return file;
       },
       tool: (command, text, images = []) => {
         const id = `t${++n}`;

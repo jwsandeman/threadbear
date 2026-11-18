@@ -5891,11 +5891,17 @@ only way the app opens another runner's thread.
   `null | { url, mediaType, width?, height? }` (the `heldPictures` row). With
   none, it queues a `picture` command `{ seq, index }` for that runner
   (`relay:queueCommand`), waits up to 30 seconds for it to finish and reads
-  again. That runner uploads the picture for a day, by the phone's rules (Sync,
-  "A tool's picture"). A command that fails is `-32000` with its note. A path
-  the relay didn't give for a held body is `-32000`. Without the query (it has
-  no API version), the result's text counts the pictures as kept on that runner
-  and the backend is asked again after 10 minutes.
+  again. A thread's pictures are asked for one command at a time; one that gets
+  no answer in its 30 seconds fails the asks waiting behind it with the same
+  error. `relay:queueCommand` returns the pending `picture` command for the
+  same thread, `seq` and `index` when there is one. That runner uploads the
+  picture for a day, by the phone's rules (Sync, "A tool's picture"). A command
+  that fails is `-32000` with its note. A path the relay didn't give for a held
+  body is `-32000`. Without the query (it has no API version), the result's
+  text counts the pictures as kept on that runner and the backend is asked
+  again after 10 minutes, when a tool is next opened; a tool opened before
+  then gets its places in the thread's next `threads.events`. If the backend
+  can't be asked, `threads.heldBody` answers `{ state: null }`.
 - **Pictures in messages.** A `user.message` whose row says it came with pictures
   (`[Picture N]` markers, or the `[N pictures]` line) gets its `images` from that
   runner's uploads (`replyImages` rows with `src` `picture:N`, written unless its
@@ -5924,16 +5930,19 @@ only way the app opens another runner's thread.
   path is `-32000`, `Files on another runner are kept there for now.` The query has no API version: a backend without it is asked again every
   10 minutes, and messages show as their words meanwhile. Pinned
   pictures stay with the phone and the website.
-- **Pictures in replies.** `files.read { path, runnerId }` also answers for a
-  picture an `assistant.text` of that runner's thread names in its markdown
-  (`![alt](address)`), from that runner's uploads (`replyImages` rows, whose
-  `src` is the address as written). `path` is that address, or the file's path
-  on that runner's Mac. The held rows of that runner's threads whose text has
-  the path are read through `relay:picturesAtSeqs`, at most 50 a thread, when
-  it's first asked for and again if 30 seconds have passed; a row less than 20
-  seconds old is read again every 2 seconds until then. One that isn't up is
-  `-32000`, `Files on another runner are kept there for now.` The event itself
-  is unchanged.
+- **Pictures in replies.** `files.read { path, runnerId, reply: true }` answers
+  for a picture an `assistant.text` of that runner's thread names in its
+  markdown (`![alt](address)`), from that runner's uploads (`replyImages` rows,
+  whose `src` is the address as written). `path` is that address: an absolute
+  path, a `~/` path or a `file:///` URL, never a web address. With `reply`,
+  nothing else answers: not a message's or a tool's picture, and not this
+  runner's inbox. Without it, a reply's picture is `-32000`. The held rows of
+  that runner's threads with a picture of that address are read through
+  `relay:picturesAtSeqs`, at most 50 a thread, when it's first asked for and
+  again if 30 seconds have passed; a row less than 20 seconds old is read again
+  every 2 seconds until then, and never past 20 seconds from the asking. One
+  that isn't up is `-32000`, `Files on another runner are kept there for now.`
+  The event itself is unchanged.
 - **Reads.** A thread is watched only while a client is subscribed to it,
   through `relay:remoteTail` (its newest 15 rows) and `relay:remoteThread`
   (its one row); a minute after the last subscriber goes, both stop. Older

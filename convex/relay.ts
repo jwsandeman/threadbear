@@ -350,6 +350,9 @@ export function commandArgs(kind: Kind, raw: unknown): Record<string, unknown> {
   return out;
 }
 
+// How many of a runner's waiting commands are looked through for a picture already asked for.
+const PICTURE_WAITING_READ = 100;
+
 /**
  * Asks another runner to act on one of its threads (or, for a create or a
  * call, on itself). A thread's command goes to the runner the backend says
@@ -370,6 +373,13 @@ export const queueCommand = mutation({
       if (t.runnerId !== runnerId) throw forbidden("queue that: the thread isn't that runner's");
     } else if (kind !== 'create' && kind !== 'call') {
       throw new ConvexError({ kind: 'badArgs', message: `a ${kind} needs a thread` });
+    }
+    if (kind === 'picture') {
+      // A tile pressed again while its picture waits for that runner: the same command.
+      const want = commandArgs(kind, args);
+      const waiting = await ctx.db.query('commands').withIndex('by_runner_state', (q) => q.eq('runnerId', runnerId).eq('state', 'pending')).take(PICTURE_WAITING_READ);
+      const same = waiting.find((c) => c.kind === 'picture' && c.threadId === threadId && c.args?.seq === want.seq && c.args?.index === want.index);
+      if (same) return same._id;
     }
     const images = kind === 'send' || kind === 'create' ? await commandPictures(ctx, (args as { images?: unknown } | null)?.images) : [];
     const commandId = await ctx.db.insert('commands', { runnerId, ...(threadId !== undefined ? { threadId } : {}), kind, args: { ...commandArgs(kind, args), ...(images.length ? { images } : {}), from: 'mac' }, state: 'pending', createdAt: Date.now() });

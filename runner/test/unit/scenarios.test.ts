@@ -136,12 +136,11 @@ test("another Mac gets a tool's pictures when it asks, and a reply's from the ba
   const png = makePng(8, 5);
   const chart = path.join(dir, 'chart.png');
   fs.writeFileSync(chart, png);
-  const shot = path.join(dir, 'shot.png');
-  fs.writeFileSync(shot, png);
   const said = `Here it is: ![the chart](${chart})`;
-  const { relay, relayEvents, runnerId, refused, threadId, post, upload } = await threeWays(
+  const { relay, relayEvents, runnerId, refused, threadId, post, sync } = await threeWays(
     (p) => {
-      p.tool('screencapture shot.png', 'saved', [{ path: shot, mediaType: 'image/png' }]);
+      // Where a tool's pictures are kept: the thread's own media folder.
+      p.tool('screencapture shot.png', 'saved', [{ path: p.media('shot.png', png), mediaType: 'image/png' }]);
       p.say(said);
       p.endTurn({ needs: 'nothing' });
     },
@@ -151,7 +150,7 @@ test("another Mac gets a tool's pictures when it asks, and a reply's from the ba
 
   // The reply is as on the Mac that has the thread, and its picture answers by the address in it.
   assert.equal(relayEvents.find((e) => e.type === 'assistant.text' && String(e.text).includes('chart'))!.text, said);
-  const drawn = (await relay.readFile(runnerId, chart)) as { data: string; mediaType: string; truncated: boolean };
+  const drawn = (await relay.readFile(runnerId, chart, undefined, { reply: true })) as { data: string; mediaType: string; truncated: boolean };
   assert.deepEqual([Buffer.from(drawn.data, 'base64'), drawn.mediaType, drawn.truncated], [Buffer.from(png), 'image/png', false]);
 
   // The tool, opened: its result has a place for its picture.
@@ -170,10 +169,10 @@ test("another Mac gets a tool's pictures when it asks, and a reply's from the ba
   await assert.rejects(relay.readFile(runnerId, place), /didn't send that picture/);
   const pending = (await post('query', 'sync:pendingCommands', { key: 'owner-key', runnerId })) as { commandId: string; kind: string; threadId: string; args: Record<string, unknown> }[];
   assert.deepEqual(pending.map((c) => [c.kind, c.threadId, c.args.seq, c.args.index]), [['picture', threadId, seq, 0]]);
-  // That runner's part (sync.ts sendHeldPicture, full-sync.test.ts): take it, upload the picture, finish.
+  // That runner's part, by its own sync: it takes the command, finds the
+  // tool's picture in the thread's media folder and uploads it.
   assert.equal(await post('mutation', 'sync:takeCommand', { key: 'owner-key', commandId: pending[0]!.commandId }), true);
-  const storageId = await upload('', new Uint8Array(png));
-  await post('mutation', 'sync:addHeldPicture', { key: 'owner-key', threadId, seq, index: 0, storageId, mediaType: 'image/png', width: 8, height: 5 });
+  await (sync as unknown as { sendHeldPicture(threadId: string, seq: number, index: number): Promise<void> }).sendHeldPicture(threadId, pending[0]!.args.seq as number, pending[0]!.args.index as number);
   const read = (await relay.readFile(runnerId, place)) as { data: string; mediaType: string; truncated: boolean };
   assert.deepEqual([Buffer.from(read.data, 'base64'), read.mediaType, read.truncated], [Buffer.from(png), 'image/png', false]);
   assert.deepEqual(refused, []);
