@@ -1091,8 +1091,10 @@ Mac to pick up, the way your phone does, so there's no network link between
 the two Macs to set up. Pictures you paste into a message, or into a new
 thread there, go with it (up to 6, 10 MB each), held in Convex only until
 that Mac has fetched them. You see its messages, with the pictures pasted
-into them, and a line for each tool it used; the tool output, diffs and
-tools' pictures stay on that Mac for now, and a tool row says so. A pasted
+into them, and a line for each tool it used; the tool output and diffs
+stay on that Mac, and a tool row says so, unless that Mac has full sync
+on: then opening a tool shows what it did and the pictures it handed
+back (the first 30). A pasted
 picture shows a moment after its message, once that Mac has sent it up
 (not at all with `"sync": { "pastedPictures": false }` there, or for a
 picture over 10 MB). Editing a message, its highlights and patches, and

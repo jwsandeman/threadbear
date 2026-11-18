@@ -249,6 +249,7 @@ export const ACCESS: Record<string, Access> = {
   remoteBody: 'owner',
   // The uploaded pictures of another runner's messages, with their URLs.
   picturesAtSeqs: 'owner',
+  toolPictureAt: 'owner',
   // Asking another runner (relay.ts): a runner key files and reads back its
   // own requests; only the main Mac's runner reads any and answers them.
   fileRequest: 'own',

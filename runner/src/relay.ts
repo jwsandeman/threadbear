@@ -23,6 +23,14 @@
 // without that read (asked again every PICTURES_RETRY_MS) leaves messages as
 // their words alone.
 //
+// A tool's pictures and a reply's come the same way, through `files.read`.
+// An opened tool's result has a place for each picture it handed back
+// (toolPicturePath); reading one asks that runner to upload it, as the
+// phone's tap does (a `picture` command, held a day), unless it's already
+// held. A reply's event is as that runner sent it; a picture its markdown
+// names is read from that runner's uploads (replyImages again) when the
+// app asks for it by that address.
+//
 // Seqs. The rows' seqs are the other runner's event seqs, with gaps where
 // events weren't mirrored. Each row's seq s becomes eight here: 8s a
 // turn.started, 8s+1 the row's own event, 8s+2 a tool's result, 8s+3 and
@@ -164,6 +172,19 @@ const FILE_MOST_BYTES = 48 * 1024 * 1024;
 const NOT_UP = /^threadbear-relay:([^/]+)\/(\d{1,16})\/Picture (\d{1,3})$/;
 const notUpPath = (threadId: string, seq: number, n: number) => `threadbear-relay:${threadId}/${seq}/Picture ${n}`;
 const KEPT_THERE = 'Files on another runner are kept there for now.';
+// One picture a tool handed back, held for a day once that runner has
+// uploaded it for a `picture` command (convex/relay.ts toolPictureAt), and
+// the path the relay gives the app for it: thread, the tool's row seq and
+// which picture, from 1.
+const TOOL_PICTURE_FN = 'relay:toolPictureAt';
+const TOOL_PICTURE = /^threadbear-relay:([^/]+)\/(\d{1,16})\/Tool picture (\d{1,3})$/;
+const toolPicturePath = (threadId: string, seq: number, n: number) => `threadbear-relay:${threadId}/${seq}/Tool picture ${n}`;
+// The most places one tool's pictures get; any more are counted in its text.
+const TOOL_PICTURES_MOST = 30;
+// How long that runner has to upload a picture it's asked for.
+const TOOL_PICTURE_ASK_MS = 30_000;
+// How often a reply that has just come is read again for a picture that isn't up yet.
+const REPLY_POLL_MS = 2_000;
 
 // sync:remoteBody's answer: null, or one that's gone, says nothing new.
 export type HeldBody =
@@ -200,7 +221,11 @@ type Page = { messages: RelayRow[]; hasMore: boolean };
 export type RelayPicture = { n: number; path: string; url: string; mediaType: string; width?: number; height?: number };
 // The pictures held for a thread's rows, by row seq, and the rows whose
 // message waits for its pictures (left out of the events until then).
-export type RelayPictures = { held: Map<number, RelayPicture[]>; waiting?: Set<number> };
+// `tools`: the opened tools whose pictures the app can ask for, by row seq.
+export type RelayPictures = { held: Map<number, RelayPicture[]>; waiting?: Set<number>; tools?: Set<number> };
+// One uploaded picture of a reply: `src` is its address as the reply's
+// markdown has it, `path` the file it names on that runner's Mac.
+type ReplyPicture = { src: string; path: string; url: string; mediaType: string };
 // files.read's answer (files.ts FileRead).
 export type RelayFile = { path: string; size: number; modifiedAt: string; mediaType: string; data: string; truncated: boolean };
 
@@ -326,6 +351,12 @@ type Watch = {
   // A read of pictures under way, and when one that failed may be tried again.
   pictureRead?: Promise<void>;
   pictureAgainAt?: number;
+  // Opened tools whose pictures the app has been given places for.
+  toolPictures: Set<number>;
+  // Uploaded pictures of its replies, by row seq, and when each row's were last read.
+  replyPictures: Map<number, ReplyPicture[]>;
+  replyAsked: Map<number, number>;
+  replyRead?: Promise<void>;
 };
 
 export type RelayEvent = { seq: number; ts: string; threadId: string; turnId?: string; type: string; [k: string]: unknown };
@@ -481,9 +512,15 @@ export function relayEvents(threadId: string, rows: RelayRow[], row: RelayThread
           const shown = diffs.slice(0, free.length);
           shown.forEach((d, n) => out.push(env(free[n]!, r, { type: 'edit.diff', itemId, path: d.path, hunks: d.hunks })));
           const more = diffs.slice(shown.length).map((d) => d.path);
-          const pictures = body.images ? `${body.images === 1 ? '1 picture is' : `${body.images} pictures are`} kept on ${runnerName}.` : '';
-          const notes = [more.length ? `Also changed: ${more.join(', ')}` : '', pictures].filter(Boolean).join('\n');
-          out.push(env(base + 6, r, { type: 'tool.result', itemId, ok: body.ok !== false, text: body.text + (notes ? `${body.text ? '\n\n' : ''}${notes}` : ''), truncated: body.truncated === true || body.cut === true, images: [] }));
+          // Its pictures: a place for each the app can ask for (files.read),
+          // and a count of the rest, or of them all when it can't.
+          const count = typeof body.images === 'number' && Number.isSafeInteger(body.images) && body.images > 0 ? body.images : 0;
+          const places = pictures?.tools?.has(r.seq) ? Math.min(count, TOOL_PICTURES_MOST) : 0;
+          const kept = count - places;
+          const keptLine = kept ? `${kept === 1 ? `1${places ? ' more' : ''} picture is` : `${kept}${places ? ' more' : ''} pictures are`} kept on ${runnerName}.` : '';
+          const notes = [more.length ? `Also changed: ${more.join(', ')}` : '', keptLine].filter(Boolean).join('\n');
+          const images = Array.from({ length: places }, (_, n) => ({ path: toolPicturePath(threadId, r.seq, n + 1), mediaType: 'image/png' }));
+          out.push(env(base + 6, r, { type: 'tool.result', itemId, ok: body.ok !== false, text: body.text + (notes ? `${body.text ? '\n\n' : ''}${notes}` : ''), truncated: body.truncated === true || body.cut === true, images }));
         }
       }
     }
@@ -566,7 +603,7 @@ export function mergeTail(rows: Map<number, RelayRow>, tail: Page): { gapAfter?:
  * again if the app scrolls back to it (olderMore), and seqs given for it
  * stop counting, so emit's oldest seq moves up with it. A card's seqs stay.
  */
-export function trimHeld(w: { rows: Map<number, RelayRow>; olderMore: boolean; given: Set<number>; bodies: Map<number, unknown>; cards: Map<string, Card>; pictures?: Map<number, unknown>; pictureAsked?: Set<number>; pictureWait?: Map<number, number>; pictureWaited?: Set<number>; pictureFresh?: Map<number, number> }): void {
+export function trimHeld(w: { rows: Map<number, RelayRow>; olderMore: boolean; given: Set<number>; bodies: Map<number, unknown>; cards: Map<string, Card>; pictures?: Map<number, unknown>; pictureAsked?: Set<number>; pictureWait?: Map<number, number>; pictureWaited?: Set<number>; pictureFresh?: Map<number, number>; toolPictures?: Set<number>; replyPictures?: Map<number, unknown>; replyAsked?: Map<number, number> }): void {
   if (w.rows.size <= MAX_HELD + TRIM_SLACK) return;
   const seqs = [...w.rows.keys()].sort((a, b) => a - b);
   const drop = seqs.length - MAX_HELD;
@@ -578,6 +615,9 @@ export function trimHeld(w: { rows: Map<number, RelayRow>; olderMore: boolean; g
     w.pictureWait?.delete(seqs[n]!);
     w.pictureWaited?.delete(seqs[n]!);
     w.pictureFresh?.delete(seqs[n]!);
+    w.toolPictures?.delete(seqs[n]!);
+    w.replyPictures?.delete(seqs[n]!);
+    w.replyAsked?.delete(seqs[n]!);
   }
   w.olderMore = true;
   const from = seqs[drop]! * SCALE;
@@ -641,6 +681,12 @@ export class Relay {
   private sweepTimer?: TimerHandle;
   // Until when the backend is taken to have no pictures read (PICTURES_RETRY_MS).
   private picturesOffUntil = 0;
+  // Whether the backend hands over tools' pictures: not asked yet, known
+  // to, or until when it's taken not to (PICTURES_RETRY_MS).
+  private toolPicturesKnown = false;
+  private toolPicturesOffUntil = 0;
+  // Tool pictures being fetched, by path, so two tiles of one ask once.
+  private toolPictureReads = new Map<string, Promise<{ url: string; mediaType: string }>>();
   private reads = 0;
   // What those reads brought back, as JSON bytes (about what Convex bills
   // for the rows they read), so the relay's I/O can be measured.
@@ -855,7 +901,7 @@ export class Relay {
     const t = this.find(threadId);
     if (!t) throw new RpcError(ErrorCode.threadNotFound, `No thread ${threadId}.`);
     if (!w) {
-      w = { threadId, runnerId: t.runnerId, rows: new Map(), bodies: new Map(), olderMore: true, loaded: false, row: null, cards: new Map(), decided: new Map(), given: new Set(), unsub: [], usedAt: this.deps.clock.now(), pictures: new Map(), pictureAsked: new Set(), pictureWait: new Map(), pictureWaited: new Set(), pictureFresh: new Map() };
+      w = { threadId, runnerId: t.runnerId, rows: new Map(), bodies: new Map(), olderMore: true, loaded: false, row: null, cards: new Map(), decided: new Map(), given: new Set(), unsub: [], usedAt: this.deps.clock.now(), pictures: new Map(), pictureAsked: new Set(), pictureWait: new Map(), pictureWaited: new Set(), pictureFresh: new Map(), toolPictures: new Set(), replyPictures: new Map(), replyAsked: new Map() };
       this.watches.set(threadId, w);
     } else if (w.runnerId !== t.runnerId) {
       // Moved to another runner while watched: its commands go to the one
@@ -884,7 +930,7 @@ export class Relay {
 
   private events(w: Watch): RelayEvent[] {
     const settled = w.stoppedAt === undefined || this.deps.clock.now() - w.stoppedAt >= SETTLE_MS;
-    const events = relayEvents(w.threadId, [...w.rows.values()], w.row, [...w.cards.values()], w.olderMore, this.runnerName(w.runnerId), settled, w.bodies, { held: w.pictures, waiting: this.waitingForPictures(w) });
+    const events = relayEvents(w.threadId, [...w.rows.values()], w.row, [...w.cards.values()], w.olderMore, this.runnerName(w.runnerId), settled, w.bodies, { held: w.pictures, waiting: this.waitingForPictures(w), tools: w.toolPictures });
     // A hole might contain the rest of this turn, or the start of the next.
     // Further tails can merge more gaps into it, so no turn marker inside
     // the whole uncertain interval is known yet. Real messages stay readable
@@ -1343,45 +1389,60 @@ export class Relay {
   }
 
   /**
-   * files.read for another runner (rpc.ts): one of its messages' pictures,
-   * by the path the relay gave the app for it, from file storage. Only a
-   * path held for a thread of that runner is answered, from the thread
-   * used last when two hold the same path; any other file stays there.
-   * And a picture in this runner's own inbox: the app draws a message it
-   * has just sent there with the paths it sent, until that runner shows it.
+   * files.read for another runner (rpc.ts): a picture of one of its threads,
+   * from file storage. One of its messages', by the path the relay gave the
+   * app for it; one a tool handed back, by the place the relay gave it
+   * (toolPicturePath), asked of that runner if it isn't up; one a reply
+   * names, by its address in the reply or its path there. Only for a thread
+   * of that runner, from the thread used last when two hold the same path;
+   * any other file stays there. And a picture in this runner's own inbox:
+   * the app draws a message it has just sent there with the paths it sent,
+   * until that runner shows it.
    */
   async readFile(runnerId: string, path: string, maxBytes?: number): Promise<RelayFile> {
     const download = this.deps.source()?.download;
-    let found: { picture: RelayPicture; at: string } | undefined;
+    const now = () => new Date(this.deps.clock.now()).toISOString();
+    let found: { picture: { url: string; mediaType: string }; at: string } | undefined;
     // By the runner the index lists each thread on now: a watch follows a move only at its next call.
     const watches = [...this.watches.values()].filter((w) => (this.find(w.threadId)?.runnerId ?? w.runnerId) === runnerId).sort((a, b) => b.usedAt - a.usedAt);
     for (const w of watches) {
       for (const [seq, list] of w.pictures) {
         const picture = list.find((p) => p.path === path);
-        if (picture) found ??= { picture, at: w.rows.get(seq)?.at ?? new Date(this.deps.clock.now()).toISOString() };
+        if (picture) found ??= { picture, at: w.rows.get(seq)?.at ?? now() };
       }
       if (found) break;
+    }
+    const tool = found ? null : TOOL_PICTURE.exec(path);
+    if (tool) {
+      const w = watches.find((x) => x.threadId === tool[1]);
+      const seq = Number(tool[2]);
+      const n = Number(tool[3]);
+      const body = w?.bodies.get(seq);
+      // Only a place the relay gave: an opened tool's, up to how many it handed back.
+      if (!w || !download || !w.toolPictures.has(seq) || body?.state !== 'text' || n < 1 || n > Math.min(body.images ?? 0, TOOL_PICTURES_MOST)) throw new RpcError(ErrorCode.other, KEPT_THERE);
+      found = { picture: await this.toolPicture(runnerId, w.threadId, seq, n - 1, path), at: w.rows.get(seq)?.at ?? now() };
     }
     if (!found) {
       // One that wasn't up when its message was given: looked for again.
       const m = NOT_UP.exec(path);
       const w = m ? watches.find((x) => x.threadId === m[1]) : undefined;
       const row = w?.rows.get(Number(m?.[2]));
-      if (!m || !w || !row) {
-        const mine = m ? undefined : this.deps.readPicture?.(path);
-        if (!mine || 'skip' in mine) throw new RpcError(ErrorCode.other, KEPT_THERE);
-        return this.fileOf(path, mine.bytes, mine.mediaType, new Date(this.deps.clock.now()).toISOString(), maxBytes);
+      if (m && w && row) {
+        try {
+          this.keepPictures(w, await this.read(PICTURES_FN, { threadId: w.threadId, seqs: [row.seq] }));
+        } catch (e) {
+          this.deps.log.debug('relay could not read a picture again', { threadId: w.threadId, error: String(e) });
+        }
+        const picture = w.pictures.get(row.seq)?.find((p) => p.n === Number(m[3]));
+        if (!picture) throw new RpcError(ErrorCode.other, `That picture didn't reach Convex from ${this.runnerName(runnerId)}, so it's only there.`);
+        found = { picture, at: row.at };
+      } else if (!m) {
+        const mine = this.deps.readPicture?.(path);
+        if (mine && !('skip' in mine)) return this.fileOf(path, mine.bytes, mine.mediaType, now(), maxBytes);
+        found = download ? await this.replyPicture(watches, path) : undefined;
       }
-      try {
-        this.keepPictures(w, await this.read(PICTURES_FN, { threadId: w.threadId, seqs: [row.seq] }));
-      } catch (e) {
-        this.deps.log.debug('relay could not read a picture again', { threadId: w.threadId, error: String(e) });
-      }
-      const picture = w.pictures.get(row.seq)?.find((p) => p.n === Number(m[3]));
-      if (!picture) throw new RpcError(ErrorCode.other, `That picture didn't reach Convex from ${this.runnerName(runnerId)}, so it's only there.`);
-      found = { picture, at: row.at };
     }
-    if (!download) throw new RpcError(ErrorCode.other, KEPT_THERE);
+    if (!found || !download) throw new RpcError(ErrorCode.other, KEPT_THERE);
     let bytes: Uint8Array;
     try {
       bytes = await download(found.picture.url);
@@ -1389,6 +1450,148 @@ export class Relay {
       throw new RpcError(ErrorCode.other, `Couldn't get that picture from Convex: ${(e as Error)?.message ?? e}`);
     }
     return this.fileOf(path, bytes, found.picture.mediaType, found.at, maxBytes);
+  }
+
+  // Whether the backend hands over tools' pictures, asked once with the
+  // first tool opened that has some. Without the read (it has no API
+  // version of its own) the tool's result goes on counting them, and the
+  // backend is asked again later.
+  private async toolPicturesOn(threadId: string, seq: number): Promise<boolean> {
+    if (!this.deps.source()?.download) return false;
+    if (this.toolPicturesKnown) return true;
+    const now = this.deps.clock.now();
+    if (now < this.toolPicturesOffUntil) return false;
+    try {
+      await this.read(TOOL_PICTURE_FN, { threadId, seq, index: 0 });
+      this.toolPicturesKnown = true;
+      return true;
+    } catch (e) {
+      if (backendRefused(e)) {
+        this.toolPicturesOffUntil = now + PICTURES_RETRY_MS;
+        this.deps.log.info("relay: the backend doesn't hand over tools' pictures yet, so other runners' tools count theirs");
+      } else {
+        this.deps.log.warn("relay could not ask about tools' pictures", { threadId, error: String(e) });
+      }
+      return false;
+    }
+  }
+
+  // One picture a tool handed back: what's held of it, or, with nothing
+  // held, that runner asked to upload it (a `picture` command, as the phone
+  // sends) and what's held once it has.
+  private toolPicture(runnerId: string, threadId: string, seq: number, index: number, path: string): Promise<{ url: string; mediaType: string }> {
+    const key = `${runnerId} ${path}`;
+    const under = this.toolPictureReads.get(key);
+    if (under) return under;
+    const held = async () => {
+      const got = (await this.read(TOOL_PICTURE_FN, { threadId, seq, index })) as { url?: unknown; mediaType?: unknown } | null;
+      return got && typeof got.url === 'string' && typeof got.mediaType === 'string' ? { url: got.url, mediaType: got.mediaType } : undefined;
+    };
+    const read = (async () => {
+      let picture: { url: string; mediaType: string } | undefined;
+      try {
+        picture = await held();
+      } catch (e) {
+        throw new RpcError(ErrorCode.other, `Couldn't ask Convex for that picture: ${(e as Error)?.message ?? e}`);
+      }
+      if (picture) return picture;
+      await this.command(runnerId, threadId, 'picture', { seq, index }, { done: true, ms: TOOL_PICTURE_ASK_MS });
+      try {
+        picture = await held();
+      } catch (e) {
+        throw new RpcError(ErrorCode.other, `Couldn't ask Convex for that picture: ${(e as Error)?.message ?? e}`);
+      }
+      if (!picture) throw new RpcError(ErrorCode.other, `${this.runnerName(runnerId)} didn't send that picture.`);
+      return picture;
+    })();
+    this.toolPictureReads.set(key, read);
+    const forget = () => {
+      if (this.toolPictureReads.get(key) === read) this.toolPictureReads.delete(key);
+    };
+    read.then(forget, forget);
+    return read;
+  }
+
+  // picturesAtSeqs' rows, onto the watch: a reply's, by the address its
+  // markdown has. Not the pasted ones (keepPictures) or pinned ones.
+  private keepReplyPictures(w: Watch, rows: unknown): void {
+    if (!Array.isArray(rows)) return;
+    for (const raw of rows as Record<string, unknown>[]) {
+      if (!isRelaySeq(raw?.seq) || raw.pinned === true || typeof raw.src !== 'string' || /^picture:\d{1,3}$/.test(raw.src)) continue;
+      if (typeof raw.path !== 'string' || typeof raw.url !== 'string' || typeof raw.mediaType !== 'string' || w.rows.get(raw.seq)?.role !== 'assistant') continue;
+      const list = w.replyPictures.get(raw.seq) ?? [];
+      if (list.some((p) => p.src === raw.src)) continue;
+      list.push({ src: raw.src, path: raw.path, url: raw.url, mediaType: raw.mediaType });
+      w.replyPictures.set(raw.seq, list);
+    }
+  }
+
+  /**
+   * A picture a reply names, for the path the app asks by: the address as
+   * the reply's markdown has it, or the file's path there. The held replies
+   * that name it are read (the newest PICTURE_SEQS of a thread), when it's
+   * first asked for and again once PICTURES_AGAIN_MS have passed; a reply
+   * that has only just come is read again until PICTURE_WAIT_MS from its
+   * sending, as that runner sends the row before it uploads the picture.
+   */
+  private async replyPicture(watches: Watch[], path: string): Promise<{ picture: ReplyPicture; at: string } | undefined> {
+    if (!path || path.length > 4096) return undefined;
+    const heldIn = (w: Watch) => {
+      // The newest reply that names it: an agent that writes over a file shows the latest.
+      for (const seq of [...w.replyPictures.keys()].sort((a, b) => b - a)) {
+        const picture = w.replyPictures.get(seq)!.find((p) => p.src === path || p.path === path);
+        if (picture) return { picture, at: w.rows.get(seq)?.at ?? new Date(this.deps.clock.now()).toISOString() };
+      }
+      return undefined;
+    };
+    for (const w of watches) {
+      const held = heldIn(w);
+      if (held) return held;
+      const naming = [...w.rows.values()].filter((r) => r.role === 'assistant' && r.text.includes('![') && r.text.includes(path)).sort((a, b) => b.seq - a.seq).slice(0, PICTURE_SEQS);
+      if (!naming.length) continue;
+      // Until when the newest of them may still be uploading.
+      const wait = (r: RelayRow) => {
+        const sent = Date.parse(r.at);
+        return Math.min(this.deps.clock.now(), Number.isFinite(sent) ? sent : this.deps.clock.now()) + PICTURE_WAIT_MS;
+      };
+      for (;;) {
+        while (w.replyRead) await w.replyRead.catch(() => {});
+        const again = heldIn(w);
+        if (again) return again;
+        const now = this.deps.clock.now();
+        if (!this.picturesOn() || now < (w.pictureAgainAt ?? 0)) break;
+        const fresh = naming.filter((r) => wait(r) > now);
+        // Several pictures of one reply asked for together share its reads.
+        const due = naming.filter((r) => now - (w.replyAsked.get(r.seq) ?? -Infinity) >= (fresh.includes(r) ? REPLY_POLL_MS : PICTURES_AGAIN_MS));
+        if (due.length) {
+          const read = (async () => {
+            try {
+              this.keepReplyPictures(w, await this.read(PICTURES_FN, { threadId: w.threadId, seqs: due.map((r) => r.seq).sort((a, b) => a - b) }));
+              for (const r of due) w.replyAsked.set(r.seq, now);
+            } catch (e) {
+              if (backendRefused(e)) {
+                this.picturesOffUntil = now + PICTURES_RETRY_MS;
+                this.deps.log.info("relay: the backend has no pictures read yet, so other runners' replies show without their pictures");
+              } else {
+                w.pictureAgainAt = now + PICTURES_AGAIN_MS;
+                this.deps.log.warn("relay could not read a reply's pictures", { threadId: w.threadId, error: String(e) });
+              }
+            }
+          })();
+          w.replyRead = read;
+          try {
+            await read;
+          } finally {
+            if (w.replyRead === read) w.replyRead = undefined;
+          }
+          const got = heldIn(w);
+          if (got) return got;
+        }
+        if (!fresh.length || !this.watches.has(w.threadId)) break;
+        await new Promise<void>((resolve) => this.deps.clock.setTimeout(resolve, REPLY_POLL_MS));
+      }
+    }
+    return undefined;
   }
 
   // files.read's answer: at most `maxBytes` of it, as files.ts cuts a file.
@@ -1486,6 +1689,7 @@ export class Relay {
     // Nothing yet can mean it hasn't gone up yet, and with no `ok` it hasn't answered
     // yet (a tool still running in the background): asked again next time.
     if (body && (body.state !== 'text' || body.ok !== undefined)) {
+      if (body.state === 'text' && body.images && (await this.toolPicturesOn(w.threadId, seq))) w.toolPictures.add(seq);
       w.bodies.set(seq, body);
       this.emit(w);
     }

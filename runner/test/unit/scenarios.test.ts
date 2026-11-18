@@ -123,3 +123,58 @@ test("another Mac gets a message's pictures, and each file from the backend", as
   // Nothing else on that Mac is read this way.
   await assert.rejects(relay.readFile(runnerId, path.join(dir, 'other.png')), /kept there for now/);
 });
+
+// 19 Nov 2026: a screenshot a tool took in a thread on one Mac, and a
+// picture in the agent's reply there, showed on the other Mac as a line
+// counting pictures and as a link. The tool's result now has a place for
+// each picture, fetched from that runner when the app asks (as the phone
+// asks: a `picture` command, held for a day), and the reply's picture
+// comes from what that runner uploads for the phone, by the address the
+// reply names.
+test("another Mac gets a tool's pictures when it asks, and a reply's from the backend", async () => {
+  const dir = tmpDir('tb-scenario-');
+  const png = makePng(8, 5);
+  const chart = path.join(dir, 'chart.png');
+  fs.writeFileSync(chart, png);
+  const shot = path.join(dir, 'shot.png');
+  fs.writeFileSync(shot, png);
+  const said = `Here it is: ![the chart](${chart})`;
+  const { relay, relayEvents, runnerId, refused, threadId, post, upload } = await threeWays(
+    (p) => {
+      p.tool('screencapture shot.png', 'saved', [{ path: shot, mediaType: 'image/png' }]);
+      p.say(said);
+      p.endTurn({ needs: 'nothing' });
+    },
+    { full: true },
+  );
+  assert.deepEqual(refused, []);
+
+  // The reply is as on the Mac that has the thread, and its picture answers by the address in it.
+  assert.equal(relayEvents.find((e) => e.type === 'assistant.text' && String(e.text).includes('chart'))!.text, said);
+  const drawn = (await relay.readFile(runnerId, chart)) as { data: string; mediaType: string; truncated: boolean };
+  assert.deepEqual([Buffer.from(drawn.data, 'base64'), drawn.mediaType, drawn.truncated], [Buffer.from(png), 'image/png', false]);
+
+  // The tool, opened: its result has a place for its picture.
+  const call = relayEvents.find((e) => e.type === 'tool.call' && String(e.title).includes('screencapture shot.png'))!;
+  const result = relayEvents.find((e) => e.type === 'tool.result' && e.itemId === call.itemId)!;
+  const seq = result.heldBack.seq as number;
+  assert.deepEqual(await relay.call(threadId, 'threads.heldBody', { threadId, seq }), { state: 'text' });
+  const { events } = (await relay.call(threadId, 'threads.events', { threadId })) as { events: Record<string, any>[] };
+  const filled = events.filter((e) => e.type === 'tool.result' && e.itemId === call.itemId).at(-1)!;
+  assert.equal(filled.text, 'saved');
+  assert.deepEqual(filled.images, [{ path: `threadbear-relay:${threadId}/${seq}/Tool picture 1`, mediaType: 'image/png' }]);
+  const place = filled.images[0].path as string;
+
+  // Asked for, it's queued for that runner as the phone's is. Nothing listens
+  // for the command's end here, so this first read says it hasn't come.
+  await assert.rejects(relay.readFile(runnerId, place), /didn't send that picture/);
+  const pending = (await post('query', 'sync:pendingCommands', { key: 'owner-key', runnerId })) as { commandId: string; kind: string; threadId: string; args: Record<string, unknown> }[];
+  assert.deepEqual(pending.map((c) => [c.kind, c.threadId, c.args.seq, c.args.index]), [['picture', threadId, seq, 0]]);
+  // That runner's part (sync.ts sendHeldPicture, full-sync.test.ts): take it, upload the picture, finish.
+  assert.equal(await post('mutation', 'sync:takeCommand', { key: 'owner-key', commandId: pending[0]!.commandId }), true);
+  const storageId = await upload('', new Uint8Array(png));
+  await post('mutation', 'sync:addHeldPicture', { key: 'owner-key', threadId, seq, index: 0, storageId, mediaType: 'image/png', width: 8, height: 5 });
+  const read = (await relay.readFile(runnerId, place)) as { data: string; mediaType: string; truncated: boolean };
+  assert.deepEqual([Buffer.from(read.data, 'base64'), read.mediaType, read.truncated], [Buffer.from(png), 'image/png', false]);
+  assert.deepEqual(refused, []);
+});

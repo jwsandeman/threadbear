@@ -75,9 +75,11 @@ export type Play = {
   earlyStop(): void;
   /** The thread's login ran out and the runner moved it to another (runner/pools.ts moveLogin). */
   loginMoved(): void;
+  /** The agent runs a command, which hands back this text and these pictures (paths of real files). */
+  tool(command: string, text: string, images?: ImageRef[]): void;
 };
 
-export async function threeWays(play: (p: Play) => void | Promise<void>) {
+export async function threeWays(play: (p: Play) => void | Promise<void>, opts: { full?: boolean } = {}) {
   process.env.RUNNER_KEY = OWNER;
   delete process.env.RUNNER_KEY_NEXT;
   process.env.CONVEX_SITE_URL = 'https://site.example';
@@ -117,7 +119,7 @@ export async function threeWays(play: (p: Play) => void | Promise<void>) {
     if (!bytes) throw new Error(`routes: nothing stored at ${url}`);
     return bytes;
   };
-  const { h, sync, ids } = await playInto(post as never, { key: OWNER, runnerId: RUNNER, name: 'mac-mini' }, [play], upload);
+  const { h, sync, ids } = await playInto(post as never, { key: OWNER, runnerId: RUNNER, name: 'mac-mini' }, [play], upload, opts);
   const thread = { id: ids[0]! };
 
   const id = thread.id;
@@ -160,7 +162,7 @@ export async function threeWays(play: (p: Play) => void | Promise<void>) {
   };
   const views = { here: here(), relay: await viaRelay(), phone: await viaPhone() };
   await sync.stop();
-  return { views, refused, backend: b, threadId: id, runnerId: RUNNER, relay, relayEvents };
+  return { views, refused, backend: b, threadId: id, runnerId: RUNNER, relay, relayEvents, post, upload, home: h.cfg.home };
 }
 
 // Without a subscriber of its own a ConvexSync opens a real Convex client for its url, and
@@ -176,9 +178,9 @@ const NO_SUBSCRIBER = { subscribe: () => () => undefined, close: () => undefined
  * in-memory backend here, or a real one (scripts/parity-seed.ts). Returns
  * the threads' ids in order; the caller stops `sync`.
  */
-export async function playInto(post: Post, runner: { key: string; runnerId: string; name: string }, plays: ((p: Play) => void | Promise<void>)[], upload: Upload = async () => 'st') {
+export async function playInto(post: Post, runner: { key: string; runnerId: string; name: string }, plays: ((p: Play) => void | Promise<void>)[], upload: Upload = async () => 'st', opts: { full?: boolean } = {}) {
   const h = makeHarness();
-  const sync = new ConvexSync({ config: { enabled: true, url: 'https://x.convex.cloud', name: runner.name, runnerId: runner.runnerId }, key: runner.key, home: h.cfg.home, runner: h.runner, version: '0.1.0+test', release: 'rel1', startedAt: '2026-10-27T00:00:00.000Z', clock: h.clock, log: nullLogger, post, upload, subscriber: NO_SUBSCRIBER } as never);
+  const sync = new ConvexSync({ config: { enabled: true, url: 'https://x.convex.cloud', name: runner.name, runnerId: runner.runnerId, ...(opts.full ? { full: true } : {}) }, key: runner.key, home: h.cfg.home, runner: h.runner, version: '0.1.0+test', release: 'rel1', startedAt: '2026-10-27T00:00:00.000Z', clock: h.clock, log: nullLogger, post, upload, subscriber: NO_SUBSCRIBER } as never);
   const ids: string[] = [];
   // Running before the threads play, as on a real runner: a message's
   // pasted pictures go up only as it's sent, never from the log afterwards
@@ -209,6 +211,11 @@ export async function playInto(post: Post, runner: { key: string; runnerId: stri
         s.out({ kind: 'event', event: { type: 'tool.result', itemId: id, ok: true, text: 'ok', truncated: false, images: [] } });
         const answered = [...(h.runner.mustGet(thread.id).rt.turn?.messages ?? [])];
         s.result('completed', undefined, undefined, answerAll ? { answered } : {});
+      },
+      tool: (command, text, images = []) => {
+        const id = `t${++n}`;
+        s.out({ kind: 'event', event: { type: 'tool.call', itemId: id, name: 'Bash', kind: 'command', title: command, input: { command } } });
+        s.out({ kind: 'event', event: { type: 'tool.result', itemId: id, ok: true, text, truncated: false, images } });
       },
       fail: (error) => s.result('failed', undefined, error),
       earlyStop: () => {

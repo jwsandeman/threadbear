@@ -84,7 +84,7 @@ test('a tail past what is held asks for the gap; one that overlaps just merges',
 });
 
 type Call = { kind: string; fn: string; args: Record<string, unknown> };
-type HarnessOpts = { paged?: boolean; online?: boolean; row?: () => RelayThreadRow & { share?: unknown }; apiVersion?: number; queueFails?: boolean; uploadMs?: number; rows?: RelayRow[]; readMessages?: (args: Record<string, unknown>) => unknown; pictures?: (args: Record<string, unknown>) => unknown };
+type HarnessOpts = { paged?: boolean; online?: boolean; row?: () => RelayThreadRow & { share?: unknown }; apiVersion?: number; queueFails?: boolean; uploadMs?: number; rows?: RelayRow[]; readMessages?: (args: Record<string, unknown>) => unknown; pictures?: (args: Record<string, unknown>) => unknown; body?: (args: Record<string, unknown>) => unknown; toolPicture?: (args: Record<string, unknown>) => unknown };
 function harness(opts: HarnessOpts = {}) {
   const calls: Call[] = [];
   const subs = new Map<string, { args: Record<string, unknown>; onUpdate: (v: unknown) => void; closed: boolean }[]>();
@@ -113,6 +113,8 @@ function harness(opts: HarnessOpts = {}) {
       post: async (kind, fn, args) => {
         calls.push({ kind, fn, args });
         if (fn === 'relay:picturesAtSeqs') return opts.pictures?.(args) ?? [];
+        if (fn === 'sync:remoteBody') return opts.body?.(args) ?? null;
+        if (fn === 'relay:toolPictureAt') return opts.toolPicture?.(args) ?? null;
         if (fn === 'relay:remoteThread') return opts.row?.() ?? idle;
         if (fn === 'relay:remoteMessages' && opts.readMessages) return opts.readMessages(args);
         if (fn === 'relay:remoteMessages' && opts.paged) {
@@ -1393,4 +1395,234 @@ test('the same path in two threads of one runner answers from the thread read la
   await h.relay.call('second', 'threads.events', { threadId: 'second' });
   const read = (await h.relay.readFile('mac-mini', '/Users/b/inbox/same.png')) as { data: string };
   assert.equal(Buffer.from(read.data, 'base64').toString(), 'bytes at https://files.example/second');
+});
+
+// A tool's pictures on another runner's thread (19 Nov 2026): the result of
+// an opened tool said only how many were kept there. The phone already asks
+// that runner for one at a time (a `picture` command, held for a day); the
+// relay gives the app a place for each, and asks the same way when the app
+// reads one (files.read with that runner's id).
+const toolPath = (seq: number, n: number) => `threadbear-relay:${T}/${seq}/Tool picture ${n}`;
+const shots = (images: number) => ({ state: 'text' as const, text: 'took them', ok: true, images });
+const toolCalls = (h: ReturnType<typeof harness>) => h.calls.filter((c) => c.fn === 'relay:toolPictureAt');
+const pictureCommands = (h: ReturnType<typeof harness>) => h.calls.filter((c) => c.fn === 'relay:queueCommand' && c.args.kind === 'picture');
+const tick = () => new Promise((r) => setImmediate(r));
+
+test("an opened tool's pictures each get a place, in the result's images", () => {
+  const ev = relayEvents(T, rows, idle, [], false, 'mac-mini', true, new Map([[14, shots(2)]]), { held: new Map(), tools: new Set([14]) });
+  const result = ev.find((e) => e.seq === 14 * SCALE + 6) as unknown as { text: string; images: unknown[] };
+  assert.deepEqual(result.images, [{ path: toolPath(14, 1), mediaType: 'image/png' }, { path: toolPath(14, 2), mediaType: 'image/png' }]);
+  assert.equal(result.text, 'took them');
+  // More than thirty: the rest are counted, as all of them were before.
+  const many = relayEvents(T, rows, idle, [], false, 'mac-mini', true, new Map([[14, shots(32)]]), { held: new Map(), tools: new Set([14]) });
+  const most = many.find((e) => e.seq === 14 * SCALE + 6) as unknown as { text: string; images: unknown[] };
+  assert.equal(most.images.length, 30);
+  assert.match(most.text, /^took them\n\n2 more pictures are kept on mac-mini\.$/);
+  // A tool the relay hasn't offered pictures for says how many, as before.
+  const plain = relayEvents(T, rows, idle, [], false, 'mac-mini', true, new Map([[14, shots(2)]]), { held: new Map(), tools: new Set([5]) });
+  const kept = plain.find((e) => e.seq === 14 * SCALE + 6) as unknown as { text: string; images: unknown[] };
+  assert.deepEqual(kept.images, []);
+  assert.match(kept.text, /2 pictures are kept on mac-mini\.$/);
+});
+
+test('opening a tool that handed back pictures shows a place for each, once the backend is known to hand them over', async () => {
+  const h = harness({ body: () => shots(2) });
+  await h.relay.call(T, 'threads.events', { threadId: T });
+  h.subscribed.add(T);
+  await h.relay.call(T, 'threads.subscribe', { threadId: T, afterSeq: 14 * SCALE + 7 });
+  assert.deepEqual(await h.relay.call(T, 'threads.heldBody', { threadId: T, seq: 14 }), { state: 'text' });
+  const result = publishedEvents(h).find((e) => e.seq === 14 * SCALE + 6)!;
+  assert.deepEqual(result.images, [{ path: toolPath(14, 1), mediaType: 'image/png' }, { path: toolPath(14, 2), mediaType: 'image/png' }]);
+  // Asked once whether the backend has the read; nothing is uploaded for it.
+  assert.deepEqual(toolCalls(h).map((c) => c.args), [{ key: 'owner', threadId: T, seq: 14, index: 0 }]);
+  assert.equal(pictureCommands(h).length, 0);
+  // A tool with no pictures costs no such read.
+  const none = harness({ body: () => ({ state: 'text', text: 'ok', ok: true }) });
+  await none.relay.call(T, 'threads.events', { threadId: T });
+  await none.relay.call(T, 'threads.heldBody', { threadId: T, seq: 14 });
+  assert.equal(toolCalls(none).length, 0);
+});
+
+test('a backend without the tool picture read keeps the line counting them, and is asked again ten minutes on', async () => {
+  let has = false;
+  const h = harness({
+    body: () => shots(1),
+    toolPicture: () => {
+      if (!has) throw new Error('[Request ID: abc] Server Error');
+      return null;
+    },
+  });
+  await h.relay.call(T, 'threads.events', { threadId: T });
+  h.subscribed.add(T);
+  await h.relay.call(T, 'threads.subscribe', { threadId: T, afterSeq: 14 * SCALE + 7 });
+  await h.relay.call(T, 'threads.heldBody', { threadId: T, seq: 14 });
+  const result = publishedEvents(h).find((e) => e.seq === 14 * SCALE + 6)!;
+  assert.deepEqual(result.images, []);
+  assert.match(String(result.text), /1 picture is kept on mac-mini\.$/);
+  await assert.rejects(h.relay.readFile('mac-mini', toolPath(14, 1)), /kept there for now/);
+  // Another tool opened meanwhile doesn't ask again.
+  await h.relay.call(T, 'threads.heldBody', { threadId: T, seq: 5 });
+  assert.equal(toolCalls(h).length, 1);
+  // Ten minutes on, with the backend updated, the next tool opened gets its places.
+  has = true;
+  h.clock.advance(10 * 60_000 + 1);
+  h.remote.threads.push({ ...h.remote.threads[0]!, threadId: 'second' });
+  await h.relay.call('second', 'threads.events', { threadId: 'second' });
+  h.subscribed.add('second');
+  await h.relay.call('second', 'threads.subscribe', { threadId: 'second', afterSeq: 14 * SCALE + 7 });
+  await h.relay.call('second', 'threads.heldBody', { threadId: 'second', seq: 14 });
+  const later = publishedEvents(h).filter((e) => e.seq === 14 * SCALE + 6).at(-1)!;
+  assert.equal(later.images!.length, 1);
+});
+
+test("reading a tool's picture asks its runner for that one, and answers with it once it's up", async () => {
+  let up: unknown = null;
+  const h = harness({ body: () => shots(2), toolPicture: (a) => (a.index === 1 ? up : null) });
+  await h.relay.call(T, 'threads.events', { threadId: T });
+  await h.relay.call(T, 'threads.heldBody', { threadId: T, seq: 14 });
+  const reading = h.relay.readFile('mac-mini', toolPath(14, 2));
+  // Two tiles of the same picture ask once.
+  const again = h.relay.readFile('mac-mini', toolPath(14, 2));
+  await patiently(() => pictureCommands(h).length === 1);
+  assert.deepEqual(pictureCommands(h)[0]!.args, { key: 'owner', runnerId: 'mac-mini', threadId: T, kind: 'picture', args: { seq: 14, index: 1 } });
+  // That runner uploads it and finishes the command.
+  up = { url: 'https://files.example/shot-2', mediaType: 'image/jpeg', width: 800, height: 600 };
+  h.subs.get('relay:commandState')![0]!.onUpdate({ state: 'taken' });
+  h.subs.get('relay:commandState')![0]!.onUpdate({ state: 'done' });
+  const read = (await reading) as { path: string; size: number; modifiedAt: string; mediaType: string; data: string; truncated: boolean };
+  const bytes = 'bytes at https://files.example/shot-2';
+  assert.deepEqual(read, { path: toolPath(14, 2), size: bytes.length, modifiedAt: rows[4]!.at, mediaType: 'image/jpeg', data: Buffer.from(bytes).toString('base64'), truncated: false });
+  assert.deepEqual(await again, read);
+  assert.equal(pictureCommands(h).length, 1);
+  // Held for a day there: asked for again, nothing more is queued.
+  await h.relay.readFile('mac-mini', toolPath(14, 2));
+  assert.equal(pictureCommands(h).length, 1);
+});
+
+test("a tool's picture that runner won't hand over says why, and one that never comes says so", async () => {
+  const h = harness({ body: () => shots(1) });
+  await h.relay.call(T, 'threads.events', { threadId: T });
+  await h.relay.call(T, 'threads.heldBody', { threadId: T, seq: 14 });
+  const refused = h.relay.readFile('mac-mini', toolPath(14, 1));
+  await patiently(() => (h.subs.get('relay:commandState')?.length ?? 0) === 1);
+  h.subs.get('relay:commandState')![0]!.onUpdate({ state: 'failed', note: 'Full sync is off on this runner.' });
+  await assert.rejects(refused, /Full sync is off on this runner\./);
+  // Done, yet nothing is held (pruned between the two): said, not drawn as nothing.
+  const gone = h.relay.readFile('mac-mini', toolPath(14, 1));
+  await patiently(() => (h.subs.get('relay:commandState')?.length ?? 0) === 2);
+  h.subs.get('relay:commandState')![1]!.onUpdate({ state: 'done' });
+  await assert.rejects(gone, /mac-mini didn't send that picture/);
+  // No answer in thirty seconds.
+  const slow = h.relay.readFile('mac-mini', toolPath(14, 1));
+  await patiently(() => (h.subs.get('relay:commandState')?.length ?? 0) === 3);
+  h.clock.advance(30_000);
+  await assert.rejects(slow, /hasn't answered yet/);
+  // That runner offline: said at once, nothing queued.
+  h.remote.runners[0]!.online = false;
+  await assert.rejects(h.relay.readFile('mac-mini', toolPath(14, 1)), /offline/);
+  assert.equal(pictureCommands(h).length, 3);
+});
+
+test("only a picture of a tool that was opened is asked for: no other tool's, thread's or runner's", async () => {
+  const h = harness({ body: (a) => (a.seq === 14 ? shots(2) : null) });
+  await h.relay.call(T, 'threads.events', { threadId: T });
+  // Before the tool is opened.
+  await assert.rejects(h.relay.readFile('mac-mini', toolPath(14, 1)), /kept there for now/);
+  await h.relay.call(T, 'threads.heldBody', { threadId: T, seq: 14 });
+  for (const path of [toolPath(14, 3), toolPath(14, 0), toolPath(5, 1), `threadbear-relay:not-a-thread/14/Tool picture 1`, `${toolPath(14, 1)}/x`]) {
+    await assert.rejects(h.relay.readFile('mac-mini', path), /kept there for now/, path);
+  }
+  await assert.rejects(h.relay.readFile('cloud', toolPath(14, 1)), /kept there for now/);
+  assert.equal(pictureCommands(h).length, 0);
+});
+
+// Pictures in an agent's reply there (`![alt](/path/chart.png)`): that
+// runner uploads them for the phone and the website. The reply's event is
+// unchanged; the app asks for the address the markdown names.
+const replyRows = (age: number): RelayRow[] => [
+  { seq: 3, role: 'user', text: 'Chart it', turn: 'aaaa1111', at: ago(age + 10) },
+  { seq: 5, role: 'assistant', text: 'Here: ![the chart](/Users/b/x/chart.png) and ![home](~/shots/a.png) and ![web](https://example.com/y.png)', summary: true, turn: 'aaaa1111', at: ago(age) },
+  { seq: 7, role: 'assistant', text: 'No picture in this one.', turn: 'aaaa1111', at: ago(age) },
+];
+const chart = { seq: 5, path: '/Users/b/x/chart.png', src: '/Users/b/x/chart.png', url: 'https://files.example/chart', mediaType: 'image/png', width: 400, height: 300 };
+const home = { seq: 5, path: '/Users/b/shots/a.png', src: '~/shots/a.png', url: 'https://files.example/a', mediaType: 'image/png' };
+
+test("a reply's picture is read when it's asked for, by the address the reply names or its path there", async () => {
+  const h = harness({ rows: replyRows(3600), pictures: () => [chart, home, { seq: 5, path: '/Users/b/pinned.png', pinned: true, url: 'https://files.example/pinned', mediaType: 'image/png' }] });
+  const page = (await h.relay.call(T, 'threads.events', { threadId: T })) as { events: Shown[] };
+  // The reply is as that runner sent it, and reading the thread reads no pictures.
+  assert.equal(page.events.find((e) => e.type === 'assistant.text')!.text, replyRows(3600)[1]!.text);
+  assert.equal(pictureCalls(h).length, 0);
+  const read = (await h.relay.readFile('mac-mini', '/Users/b/x/chart.png')) as { path: string; size: number; modifiedAt: string; mediaType: string; data: string; truncated: boolean };
+  const bytes = 'bytes at https://files.example/chart';
+  assert.deepEqual(read, { path: '/Users/b/x/chart.png', size: bytes.length, modifiedAt: ago(3600), mediaType: 'image/png', data: Buffer.from(bytes).toString('base64'), truncated: false });
+  // Only the reply that names it was read.
+  assert.deepEqual(pictureCalls(h).map((c) => c.args), [{ key: 'owner', threadId: T, seqs: [5] }]);
+  // As written with ~, and by the path it stands for.
+  for (const path of ['~/shots/a.png', '/Users/b/shots/a.png']) {
+    const other = (await h.relay.readFile('mac-mini', path)) as { data: string };
+    assert.equal(Buffer.from(other.data, 'base64').toString(), 'bytes at https://files.example/a', path);
+  }
+  assert.equal(pictureCalls(h).length, 1, 'held from the one read');
+  // A pinned picture, a web address and a file no reply names stay there.
+  for (const path of ['/Users/b/pinned.png', 'https://example.com/y.png', '/Users/b/.ssh/id_ed25519']) await assert.rejects(h.relay.readFile('mac-mini', path), /kept there for now/, path);
+  await assert.rejects(h.relay.readFile('cloud', '/Users/b/x/chart.png'), /kept there for now/);
+});
+
+test("a reply's picture that never went up is asked for once, then again half a minute on", async () => {
+  let up: unknown[] = [];
+  const h = harness({ rows: replyRows(3600), pictures: () => up });
+  await h.relay.call(T, 'threads.events', { threadId: T });
+  await assert.rejects(h.relay.readFile('mac-mini', '/Users/b/x/chart.png'), /kept there for now/);
+  await assert.rejects(h.relay.readFile('mac-mini', '/Users/b/x/chart.png'), /kept there for now/);
+  assert.equal(pictureCalls(h).length, 1);
+  up = [chart];
+  h.clock.advance(30_001);
+  const read = (await h.relay.readFile('mac-mini', '/Users/b/x/chart.png')) as { data: string };
+  assert.equal(Buffer.from(read.data, 'base64').toString(), 'bytes at https://files.example/chart');
+  assert.equal(pictureCalls(h).length, 2);
+});
+
+test("a reply that has just come is read again until its picture is up, for twenty seconds", async () => {
+  let up: unknown[] = [];
+  const h = harness({ rows: replyRows(5), pictures: () => up });
+  await h.relay.call(T, 'threads.events', { threadId: T });
+  const reading = h.relay.readFile('mac-mini', '/Users/b/x/chart.png');
+  await patiently(() => pictureCalls(h).length === 1);
+  await tick();
+  h.clock.advance(2000);
+  await patiently(() => pictureCalls(h).length === 2);
+  up = [chart];
+  await tick();
+  h.clock.advance(2000);
+  const read = (await reading) as { data: string };
+  assert.equal(Buffer.from(read.data, 'base64').toString(), 'bytes at https://files.example/chart');
+  assert.equal(pictureCalls(h).length, 3);
+  // Its other picture, asked for at the same moment, shares the read.
+  await assert.rejects(Promise.race([h.relay.readFile('mac-mini', '~/shots/a.png'), tick().then(() => Promise.reject(new Error('still waiting')))]), /still waiting/);
+  assert.equal(pictureCalls(h).length, 3);
+  // One that never comes gives up when the twenty seconds from its sending end.
+  const never = h.relay.readFile('mac-mini', '~/shots/a.png');
+  let failed: unknown;
+  never.catch((e) => (failed = e));
+  for (let i = 0; i < 12 && !failed; i++) {
+    await tick();
+    await tick();
+    h.clock.advance(2000);
+  }
+  await assert.rejects(never, /kept there for now/);
+});
+
+test('a backend without the pictures read answers a reply picture as kept there, and is not asked again for ten minutes', async () => {
+  const h = harness({
+    rows: replyRows(3600),
+    pictures: () => {
+      throw new Error('[Request ID: abc] Server Error');
+    },
+  });
+  await h.relay.call(T, 'threads.events', { threadId: T });
+  await assert.rejects(h.relay.readFile('mac-mini', '/Users/b/x/chart.png'), /kept there for now/);
+  h.clock.advance(60_000);
+  await assert.rejects(h.relay.readFile('mac-mini', '/Users/b/x/chart.png'), /kept there for now/);
+  assert.equal(pictureCalls(h).length, 1);
 });

@@ -171,6 +171,24 @@ export const picturesAtSeqs = query({
   },
 });
 
+/**
+ * One picture a tool handed back on another runner's thread, once that
+ * runner has uploaded it for a `picture` command (heldPictures, there for a
+ * day), with its file's URL. Null until then. Owner only.
+ */
+export const toolPictureAt = query({
+  args: { key: v.string(), threadId: v.string(), seq: v.number(), index: v.number() },
+  returns: v.union(v.null(), v.object({ url: v.string(), mediaType: v.string(), width: v.optional(v.number()), height: v.optional(v.number()) })),
+  handler: async (ctx, { key, threadId, seq, index }) => {
+    await runnerAuth(ctx, key, 'toolPictureAt');
+    if (!isSeq(seq) || !Number.isSafeInteger(index) || index < 0 || index > 100) return null;
+    const img = await ctx.db.query('heldPictures').withIndex('by_thread_seq', (q) => q.eq('threadId', threadId).eq('seq', seq).eq('index', index)).first();
+    const url = img ? await ctx.storage.getUrl(img.storageId) : null;
+    if (!img || !url) return null;
+    return { url, mediaType: img.mediaType, ...(img.width ? { width: img.width } : {}), ...(img.height ? { height: img.height } : {}) };
+  },
+});
+
 /** One thread's row (its state, open approval and card), live while it's open. Null once it's gone. */
 export const remoteThread = query({
   args: { key: v.string(), threadId: v.string() },
@@ -192,7 +210,9 @@ export const remoteThread = query({
 const PERMISSION_MODES = ['full', 'ask', 'auto', 'plan'] as const;
 // press and slashCommands (API 68): a reply button and the slash command
 // list, as the phone sends them (phone.ts press, slashCommands).
-const KINDS = ['send', 'respond', 'update', 'create', 'interrupt', 'call', 'share', 'press', 'slashCommands'] as const;
+// picture: one picture a tool handed back, as the phone asks for it
+// (phone.ts requestPicture); toolPictureAt below reads it once it's up.
+const KINDS = ['send', 'respond', 'update', 'create', 'interrupt', 'call', 'share', 'press', 'slashCommands', 'picture'] as const;
 type Kind = (typeof KINDS)[number];
 // Methods a `call` may run on the other runner, and nothing else: answers
 // with no file contents or tool output in them (step 4 brings those, scrubbed).
@@ -319,6 +339,11 @@ export function commandArgs(kind: Kind, raw: unknown): Record<string, unknown> {
       break;
     case 'slashCommands':
       out = {};
+      break;
+    case 'picture':
+      // The tool's row and which of its pictures, as phone:requestPicture checks them.
+      if (!Number.isSafeInteger(a.seq) || !Number.isSafeInteger(a.index) || (a.seq as number) < 1 || (a.index as number) < 0 || (a.index as number) > 100) throw bad('no such picture');
+      out = { seq: a.seq, index: a.index };
       break;
   }
   if (docBytes(out) > ARGS_MAX_BYTES) throw bad('too long');
